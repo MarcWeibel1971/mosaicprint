@@ -92,7 +92,7 @@ app.get("*", (_req, res) => {
 });
 
 // Start server immediately (Railway healthcheck needs the port open quickly)
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MosaicPrint] Server running on port ${PORT}`);
   console.log(`[MosaicPrint] Static files from: ${distPath}`);
   console.log(`[MosaicPrint] DB URL set: ${!!process.env.DATABASE_URL}`);
