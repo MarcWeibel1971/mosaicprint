@@ -118,6 +118,25 @@ export const appRouter = router({
     return db.getMosaicImagesForMatching();
   }),
 
+  // Admin: Tile stats (total + labIndexed)
+  getTileStats: publicProcedure.query(async () => {
+    const pool = db.getPool();
+    const totalRes = await pool.query("SELECT COUNT(*) FROM mosaic_images");
+    const labRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE avg_l IS NOT NULL");
+    const total = Number(totalRes.rows[0].count);
+    const labIndexed = Number(labRes.rows[0].count);
+    return { total, labIndexed, notIndexed: total - labIndexed };
+  }),
+
+  // Admin: API key status
+  getApiKeyStatus: publicProcedure.query(() => {
+    return {
+      stripe: !!process.env.STRIPE_SECRET_KEY,
+      unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
+      pexels: !!process.env.PEXELS_API_KEY,
+    };
+  }),
+
   // Admin: DB stats
   getDbStats: publicProcedure.query(async () => {
     const count = await db.getMosaicImageCount();

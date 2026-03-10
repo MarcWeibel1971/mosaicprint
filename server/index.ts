@@ -1,4 +1,8 @@
-import "dotenv/config";
+// dotenv only needed locally - Railway injects env vars directly into process.env
+if (!process.env.RAILWAY_ENVIRONMENT) {
+  const { config } = await import("dotenv");
+  config();
+}
 import express from "express";
 import cors from "cors";
 import path from "path";
