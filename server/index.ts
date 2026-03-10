@@ -75,7 +75,12 @@ app.get("/api/health", async (_req, res) => {
 app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
 // Serve static frontend build
-const distPath = path.join(__dirname, "../client/dist");
+// When running via tsx (dev): __dirname = .../server -> ../client/dist
+// When running via node dist/server/index.js (prod): __dirname = .../dist/server -> ../../client/dist
+const isCompiledBuild = __dirname.includes("/dist/server") || __dirname.includes("\\dist\\server");
+const distPath = isCompiledBuild
+  ? path.join(__dirname, "../../client/dist")
+  : path.join(__dirname, "../client/dist");
 app.use(express.static(distPath));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
@@ -86,6 +91,7 @@ db.ensureSchema()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`[MosaicPrint] Server running on port ${PORT}`);
+      console.log(`[MosaicPrint] Static files from: ${distPath}`);
       console.log(`[MosaicPrint] DB: ${process.env.DATABASE_URL ? "PostgreSQL connected" : "No DB URL set"}`);
     });
   })

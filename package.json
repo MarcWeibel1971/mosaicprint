@@ -9,10 +9,11 @@
     "dev:client": "vite --config client/vite.config.ts",
     "build": "pnpm build:client",
     "build:client": "vite build --config client/vite.config.ts",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "node dist/server/index.js",
     "db:migrate": "node scripts/migrate.mjs",
     "db:import-tiles": "node scripts/import-tiles-from-tidb.mjs",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "build:server": "esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist/server"
   },
   "dependencies": {
     "@trpc/client": "11.7.2",
@@ -44,6 +45,7 @@
     "autoprefixer": "^10.4.19",
     "concurrently": "^9.0.0",
     "drizzle-kit": "^0.31.0",
+    "esbuild": "^0.27.3",
     "mysql2": "^3.11.0",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",

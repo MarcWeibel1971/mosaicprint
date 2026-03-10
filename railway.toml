@@ -1,10 +1,10 @@
 [build]
 builder = "nixpacks"
-buildCommand = "pnpm install && pnpm build:client"
+buildCommand = "pnpm install && pnpm build:client && pnpm build:server"
 
 [deploy]
-startCommand = "pnpm start"
+startCommand = "node dist/server/index.js"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
