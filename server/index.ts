@@ -65,10 +65,15 @@ app.get("/api/tile/:id", async (req, res) => {
   }
 });
 
-// Health check
+// Health check - always responds, even if DB is not ready
 app.get("/api/health", async (_req, res) => {
-  const count = await db.getMosaicImageCount().catch(() => 0);
-  res.json({ ok: true, tiles: count });
+  try {
+    const count = await db.getMosaicImageCount();
+    res.json({ ok: true, tiles: count, db: "connected" });
+  } catch (e) {
+    // Still return 200 so Railway healthcheck passes even if DB is temporarily unavailable
+    res.json({ ok: true, tiles: 0, db: "unavailable", error: String(e) });
+  }
 });
 
 // tRPC API (for Admin panel)
@@ -86,16 +91,18 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
-// Initialize DB schema on startup
+// Start server immediately (Railway healthcheck needs the port open quickly)
+app.listen(PORT, () => {
+  console.log(`[MosaicPrint] Server running on port ${PORT}`);
+  console.log(`[MosaicPrint] Static files from: ${distPath}`);
+  console.log(`[MosaicPrint] DB URL set: ${!!process.env.DATABASE_URL}`);
+});
+
+// Initialize DB schema in background (non-blocking)
 db.ensureSchema()
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`[MosaicPrint] Server running on port ${PORT}`);
-      console.log(`[MosaicPrint] Static files from: ${distPath}`);
-      console.log(`[MosaicPrint] DB: ${process.env.DATABASE_URL ? "PostgreSQL connected" : "No DB URL set"}`);
-    });
+    console.log("[MosaicPrint] DB schema initialized successfully");
   })
   .catch((e) => {
-    console.error("[MosaicPrint] DB init failed:", e);
-    process.exit(1);
+    console.error("[MosaicPrint] DB init failed (non-fatal):", e.message);
   });
