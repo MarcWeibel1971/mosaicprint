@@ -1,8 +1,22 @@
-// dotenv only needed locally - Railway injects env vars directly into process.env
-if (!process.env.RAILWAY_ENVIRONMENT) {
-  const { config } = await import("dotenv");
-  config();
+// Load dotenv for local development only
+// Railway injects env vars directly into process.env
+// Check multiple Railway-specific env vars to detect Railway environment
+const isRailway = !!(
+  process.env.RAILWAY_ENVIRONMENT ||
+  process.env.RAILWAY_PROJECT_ID ||
+  process.env.RAILWAY_SERVICE_ID ||
+  process.env.RAILWAY_DEPLOYMENT_ID
+);
+if (!isRailway) {
+  try {
+    const { config } = await import("dotenv");
+    config();
+    console.log("[MosaicPrint] Loaded .env file (local dev mode)");
+  } catch (e) {
+    console.log("[MosaicPrint] No .env file found (OK in production)");
+  }
 }
+
 import express from "express";
 import cors from "cors";
 import path from "path";
@@ -69,6 +83,37 @@ app.get("/api/tile/:id", async (req, res) => {
   }
 });
 
+// Debug endpoint - shows which env vars are set (not their values)
+// Useful for diagnosing Railway environment variable issues
+app.get("/api/debug-env", (_req, res) => {
+  const relevantKeys = [
+    'RAILWAY_ENVIRONMENT', 'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_DEPLOYMENT_ID',
+    'DATABASE_URL', 'DATABASE_PRIVATE_URL', 'DATABASE_PUBLIC_URL',
+    'PEXELS_API_KEY', 'UNSPLASH_ACCESS_KEY', 'STRIPE_SECRET_KEY',
+    'PORT', 'NODE_ENV'
+  ];
+  const envStatus: Record<string, string> = {};
+  for (const key of relevantKeys) {
+    const val = process.env[key];
+    if (val) {
+      // Show first 8 chars for debugging without exposing full secret
+      envStatus[key] = `SET (${val.substring(0, 8)}...)`;
+    } else {
+      envStatus[key] = 'NOT SET';
+    }
+  }
+  // Also check for any DATABASE-related vars
+  const allDbVars = Object.keys(process.env).filter(k => k.includes('DATABASE') || k.includes('POSTGRES') || k.includes('PG'));
+  res.json({ 
+    envStatus,
+    allDbVars,
+    isRailway,
+    nodeEnv: process.env.NODE_ENV,
+    port: process.env.PORT,
+    totalEnvVars: Object.keys(process.env).length
+  });
+});
+
 // Health check - always responds, even if DB is not ready
 app.get("/api/health", async (_req, res) => {
   try {
@@ -99,7 +144,11 @@ app.get("*", (_req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MosaicPrint] Server running on port ${PORT}`);
   console.log(`[MosaicPrint] Static files from: ${distPath}`);
+  console.log(`[MosaicPrint] isRailway: ${isRailway}`);
   console.log(`[MosaicPrint] DB URL set: ${!!process.env.DATABASE_URL}`);
+  // Log all DATABASE-related env vars for debugging
+  const dbVars = Object.keys(process.env).filter(k => k.includes('DATABASE') || k.includes('POSTGRES'));
+  console.log(`[MosaicPrint] DB-related env vars: ${dbVars.join(', ') || 'none'}`);
 });
 
 // Initialize DB schema in background (non-blocking)

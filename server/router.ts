@@ -120,12 +120,16 @@ export const appRouter = router({
 
   // Admin: Tile stats (total + labIndexed)
   getTileStats: publicProcedure.query(async () => {
-    const pool = db.getPool();
-    const totalRes = await pool.query("SELECT COUNT(*) FROM mosaic_images");
-    const labRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE avg_l IS NOT NULL");
-    const total = Number(totalRes.rows[0].count);
-    const labIndexed = Number(labRes.rows[0].count);
-    return { total, labIndexed, notIndexed: total - labIndexed };
+    try {
+      const pool = db.getPool();
+      const totalRes = await pool.query("SELECT COUNT(*) FROM mosaic_images");
+      const labRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE avg_l IS NOT NULL");
+      const total = Number(totalRes.rows[0].count);
+      const labIndexed = Number(labRes.rows[0].count);
+      return { total, labIndexed, notIndexed: total - labIndexed };
+    } catch {
+      return { total: 0, labIndexed: 0, notIndexed: 0 };
+    }
   }),
 
   // Admin: API key status
@@ -139,14 +143,22 @@ export const appRouter = router({
 
   // Admin: DB stats
   getDbStats: publicProcedure.query(async () => {
-    const count = await db.getMosaicImageCount();
-    return { count, target: TILE_TARGET };
+    try {
+      const count = await db.getMosaicImageCount();
+      return { count, target: TILE_TARGET };
+    } catch {
+      return { count: 0, target: TILE_TARGET };
+    }
   }),
 
   // Admin: Cron status
   getCronStatus: publicProcedure.query(async () => {
-    const current = await db.getMosaicImageCount();
-    return { enabled: current < TILE_TARGET, current, target: TILE_TARGET, remaining: Math.max(0, TILE_TARGET - current), intervalHours: 1, nextRunIn: CRON_INTERVAL_MS };
+    try {
+      const current = await db.getMosaicImageCount();
+      return { enabled: current < TILE_TARGET, current, target: TILE_TARGET, remaining: Math.max(0, TILE_TARGET - current), intervalHours: 1, nextRunIn: CRON_INTERVAL_MS };
+    } catch {
+      return { enabled: false, current: 0, target: TILE_TARGET, remaining: TILE_TARGET, intervalHours: 1, nextRunIn: CRON_INTERVAL_MS };
+    }
   }),
 
   // Admin: Import from source (Pexels/Unsplash)
