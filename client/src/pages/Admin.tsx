@@ -744,7 +744,7 @@ export default function Admin() {
 // ── Import Card ───────────────────────────────────────────────────────────────
 interface ImportCardProps {
   title: string; description: string; icon: React.ReactNode
-  color: 'blue' | 'purple' | 'green'; available: boolean
+  color: 'blue' | 'purple' | 'green' | 'orange'; available: boolean
   job?: ImportJob; isActive: boolean
   onImport: (n: number) => void; defaultBatch: number; maxBatch: number
 }
@@ -754,6 +754,7 @@ function ImportCard({ title, description, icon, color, available, job, isActive,
     blue:   { bg: 'bg-blue-100',   btn: 'bg-blue-500 hover:bg-blue-600',   text: 'text-blue-600' },
     purple: { bg: 'bg-purple-100', btn: 'bg-purple-500 hover:bg-purple-600', text: 'text-purple-600' },
     green:  { bg: 'bg-green-100',  btn: 'bg-green-500 hover:bg-green-600',  text: 'text-green-600' },
+    orange: { bg: 'bg-orange-100', btn: 'bg-orange-500 hover:bg-orange-600', text: 'text-orange-600' },
   }
   const c = colorMap[color]
   return (
