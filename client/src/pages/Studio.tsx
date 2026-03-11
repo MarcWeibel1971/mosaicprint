@@ -138,23 +138,28 @@ export default function Studio() {
       .catch(() => {});
   }, []);
 
-  // Preload: Load the full LAB index (all tiles, ~190KB binary) in the background
-  // This enables 2-stage matching: k-NN over ALL tiles, then SSD on Top-30
+  // Preload: Load the full 7D feature index (all tiles, ~330KB binary) in the background
+  // Format: [id, L, a, b, edge, brightness, saturation] × 7 floats × 4 bytes = 28 bytes/tile
+  // This enables multi-dimensional k-NN: LAB + edge + brightness + saturation
   useEffect(() => {
     if (labIndexLoadedRef.current) return;
     fetch('/api/tile-lab-index')
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        // Read floats-per-tile from header (default 4 for backward compat, 7 for new format)
+        const floatsPerTile = Number(r.headers.get('X-Floats-Per-Tile') ?? '4');
+        floatsPerTileRef.current = floatsPerTile;
         return r.arrayBuffer();
       })
       .then(buf => {
         labIndexRef.current = new Float32Array(buf);
         labIndexLoadedRef.current = true;
-        const count = buf.byteLength / 16; // 4 floats × 4 bytes = 16 bytes per tile
-        console.log(`[Studio] LAB index loaded: ${count} tiles (${(buf.byteLength/1024).toFixed(0)} KB)`);
+        const fpt = floatsPerTileRef.current;
+        const count = buf.byteLength / (fpt * 4);
+        console.log(`[Studio] Feature index loaded: ${count} tiles, ${fpt}D (${(buf.byteLength/1024).toFixed(0)} KB)`);
       })
       .catch(e => {
-        console.warn('[Studio] LAB index not available, will use legacy pool:', e);
+        console.warn('[Studio] Feature index not available, will use legacy pool:', e);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -172,10 +177,11 @@ export default function Studio() {
   const validImgsRef = useRef<HTMLImageElement[]>([]);
   // DB tile IDs parallel to validImgsRef (for multi-res loading via /api/tile/:id)
   const tileIdsRef = useRef<number[]>([]);
-  // Full LAB index: Float32Array of [id, L, a, b, id, L, a, b, ...] for ALL tiles
-  // Loaded once at startup, used for fast k-NN pre-filter over entire DB
+  // Full feature index: Float32Array of [id, L, a, b, edge, brightness, saturation, ...] for ALL tiles
+  // Loaded once at startup, used for fast multi-dimensional k-NN pre-filter over entire DB
   const labIndexRef = useRef<Float32Array | null>(null);
   const labIndexLoadedRef = useRef<boolean>(false);
+  const floatsPerTileRef = useRef<number>(4); // 4 (legacy) or 7 (new 7D format)
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
@@ -492,39 +498,67 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const USE_2STAGE = labIndex !== null && labIndex.length >= 4;
-    const TOTAL_DB_TILES = USE_2STAGE ? labIndex!.length / 4 : 0;
-    console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles in LAB index)` : 'NO (fallback to legacy)'}`);
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy) or 7 (new 7D)
+    const USE_2STAGE = labIndex !== null && labIndex.length >= FPT;
+    const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
+    const IS_7D = FPT >= 7;
+    console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles, ${FPT}D index)` : 'NO (fallback to legacy)'}`);
 
-    // ── Stage A helper: k-NN in LAB space over all DB tiles ──────────────────
-    // Returns array of {tileId, labDist} sorted by distance, length = K
-    const TOP_K = isMobileOrSlow ? 20 : 30; // candidates per cell for SSD stage
-    const knnLAB = (targetL: number, targetA: number, targetB: number): Array<{tileId: number; labDist: number}> => {
+    // ── Stage A helper: multi-dimensional k-NN over all DB tiles ─────────────────────
+    // 7D distance: weighted LAB (primary) + edge (shape) + brightness + saturation
+    // Weights: L=1.0, a=1.0, b=1.0, edge=30 (shape priority!), brightness=20, saturation=10
+    // Edge gets high weight because shape-matching is the key quality driver (AMP S.M.A.R.T.)
+    const TOP_K = isMobileOrSlow ? 25 : 40; // more candidates = better SSD selection
+    const knnLAB = (
+      targetL: number, targetA: number, targetB: number,
+      targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0
+    ): Array<{tileId: number; labDist: number}> => {
       if (!labIndex) return [];
-      // Use a fixed-size max-heap approach: maintain top-K smallest distances
-      // For 12K tiles, simple linear scan is fast enough (~0.3ms per cell)
+      // Weighted distance in feature space
+      // LAB: perceptual color distance (CIE76)
+      // Edge: shape similarity (high weight = prioritize shape-matching tiles)
+      // Brightness: prevents dark tiles in bright areas and vice versa
+      const W_L = 1.0, W_A = 1.0, W_B = 1.0;
+      const W_EDGE = IS_7D ? 30.0 : 0;       // shape priority: 30× LAB weight
+      const W_BRIGHT = IS_7D ? 20.0 : 0;     // brightness: 20× LAB weight
+      const W_SAT = IS_7D ? 10.0 : 0;        // saturation: 10× LAB weight
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
-      for (let i = 0; i < labIndex.length; i += 4) {
+      let worstIdx = 0;
+      for (let i = 0; i < labIndex.length; i += FPT) {
         const id = labIndex[i];
         const L = labIndex[i + 1];
         const a = labIndex[i + 2];
         const b = labIndex[i + 3];
         const dL = targetL - L, dA = targetA - a, dB = targetB - b;
-        const dist = dL * dL + dA * dA + dB * dB;
+        let dist = W_L*dL*dL + W_A*dA*dA + W_B*dB*dB;
+        if (IS_7D) {
+          const edge = labIndex[i + 4];
+          const brightness = labIndex[i + 5];
+          const sat = labIndex[i + 6];
+          const dEdge = targetEdge - edge;
+          const dBright = targetBrightness - brightness;
+          const dSat = targetSat - sat;
+          dist += W_EDGE*dEdge*dEdge + W_BRIGHT*dBright*dBright + W_SAT*dSat*dSat;
+        }
         if (heap.length < TOP_K) {
           heap.push({ tileId: id, labDist: dist });
           if (heap.length === TOP_K) {
-            maxDist = Math.max(...heap.map(h => h.labDist));
+            // Find initial worst
+            worstIdx = 0;
+            maxDist = heap[0].labDist;
+            for (let j = 1; j < TOP_K; j++) {
+              if (heap[j].labDist > maxDist) { maxDist = heap[j].labDist; worstIdx = j; }
+            }
           }
         } else if (dist < maxDist) {
-          // Replace the worst element
-          let worstIdx = 0;
-          for (let j = 1; j < heap.length; j++) {
-            if (heap[j].labDist > heap[worstIdx].labDist) worstIdx = j;
-          }
           heap[worstIdx] = { tileId: id, labDist: dist };
-          maxDist = Math.max(...heap.map(h => h.labDist));
+          // Update worst
+          worstIdx = 0;
+          maxDist = heap[0].labDist;
+          for (let j = 1; j < TOP_K; j++) {
+            if (heap[j].labDist > maxDist) { maxDist = heap[j].labDist; worstIdx = j; }
+          }
         }
       }
       return heap.sort((a, b) => a.labDist - b.labDist);
@@ -541,11 +575,14 @@ export default function Studio() {
     const neededTileIds = new Set<number>();
 
     if (USE_2STAGE) {
-      // Anti-repetition: track recently assigned tile IDs per cell position
-      // We do a 2-pass: first collect all candidates, then load images
+      // 2-pass: first collect all candidates (with 7D features), then load images
       for (let ci = 0; ci < TOTAL_TILES; ci++) {
         const [tL, tA, tB] = cellLab[ci];
-        const candidates = knnLAB(tL, tA, tB);
+        // 7D features for this cell
+        const targetEdge = IS_7D ? edgeMap[ci] : 0;          // Sobel edge energy 0-1
+        const targetBright = IS_7D ? tL / 100 : 0;            // brightness 0-1
+        const targetSat = IS_7D ? Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60) : 0; // saturation 0-1
+        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat);
         cellCandidates.push(candidates);
         candidates.forEach(c => neededTileIds.add(c.tileId));
         if (ci % 500 === 0) {
@@ -553,7 +590,7 @@ export default function Studio() {
           await new Promise(r => setTimeout(r, 0));
         }
       }
-      console.log(`[Studio] k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
+      console.log(`[Studio] ${IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
     }
 
     // ── Stage B: Load only the needed tile images ─────────────────────────────
@@ -922,26 +959,27 @@ export default function Studio() {
             quadDist += Math.sqrt(ql*ql + qa*qa + qb*qb);
           }
           quadDist /= 4;
-          // 3. Brightness difference
+          // 3. Brightness difference (Hybrid-SSD: brightness gets extra weight for contrast)
           const brightDiff = Math.abs(tf.brightness - mf.brightness);
           // 4. Texture similarity
           const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
-          // 5. Edge Priority Matching: adaptive weight 0.05–0.40 based on cell edge strength
+          // 5. Edge Priority Matching: adaptive weight 0.05–0.50 based on cell edge strength
           const cellEdge = edgeMap[ci]; // 0-1
           const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
-          const edgeWeight = 0.05 + cellEdge * 0.35; // 0.05 (flat) to 0.40 (sharp edge)
-          // Weights: SSD 45% · LAB 25% · Brightness 20% · Texture 10% (user-improved)
-          const wSsdBase = 0.45;
-          const wLabBase = savedSettings.labWeight ?? 0.25;
-          const wBrightBase = savedSettings.brightnessWeight ?? 0.20;
+          const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
+          // Hybrid-SSD weights: SSD 40% · LAB 20% · Brightness 25% · Texture 10% · Quad 5%
+          // Brightness gets higher weight (25%) to improve contrast rendering (Mosaicer-inspired)
+          const wSsdBase = 0.40;
+          const wLabBase = savedSettings.labWeight ?? 0.20;
+          const wBrightBase = savedSettings.brightnessWeight ?? 0.25; // boosted from 0.20
           const wTextureBase = savedSettings.textureWeight ?? 0.10;
           // Repetition penalty: proportional (15% per reuse) instead of fixed
           const repPenalty = (useCount[j] || 0) * 0.15 * 100;
           // Face region: boost edge and texture weights for sharper eye/nose/mouth rendering
           if (inFace) {
             const wLabF = wLabBase * 0.75;
-            const wBrightF = wBrightBase * 1.15;
-            const faceEdgeWeight = edgeWeight * 1.5;
+            const wBrightF = wBrightBase * 1.20; // extra brightness boost in face areas
+            const faceEdgeWeight = edgeWeight * 1.6; // stronger edge matching in faces
             const faceTextureWeight = wTextureBase * 1.3;
             let dist = wSsdBase * ssdScore * 100 + wLabF * labDist + 0.08 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
             dist += neighborPenalty + reusePenalty + repPenalty;

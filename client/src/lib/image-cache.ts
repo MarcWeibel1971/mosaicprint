@@ -29,8 +29,8 @@ export function clearMemoryCache(): void {
 const DB_NAME = "mosaicprint-image-cache";
 const DB_VERSION = 1;
 const STORE_NAME = "images";
-const MAX_CACHE_ENTRIES = 2000;
-const MAX_CACHE_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_CACHE_ENTRIES = 5000; // ~500 MB budget at ~100KB/tile
+const MAX_CACHE_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days - persist across multiple sessions
 
 interface CacheEntry {
   url: string;

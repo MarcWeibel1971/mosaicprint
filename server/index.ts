@@ -36,31 +36,57 @@ app.use(express.json({ limit: "50mb" }));
 // ---- REST endpoints expected by Studio.tsx ----
 
 // GET /api/tile-lab-index
-// Returns ALL tile LAB values as a compact binary Float32Array
-// Format: [id0, L0, a0, b0, id1, L1, a1, b1, ...] (4 floats per tile)
-// ~190 KB for 12,000 tiles - loaded once, used for fast LAB pre-filter
-// This enables 2-stage matching: LAB k-NN over ALL tiles, then SSD on Top-50
+// Returns ALL tile feature vectors as a compact binary Float32Array
+// Format: [id, L, a, b, edge, brightness, saturation] per tile = 7 floats = 28 bytes
+// ~330 KB for 14,000 tiles - loaded once, used for fast multi-dimensional pre-filter
+// This enables 2-stage matching: 4D k-NN (LAB+edge) over ALL tiles, then SSD on Top-30
+// edge = Sobel-edge energy 0-1 (computed server-side from 8x8 pixel data)
+// brightness = avg_l normalized 0-1
+// saturation = sqrt(a²+b²) normalized 0-1
 app.get("/api/tile-lab-index", async (req, res) => {
   try {
     const pool = db.getPool();
+    // Also fetch quadrant data for richer feature vector
     const result = await pool.query(
-      `SELECT id, avg_l, avg_a, avg_b FROM mosaic_images
+      `SELECT id, avg_l, avg_a, avg_b,
+              tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
+              bl_l, bl_a, bl_b, br_l, br_a, br_b
+       FROM mosaic_images
        WHERE avg_l IS NOT NULL ORDER BY id ASC`
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b] per tile = 4 floats = 16 bytes
-    const buf = Buffer.allocUnsafe(rows.length * 4 * 4);
+    // Pack as Float32Array: [id, L, a, b, edge, brightness, saturation] per tile = 7 floats = 28 bytes
+    // edge: estimated from quadrant LAB variance (proxy for Sobel edge energy)
+    // brightness: avg_l / 100
+    // saturation: sqrt(a²+b²) / 100
+    const FLOATS_PER_TILE = 7;
+    const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
-      buf.writeFloatLE(Number(row.id), offset);     offset += 4;
-      buf.writeFloatLE(Number(row.avg_l), offset);  offset += 4;
-      buf.writeFloatLE(Number(row.avg_a), offset);  offset += 4;
-      buf.writeFloatLE(Number(row.avg_b), offset);  offset += 4;
+      const L = Number(row.avg_l);
+      const a = Number(row.avg_a);
+      const b = Number(row.avg_b);
+      // Compute edge proxy: variance of L across quadrants (high variance = high edge)
+      const tlL = Number(row.tl_l ?? L), trL = Number(row.tr_l ?? L);
+      const blL = Number(row.bl_l ?? L), brL = Number(row.br_l ?? L);
+      const quadMeanL = (tlL + trL + blL + brL) / 4;
+      const quadVarL = ((tlL-quadMeanL)**2 + (trL-quadMeanL)**2 + (blL-quadMeanL)**2 + (brL-quadMeanL)**2) / 4;
+      const edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30); // normalize: 30 L-units = max edge
+      const brightness = L / 100;
+      const saturation = Math.min(1, Math.sqrt(a*a + b*b) / 60); // normalize: 60 = max chroma
+      buf.writeFloatLE(Number(row.id), offset);   offset += 4;
+      buf.writeFloatLE(L, offset);                offset += 4;
+      buf.writeFloatLE(a, offset);                offset += 4;
+      buf.writeFloatLE(b, offset);                offset += 4;
+      buf.writeFloatLE(edgeProxy, offset);        offset += 4;
+      buf.writeFloatLE(brightness, offset);       offset += 4;
+      buf.writeFloatLE(saturation, offset);       offset += 4;
     }
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', buf.length);
-    res.setHeader('Cache-Control', 'public, max-age=60'); // 1 min cache (DB changes)
+    res.setHeader('Cache-Control', 'public, max-age=60');
     res.setHeader('X-Tile-Count', rows.length.toString());
+    res.setHeader('X-Floats-Per-Tile', FLOATS_PER_TILE.toString());
     res.send(buf);
   } catch (e) {
     console.error('[tile-lab-index] Error:', e);
