@@ -35,20 +35,58 @@ app.use(express.json({ limit: "50mb" }));
 
 // ---- REST endpoints expected by Studio.tsx ----
 
-// GET /api/trpc/getTilePool?limit=500&labOnly=true
-// Returns array of {id, l, a, b} or full tile objects
+// GET /api/trpc/getTilePool?limit=2000&labOnly=true
+// Returns a STRATIFIED random sample across all color×brightness buckets
+// Ensures color diversity: not just the oldest/most common images
 app.get("/api/trpc/getTilePool", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit ?? 5000), 50000);
     const labOnly = req.query.labOnly === "true";
-    const pool = await db.getMosaicImagesForMatching();
-    const sliced = pool.slice(0, limit);
+    const pool = db.getPool();
+
+    // Stratified sampling: pick up to perBucket images from each color×brightness bucket
+    // 11 color categories × 3 brightness levels = 33 buckets max
+    // perBucket = ceil(limit / 33) ensures we fill the limit with diverse images
+    const perBucket = Math.ceil(limit / 33);
+    const result = await pool.query(`
+      WITH ranked AS (
+        SELECT id, avg_l, avg_a, avg_b,
+          ROW_NUMBER() OVER (
+            PARTITION BY
+              CASE
+                WHEN avg_l < 25 THEN 'black'
+                WHEN avg_l > 80 THEN 'white'
+                WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'neutral'
+                WHEN avg_a > 20 THEN 'red'
+                WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
+                WHEN avg_b > 20 THEN 'yellow'
+                WHEN avg_a < -10 THEN 'green'
+                WHEN avg_b < -15 THEN 'blue'
+                WHEN avg_a > 10 AND avg_b < 0 THEN 'purple'
+                WHEN avg_a > 10 THEN 'pink'
+                ELSE 'neutral'
+              END,
+              CASE WHEN avg_l < 35 THEN 'dark' WHEN avg_l > 65 THEN 'bright' ELSE 'mid' END
+            ORDER BY RANDOM()
+          ) as rn
+        FROM mosaic_images
+        WHERE avg_l IS NOT NULL
+      )
+      SELECT id, avg_l as "avgL", avg_a as "avgA", avg_b as "avgB"
+      FROM ranked
+      WHERE rn <= $1
+      ORDER BY RANDOM()
+      LIMIT $2
+    `, [perBucket, limit]);
+
+    const rows = result.rows;
     if (labOnly) {
-      res.json(sliced.map(t => ({ id: t.id, l: t.avgL, a: t.avgA, b: t.avgB })));
+      res.json(rows.map((t: any) => ({ id: t.id, l: Number(t.avgL), a: Number(t.avgA), b: Number(t.avgB) })));
     } else {
-      res.json(sliced);
+      res.json(rows);
     }
   } catch (e) {
+    console.error('[getTilePool] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });

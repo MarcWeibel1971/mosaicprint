@@ -466,13 +466,17 @@ export default function Studio() {
     const isSlowConnection = (navigator as any).connection?.effectiveType === "2g" || (navigator as any).connection?.effectiveType === "slow-2g";
     const isMobileOrSlow = isMobile || isSlowConnection;
 
-    // Adaptive pool size: cap at 600 images for reasonable load time
-    const MIN_POOL = isMobileOrSlow ? 200 : 400;
-    const TARGET_POOL = Math.min(600, Math.max(MIN_POOL, Math.ceil(TOTAL_TILES * (isMobileOrSlow ? 1.5 : 2.0))));
+    // Adaptive pool size: larger pool = better matching quality
+    // Server returns STRATIFIED sample (color-diverse), so more = better without redundancy
+    // Desktop: up to 2000 images | Mobile: up to 800 images
+    const MIN_POOL = isMobileOrSlow ? 300 : 600;
+    const MAX_POOL = isMobileOrSlow ? 800 : 2000;
+    const TARGET_POOL = Math.min(MAX_POOL, Math.max(MIN_POOL, Math.ceil(TOTAL_TILES * (isMobileOrSlow ? 2.5 : 5.0))));
     setProgressMsg("Lade Tile-Fotos aus Datenbank...");
     setProgress(10);
 
     // Load tile pool from DB (own domain – no external URLs in render path)
+    // Server returns stratified sample: diverse colors/brightness, not just oldest images
     let dbTilePool: Array<{id: number; l: number; a: number; b: number}> = [];
     let allUrls: string[] = [];
     let dbTileIds: number[] = [];
@@ -491,8 +495,8 @@ export default function Studio() {
       dbTileIds = [];
     }
 
-    const BATCH = isMobileOrSlow ? 20 : 50;
-    const IMG_TIMEOUT = isMobileOrSlow ? 8000 : 12000;
+    const BATCH = isMobileOrSlow ? 30 : 80;
+    const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
     const loadedImgs: (HTMLImageElement | null)[] = [];
 
     const memoryCached = getMemoryCacheSize();
@@ -514,15 +518,18 @@ export default function Studio() {
       setCacheSize(newCacheSize);
       await new Promise(r => setTimeout(r, 0));
 
-      if (i === 0 && Date.now() - firstBatchStart > 15000) {
+      // Timeout fallback: if first batch takes >20s, reduce pool
+      if (i === 0 && Date.now() - firstBatchStart > 20000) {
         timeoutFallbackTriggered = true;
         setProgressMsg("Langsame Verbindung \u2013 starte mit kleinerem Pool...");
         break;
       }
 
+      // Continue loading until we have enough valid images
+      // Don't stop early – more tiles = better matching quality
       const validSoFar = loadedImgs.filter(Boolean).length;
-      const minRequired = timeoutFallbackTriggered ? 150 : Math.min(400, Math.max(200, TOTAL_TILES));
-      if (validSoFar >= minRequired) break;
+      const minRequired = timeoutFallbackTriggered ? 200 : Math.min(600, Math.max(300, TOTAL_TILES * 2));
+      if (validSoFar >= minRequired && i + BATCH >= allUrls.length * 0.5) break;
     }
     const validImgs = loadedImgs.filter(Boolean) as HTMLImageElement[];
     // Store tile IDs for multi-resolution loading (hi-res zoom, print)

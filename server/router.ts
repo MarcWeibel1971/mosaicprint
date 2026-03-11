@@ -9,19 +9,84 @@ const TILE_TARGET = 100_000;
 const CRON_INTERVAL_MS = 60 * 60 * 1000;
 
 // ---- Color helpers for Smart Import ----
-const COLOR_KEYWORDS: Record<string, string[]> = {
-  red: ["red","rose","crimson","scarlet","ruby","cherry","fire","sunset","autumn","warm"],
-  orange: ["orange","amber","copper","bronze","rust","terracotta","peach","apricot"],
-  yellow: ["yellow","gold","lemon","sunflower","honey","mustard","cream","sand","wheat"],
-  green: ["green","forest","emerald","lime","mint","sage","olive","moss","jungle","nature"],
-  blue: ["blue","ocean","sky","navy","cobalt","azure","teal","cyan","sea","water","ice"],
-  purple: ["purple","violet","lavender","lilac","plum","mauve","indigo","magenta"],
-  pink: ["pink","rose","blush","coral","salmon","fuchsia","hot pink","flamingo"],
-  brown: ["brown","wood","earth","chocolate","coffee","caramel","walnut","bark","soil"],
-  black: ["black","dark","night","shadow","coal","ebony","onyx","charcoal","midnight"],
-  white: ["white","snow","bright","light","pale","ivory","cream","pearl","cloud","fog"],
-  neutral: ["gray","grey","stone","concrete","urban","minimal","monochrome","silver"],
+
+// Detailed keyword map per color × brightness combination
+// Each entry: [color_category][brightness_category] = search queries
+const SMART_KEYWORDS: Record<string, Record<string, string[]>> = {
+  red: {
+    dark: ["dark red", "deep crimson", "burgundy wine", "dark rose", "maroon"],
+    mid:  ["red flowers", "red autumn leaves", "red fabric", "cherry blossom", "red berries"],
+    bright: ["bright red", "red sunset", "red poppy", "scarlet", "red tulip"],
+  },
+  orange: {
+    dark: ["dark orange", "burnt sienna", "rust metal", "dark amber", "terracotta"],
+    mid:  ["orange sunset", "autumn leaves orange", "orange fruit", "pumpkin", "copper"],
+    bright: ["bright orange", "orange flower", "orange sky", "tangerine", "marigold"],
+  },
+  yellow: {
+    dark: ["dark yellow", "mustard", "dark gold", "ochre", "dark honey"],
+    mid:  ["yellow sunflower", "yellow leaves", "golden wheat", "yellow tulip", "sand dunes"],
+    bright: ["bright yellow", "lemon yellow", "yellow dandelion", "sunshine", "yellow rose"],
+  },
+  green: {
+    dark: ["dark forest", "dark green leaves", "pine forest", "deep jungle", "dark moss"],
+    mid:  ["green nature", "green grass", "green leaves", "fern", "meadow"],
+    bright: ["bright green", "lime green", "spring leaves", "fresh grass", "green apple"],
+  },
+  blue: {
+    dark: ["dark blue ocean", "midnight blue", "deep sea", "dark navy", "night sky"],
+    mid:  ["blue sky", "blue ocean", "blue water", "blue lake", "cornflower"],
+    bright: ["bright blue sky", "turquoise water", "light blue", "azure sky", "cyan sea"],
+  },
+  purple: {
+    dark: ["dark purple", "deep violet", "dark plum", "dark lavender", "eggplant"],
+    mid:  ["purple flower", "lavender field", "violet", "purple sunset", "lilac"],
+    bright: ["bright purple", "bright violet", "purple orchid", "magenta flower", "fuchsia"],
+  },
+  pink: {
+    dark: ["dark pink", "deep rose", "dark coral", "dark salmon", "mauve"],
+    mid:  ["pink flower", "pink blossom", "rose pink", "pink peony", "flamingo"],
+    bright: ["bright pink", "hot pink", "pink tulip", "pink sakura", "light pink"],
+  },
+  brown: {
+    dark: ["dark wood", "dark soil", "dark bark", "dark coffee", "dark chocolate"],
+    mid:  ["wood texture", "brown earth", "autumn brown", "coffee beans", "leather"],
+    bright: ["light wood", "sandy brown", "caramel", "light bark", "wheat field"],
+  },
+  black: {
+    dark: ["black night", "black shadow", "dark silhouette", "black coal", "dark abstract"],
+    mid:  ["black and white portrait", "dark grey", "charcoal", "dark stone", "black cat"],
+    bright: ["black texture", "dark marble", "black feather", "dark pattern", "black fabric"],
+  },
+  white: {
+    dark: ["white grey", "light grey", "silver", "pale grey", "white fog"],
+    mid:  ["white flower", "white cloud", "white snow", "white marble", "white fabric"],
+    bright: ["bright white", "white light", "snow bright", "white daisy", "white sky"],
+  },
+  neutral: {
+    dark: ["dark grey urban", "dark concrete", "dark stone wall", "dark asphalt", "dark minimal"],
+    mid:  ["grey stone", "grey sky", "grey concrete", "silver metal", "grey texture"],
+    bright: ["light grey", "white grey", "pale stone", "light concrete", "bright minimal"],
+  },
 };
+
+// Subject diversity keywords for variety (portraits, nature, architecture, etc.)
+const SUBJECT_KEYWORDS = [
+  // Portraits & People
+  "portrait face close up", "smiling person", "child portrait", "elderly person", "diverse faces",
+  "couple portrait", "group people", "woman portrait", "man portrait", "baby face",
+  // Nature & Landscapes
+  "mountain landscape", "ocean waves", "forest path", "flower macro", "waterfall",
+  "sunrise landscape", "desert sand", "tropical beach", "snow mountain", "green valley",
+  // Architecture & Urban
+  "city skyline", "building facade", "bridge architecture", "street photography", "interior design",
+  "old building", "modern architecture", "window light", "door colorful", "roof tiles",
+  // Abstract & Texture
+  "colorful abstract", "texture background", "bokeh lights", "paint splash", "geometric pattern",
+  "fabric texture", "wood grain", "stone texture", "water reflection", "glass reflection",
+  // Food & Objects
+  "colorful food", "fruit arrangement", "flowers bouquet", "candles warm light", "coffee art",
+];
 
 function getColorCategory(avgL: number, avgA: number, avgB: number): string {
   if (avgL < 25) return "black";
@@ -43,8 +108,11 @@ function getBrightnessCategory(avgL: number): string {
   return "mid";
 }
 
-async function getUnderrepresentedColors(targetPerColor = 500): Promise<string[]> {
+// Analyse the full database and return prioritized import tasks
+// Returns array of {query, priority, deficit} sorted by most needed first
+async function analyzeDbGaps(targetPerBucket = 400): Promise<Array<{query: string; priority: number; deficit: number; label: string}>> {
   const pool = db.getPool();
+  // Count by color × brightness bucket
   const res = await pool.query(`
     SELECT
       CASE
@@ -60,17 +128,44 @@ async function getUnderrepresentedColors(targetPerColor = 500): Promise<string[]
         WHEN avg_a > 10 THEN 'pink'
         ELSE 'neutral'
       END as color_cat,
+      CASE
+        WHEN avg_l < 35 THEN 'dark'
+        WHEN avg_l > 65 THEN 'bright'
+        ELSE 'mid'
+      END as brightness_cat,
       COUNT(*) as cnt
-    FROM mosaic_images GROUP BY color_cat ORDER BY cnt ASC
+    FROM mosaic_images
+    GROUP BY color_cat, brightness_cat
+    ORDER BY cnt ASC
   `);
-  const underrep: string[] = [];
+
+  const tasks: Array<{query: string; priority: number; deficit: number; label: string}> = [];
+
   for (const row of res.rows) {
-    if (Number(row.cnt) < targetPerColor) {
-      const keywords = COLOR_KEYWORDS[row.color_cat] ?? [];
-      underrep.push(...keywords.slice(0, 3));
+    const cnt = Number(row.cnt);
+    const deficit = Math.max(0, targetPerBucket - cnt);
+    if (deficit <= 0) continue;
+    const colorKws = SMART_KEYWORDS[row.color_cat]?.[row.brightness_cat] ?? [];
+    const priority = deficit / targetPerBucket; // 0-1, higher = more needed
+    for (const kw of colorKws) {
+      tasks.push({ query: kw, priority, deficit, label: `${row.color_cat}/${row.brightness_cat}` });
     }
   }
-  return underrep.length > 0 ? underrep : ["nature", "city", "people", "abstract", "architecture"];
+
+  // Also add subject diversity tasks (always needed for variety)
+  for (const kw of SUBJECT_KEYWORDS) {
+    tasks.push({ query: kw, priority: 0.3, deficit: 50, label: "subject-diversity" });
+  }
+
+  // Sort by priority descending (most needed first)
+  tasks.sort((a, b) => b.priority - a.priority);
+  return tasks;
+}
+
+// Legacy function kept for backward compatibility
+async function getUnderrepresentedColors(targetPerColor = 500): Promise<string[]> {
+  const tasks = await analyzeDbGaps(targetPerColor);
+  return tasks.slice(0, 30).map(t => t.query);
 }
 
 // ---- Job state ----
@@ -272,44 +367,80 @@ export const appRouter = router({
     .input(z.object({ source: z.enum(["pexels", "unsplash"]).default("pexels") }))
     .query(({ input }) => getImportStatus(input.source)),
 
-  // Admin: Smart Import (fills underrepresented colors)
+  // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
   smartImport: publicProcedure
-    .input(z.object({ sourceId: z.enum(["unsplash", "pexels"]).default("pexels"), count: z.number().min(1).max(2000).default(200) }))
+    .input(z.object({
+      sourceId: z.enum(["unsplash", "pexels"]).default("pexels"),
+      count: z.number().min(1).max(5000).default(500),
+      targetPerBucket: z.number().min(100).max(2000).default(400),
+    }))
     .mutation(async ({ input }) => {
       const jobKey = `smart_${input.sourceId}`;
       if (smartImportJobs[jobKey]?.running) return { started: false };
       smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count };
-      const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 200) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-200); };
+      const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
       (async () => {
         try {
           const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
-          const keywords = await getUnderrepresentedColors(500);
-          log(`Smart Import: ${keywords.length} Keywords: ${keywords.slice(0, 5).join(", ")}...`);
+
+          // Analyse DB gaps: get prioritized list of (query, deficit, label)
+          const tasks = await analyzeDbGaps(input.targetPerBucket);
+          log(`🔍 DB-Analyse: ${tasks.length} Import-Tasks gefunden (Ziel: ${input.targetPerBucket} pro Bucket)`);
+          log(`Top-Prioritäten: ${tasks.slice(0, 5).map(t => `${t.label}(${t.deficit})`).join(", ")}`);
+
           let imported = 0;
-          for (const kw of keywords) {
+          const CONCURRENCY = 3; // parallel LAB computation
+          const perPage = input.sourceId === "pexels" ? 30 : 20;
+
+          for (const task of tasks) {
             if (imported >= input.count) break;
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.sourceId === "pexels") {
-                const res = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(kw)}&per_page=20`, { headers: { Authorization: apiKey } });
+                const res = await fetch(
+                  `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=square`,
+                  { headers: { Authorization: apiKey } }
+                );
+                if (!res.ok) { log(`⚠️ Pexels API error ${res.status} for "${task.query}"`); continue; }
                 const data = await res.json() as any;
-                photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.medium, tile128Url: p.src.small }));
+                photos = (data.photos ?? []).map((p: any) => ({
+                  sourceUrl: p.src.large,
+                  tile128Url: p.src.small,
+                }));
               } else {
-                const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(kw)}&per_page=20`, { headers: { Authorization: `Client-ID ${apiKey}` } });
+                const res = await fetch(
+                  `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
+                  { headers: { Authorization: `Client-ID ${apiKey}` } }
+                );
+                if (!res.ok) { log(`⚠️ Unsplash API error ${res.status} for "${task.query}"`); continue; }
                 const data = await res.json() as any;
-                photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+                photos = (data.results ?? []).map((p: any) => ({
+                  sourceUrl: p.urls.regular,
+                  tile128Url: p.urls.thumb,
+                }));
               }
-              for (const photo of photos) {
-                const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
-                imported++;
-                smartImportJobs[jobKey].imported = imported;
+
+              // Process in parallel batches for speed
+              let batchImported = 0;
+              for (let i = 0; i < photos.length; i += CONCURRENCY) {
+                const batch = photos.slice(i, i + CONCURRENCY);
+                await Promise.all(batch.map(async (photo) => {
+                  try {
+                    const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
+                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                    imported++;
+                    batchImported++;
+                    smartImportJobs[jobKey].imported = imported;
+                  } catch { /* skip duplicates / errors */ }
+                }));
               }
-              log(`"${kw}": +${photos.length}`);
-            } catch (e) { log(`"${kw}" error: ${e}`); }
+              if (batchImported > 0) {
+                log(`✓ [${task.label}] "${task.query}": +${batchImported} (deficit was ${task.deficit})`);
+              }
+            } catch (e) { log(`✗ "${task.query}" error: ${e}`); }
           }
-          log(`✅ Smart Import fertig: ${imported} Bilder`);
+          log(`✅ Smart Import fertig: ${imported} neue Bilder importiert`);
           smartImportJobs[jobKey].finishedAt = new Date().toISOString();
         } catch (e: unknown) {
           smartImportJobs[jobKey].error = e instanceof Error ? e.message : String(e);
