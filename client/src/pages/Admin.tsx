@@ -249,6 +249,31 @@ export default function Admin() {
     return () => clearInterval(interval)
   }, [activeJob, fetchStats])
 
+  // Poll multiple import jobs simultaneously (used by importAll)
+  useEffect(() => {
+    if (activeJobs.size === 0) return
+    const intervals: ReturnType<typeof setInterval>[] = []
+    activeJobs.forEach(src => {
+      const interval = setInterval(async () => {
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: src }))
+          const res = await fetch(`/api/trpc/getImportStatus?input=${params}`)
+          const data = await res.json()
+          const raw = data.result?.data ?? data
+          const job: ImportJob = { log: [], ...raw }
+          setImportProgress(prev => ({ ...prev, [src]: job }))
+          if (!job.running && job.finishedAt) {
+            setActiveJobs(prev => { const next = new Set(prev); next.delete(src); return next })
+            fetchStats()
+            if (job.error) setMessage({ text: `Fehler (${src}): ${job.error}`, type: 'error' })
+          }
+        } catch { /* ignore */ }
+      }, 1500)
+      intervals.push(interval)
+    })
+    return () => intervals.forEach(clearInterval)
+  }, [activeJobs, fetchStats])
+
   // Poll smart import status (also used by Gezielte Importe / recs import)
   useEffect(() => {
     if (!activeJob?.startsWith('smart_')) return
@@ -306,11 +331,13 @@ export default function Admin() {
       const data = await res.json()
       const result = data.result?.data?.json ?? data.result?.data ?? data
       if (result.sources) {
-        result.sources.forEach((src: string) => {
-          setActiveJob(src)
+        const srcs: string[] = result.sources
+        // Use activeJobs Set for multi-source polling (not activeJob which is single-source)
+        setActiveJobs(new Set(srcs))
+        srcs.forEach((src: string) => {
           setImportProgress(prev => ({ ...prev, [src]: { running: true, log: [], imported: 0, total: importAllBatch } }))
         })
-        setMessage({ text: `${result.sources.join(' + ')} gleichzeitig gestartet!`, type: 'success' })
+        setMessage({ text: `${srcs.join(' + ')} gleichzeitig gestartet!`, type: 'success' })
       }
     } catch {
       setMessage({ text: 'Fehler beim Starten des Gesamt-Imports', type: 'error' })

@@ -126,6 +126,7 @@ export async function getAdminImages(opts: {
   if (opts.sourceId === 'pexels') conditions.push("source_url LIKE '%pexels%'");
   else if (opts.sourceId === 'unsplash') conditions.push("source_url LIKE '%unsplash%'");
   else if (opts.sourceId === 'picsum') conditions.push("(source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%')");
+  else if (opts.sourceId === 'pixabay') conditions.push("source_url LIKE '%pixabay%'");
   // Brightness filter
   if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
   else if (opts.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
@@ -154,6 +155,7 @@ export async function getAdminImages(opts: {
         WHEN source_url LIKE '%pexels%' THEN 'pexels'
         WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
         WHEN source_url LIKE '%picsum%' THEN 'picsum'
+        WHEN source_url LIKE '%pixabay%' THEN 'pixabay'
         ELSE 'other'
       END as "sourceId",
       CASE
