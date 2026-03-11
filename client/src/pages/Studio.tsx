@@ -436,13 +436,13 @@ export default function Studio() {
             // Portrait preset: fine grid, strong saturation penalty, skin-tone boost
             // wSat=0.45, wTexture=0.20 as recommended by algorithm review
             const portraitPreset = {
-              baseTiles: 90,          // More columns = finer grid = sharper face details
-              tilePx: 12,             // Smaller tiles = more detail in face regions
+              baseTiles: 65,          // Balanced: enough detail without too many repetitions
+              tilePx: 15,             // Slightly larger tiles = more recognizable photos
               neighborRadius: 6,      // Wide anti-repetition radius for portrait
               neighborPenalty: 200,   // Strong anti-repetition → no flower-clusters in face
               contrastBoost: 1.25,    // Stronger contrast for face clarity
-              histogramBlend: 0.0,    // NO overlay – tiles match naturally
-              baseOverlay: 0.10,      // Subtle overlay only
+              histogramBlend: 0.09,   // Luminance + color correction for face visibility
+              baseOverlay: 0.35,      // Strong overlay to make face recognizable
               edgeBoost: 0.15,        // Gentle edge boost
               labWeight: 0.12,        // LAB less dominant – brightness + sat drive matching
               brightnessWeight: 0.45, // KEY: brightness drives face structure
@@ -883,7 +883,8 @@ export default function Studio() {
     if (!USE_2STAGE || tileImgMap.size === 0) {
       // Legacy: load a fixed pool of images
       setProgressMsg("Lade Kachel-Pool (Fallback)...");
-      const TARGET_POOL = isMobileOrSlow ? 600 : 1500;
+      const isPortrait = savedSettings.portraitMode === true;
+      const TARGET_POOL = isMobileOrSlow ? 600 : (isPortrait ? 2500 : 1500);
       let allUrls: string[] = [];
       let dbTileIds: number[] = [];
       try {
@@ -1283,7 +1284,7 @@ export default function Studio() {
           const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
           // Face region: boost SSD, brightness, edge and texture weights for sharper eye/nose/mouth
           if (inFace) {
-            const wSsdFace = 0.50;             // SSD dominates in face areas (pixel accuracy)
+            const wSsdFace = 0.35;             // Reduced SSD weight – more room for LAB/brightness in face areas
             const wLabF = wLabBase * 0.60;     // less LAB weight – SSD handles color
             const wBrightF = wBrightBase * 1.30; // extra brightness boost in face areas
             const faceEdgeWeight = edgeWeight * 1.8; // stronger edge matching in faces
@@ -1449,8 +1450,10 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default – tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
-        const L_BLEND  = 0.30 * blendFactor;  // very subtle luminance nudge (was 0.90 – too aggressive)
-        const AB_BLEND = 0.15 * blendFactor;  // very subtle color nudge (was 0.35 – too aggressive)
+        // L_BLEND: minimum 0.20 always active (ensures brightness correction even without histogramBlend)
+        // At histogramBlend=0.09 → blendFactor=0.9 → L_BLEND=0.20+0.50*0.9=0.65
+        const L_BLEND  = 0.20 + 0.50 * blendFactor;  // 0.20 minimum, up to 0.70 at full blend
+        const AB_BLEND = 0.10 + 0.20 * blendFactor;  // 0.10 minimum, up to 0.30 at full blend
         const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors            // max a/b channel shift
         const [tL, tA, tB] = cellLab[ci];
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
