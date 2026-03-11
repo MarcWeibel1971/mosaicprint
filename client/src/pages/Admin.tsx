@@ -573,6 +573,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [selectedImage, setSelectedImage] = useState<TileImage | null>(null)
   const [dedupLoading, setDedupLoading] = useState(false)
   const [dedupResult, setDedupResult] = useState<string | null>(null)
+  const [constraintLoading, setConstraintLoading] = useState(false)
+  const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const LIMIT = 60
 
   const runDedup = useCallback(async () => {
@@ -595,6 +597,25 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setDedupLoading(false)
     }
   }, [fetchDbStats, fetchImages])
+
+  const runAddConstraint = useCallback(async () => {
+    if (!confirm('UNIQUE-Constraint auf source_url setzen? Damit können künftig keine Duplikate mehr importiert werden. Stelle sicher, dass du zuerst Duplikate entfernt hast.')) return
+    setConstraintLoading(true)
+    setConstraintResult(null)
+    try {
+      const res = await fetch('/api/admin/add-unique-constraint', { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        setConstraintResult(`✅ ${data.message}`)
+      } else {
+        setConstraintResult(`❌ Fehler: ${data.error}`)
+      }
+    } catch (e) {
+      setConstraintResult(`❌ Netzwerkfehler: ${String(e)}`)
+    } finally {
+      setConstraintLoading(false)
+    }
+  }, [])
 
   const fetchDbStats = useCallback(async () => {
     try {
@@ -735,15 +756,26 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           <p className="text-sm font-semibold text-amber-800">🔧 Datenbankwartung</p>
           <p className="text-xs text-amber-600 mt-0.5">Entfernt echte Duplikate (gleiche source_url) – behält jeweils das Bild mit der niedrigsten ID.</p>
           {dedupResult && <p className="text-xs mt-1 font-medium text-gray-700">{dedupResult}</p>}
+          {constraintResult && <p className="text-xs mt-1 font-medium text-gray-700">{constraintResult}</p>}
         </div>
-        <button
-          onClick={runDedup}
-          disabled={dedupLoading}
-          className="flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
-        >
-          {dedupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🗑️</span>}
-          {dedupLoading ? 'Bereinige...' : 'Duplikate entfernen'}
-        </button>
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={runDedup}
+            disabled={dedupLoading}
+            className="flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+          >
+            {dedupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🗑️</span>}
+            {dedupLoading ? 'Bereinige...' : 'Duplikate entfernen'}
+          </button>
+          <button
+            onClick={runAddConstraint}
+            disabled={constraintLoading}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+          >
+            {constraintLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🔒</span>}
+            {constraintLoading ? 'Setze Constraint...' : 'UNIQUE-Constraint setzen'}
+          </button>
+        </div>
       </div>
 
       {/* Filter Bar */}
