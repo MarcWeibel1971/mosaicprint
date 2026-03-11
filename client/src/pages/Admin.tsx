@@ -188,8 +188,10 @@ export default function Admin() {
     if (activeJob) return
     const queriesToRun = recommendations.filter(r => selectedRecs.has(r.query))
     if (queriesToRun.length === 0) return
-    setActiveJob('recs_import')
-    setRecsJob({ running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${recsSource}...`], imported: 0, total: queriesToRun.length * 30 })
+    // Use smart_ prefix so existing polling useEffect picks it up automatically
+    const jobKey = `smart_${recsSource}`
+    setActiveJob(jobKey)
+    setRecsJob({ running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${recsSource}...`], imported: 0, total: queriesToRun.length * 80 })
     setMessage({ text: `Gezielte Importe gestartet: ${queriesToRun.length} Kategorien via ${recsSource}`, type: 'info' })
     try {
       await fetch('/api/trpc/smartImport', {
@@ -244,7 +246,7 @@ export default function Admin() {
     return () => clearInterval(interval)
   }, [activeJob, fetchStats])
 
-  // Poll smart import status
+  // Poll smart import status (also used by Gezielte Importe / recs import)
   useEffect(() => {
     if (!activeJob?.startsWith('smart_')) return
     const sourceId = activeJob.replace('smart_', '')
@@ -255,17 +257,20 @@ export default function Admin() {
         const data = await res.json()
         const job: SmartImportJob = data.result?.data ?? data
         setSmartJob(job)
+        // Also update recsJob if it's running (Gezielte Importe uses same endpoint)
+        setRecsJob(prev => prev?.running ? job : prev)
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
           fetchStats()
           fetchCronStatus()
+          fetchRecommendations() // Refresh recommendations after import
           if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
-          else setMessage({ text: `Smart-Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
+          else setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
         }
       } catch { /* ignore */ }
     }, 1500)
     return () => clearInterval(interval)
-  }, [activeJob, fetchStats, fetchCronStatus])
+  }, [activeJob, fetchStats, fetchCronStatus, fetchRecommendations])
 
   const startImport = async (sourceId: string, batchSize: number) => {
     if (activeJob) return
@@ -1226,44 +1231,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {constraintLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🔒</span>}
             {constraintLoading ? 'Setze Constraint...' : 'UNIQUE-Constraint setzen'}
           </button>
-        </div>
-      </div>
-
-      {/* Quick Import Section */}
-      <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
-        <p className="text-sm font-semibold text-blue-800 mb-1">⚡ Gezielte Importe (Empfehlungen)</p>
-        <p className="text-xs text-blue-600 mb-3">Importiert bis zu 80 Bilder pro Kategorie via Pexels – ideal für unterrepräsentierte Farb-Buckets.</p>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-          {([
-            { query: 'abstract blue texture', label: 'Blau-Texturen' },
-            { query: 'cyan teal water', label: 'Cyan/Teal' },
-            { query: 'violet purple abstract', label: 'Violett/Lila' },
-            { query: 'pink rose flower', label: 'Pink/Rosa' },
-            { query: 'gray concrete stone', label: 'Grau-Texturen' },
-            { query: 'white cloud sky minimal', label: 'Weiss/Hell' },
-            { query: 'dark black background night', label: 'Schwarz/Dunkel' },
-            { query: 'green nature forest leaf', label: 'Grün-Natur' },
-            { query: 'skin portrait face close', label: 'Hauttöne (Portrait)' },
-            { query: 'colorful saturated vibrant', label: 'Hoch-Sättigung' },
-            { query: 'pastel soft light color', label: 'Pastell/Niedrig-Sättigung' },
-            { query: 'abstract texture gradient', label: 'Abstrakt/Gradient' },
-          ] as { query: string; label: string }[]).map(({ query, label }) => (
-            <button
-              key={query}
-              onClick={() => runQuickImport(query, label)}
-              disabled={quickImportLoading === query}
-              className="flex flex-col items-start gap-0.5 bg-white border border-blue-200 hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50 rounded-xl px-3 py-2 text-left transition-colors"
-            >
-              <span className="text-xs font-semibold text-blue-800">{label}</span>
-              <span className="text-[10px] text-gray-400 truncate w-full">{query}</span>
-              {quickImportResult[query] && (
-                <span className="text-[10px] text-gray-600 mt-0.5">{quickImportResult[query]}</span>
-              )}
-              {quickImportLoading === query && (
-                <span className="text-[10px] text-blue-600 animate-pulse">⏳ läuft...</span>
-              )}
-            </button>
-          ))}
         </div>
       </div>
 
