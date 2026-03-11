@@ -119,6 +119,7 @@ export default function Studio() {
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [cacheSize, setCacheSize] = useState(0);
+  const [dbTileCount, setDbTileCount] = useState<number | null>(null);
   const [showPayModal, setShowPayModal] = useState(false);
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
@@ -127,6 +128,14 @@ export default function Studio() {
   // Update cache size display
   useEffect(() => {
     getIDBCacheSize().then(n => setCacheSize(n + getMemoryCacheSize()));
+    // Fetch real DB tile count for the badge
+    fetch('/api/trpc/getTileStats')
+      .then(r => r.json())
+      .then((data: { result?: { data?: { total?: number } } }) => {
+        const total = data?.result?.data?.total;
+        if (typeof total === 'number' && total > 0) setDbTileCount(total);
+      })
+      .catch(() => {});
   }, []);
 
   // Warm-up: pre-load a small set of tiles from the DB in the background
@@ -1190,11 +1199,13 @@ export default function Studio() {
         </div>
 
         {/* Cache status badge */}
-        {cacheSize > 0 && !userPhoto && !loading && (
+        {(cacheSize > 0 || dbTileCount !== null) && !userPhoto && !loading && (
           <div className="flex justify-center mb-4">
             <div className="inline-flex items-center gap-1.5 bg-green-50 border border-green-200 text-green-700 text-xs font-semibold px-3 py-1.5 rounded-full">
               <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              {cacheSize} Bilder im Cache – schneller Start garantiert
+              {dbTileCount !== null
+                ? `${dbTileCount.toLocaleString('de-CH')} Bilder verfügbar – schneller Start garantiert`
+                : `${cacheSize} Bilder im Cache – schneller Start garantiert`}
             </div>
           </div>
         )}
