@@ -1,9 +1,12 @@
 /**
  * Landing – MosaicPrint Landingpage
- * Design 1:1 aus MosaicArt-Vorlage (https://mosaicart-qgrbsy4p.manus.space/)
- * Studio-Links zeigen auf /studio
+ * Design aus MosaicArt-Vorlage – bereinigt:
+ *  - Eigene Navbar/Footer entfernt (globale Navbar/Footer aus App.tsx wird verwendet)
+ *  - Preise korrigiert: echte Formate (20×20 CHF 29 bis 100×100 CHF 199)
+ *  - Materialien-Sektion hinzugefügt
  */
 import { useRef } from "react";
+import { Link } from "react-router-dom";
 import { motion, useInView } from "framer-motion";
 import {
   Upload, Cpu, Printer, Star, ChevronRight,
@@ -11,7 +14,7 @@ import {
 } from "lucide-react";
 import MosaicGrid from "../components/MosaicGrid";
 
-/* ─── CDN Images (aus MosaicArt-Vorlage) ─── */
+/* ─── CDN Images ─── */
 const HERO_MOSAIC_IMG =
   "https://d2xsxph8kpxj0f.cloudfront.net/114467201/QGrbsY4PW2WiaY2JHQavxL/mosaicprint-hero-mosaic-gfK4Hsd5XQKfhZmjt2vAQD.webp";
 const WEDDING_MOSAIC_IMG =
@@ -46,74 +49,11 @@ function SectionLabel({ children, color = "coral" }: { children: React.ReactNode
   );
 }
 
-/* ─── Mosaic Logo Mark ─── */
-const LOGO_COLORS = [
-  "#FF6B6B","#00C9B1","#FFD93D","#9B59B6",
-  "#4A90D9","#FF8FB1","#6BCB77","#FF9F43",
-  "#FFD93D","#4A90D9","#FF6B6B","#00C9B1",
-  "#FF9F43","#9B59B6","#FF8FB1","#6BCB77",
-];
-
-function LogoMark({ size = 44 }: { size?: number }) {
-  return (
-    <div style={{
-      width: size, height: size, display: "grid",
-      gridTemplateColumns: "repeat(4, 1fr)", gap: 2,
-      background: "#1a1a2e", borderRadius: 8, padding: 4,
-    }}>
-      {LOGO_COLORS.map((c, i) => (
-        <div key={i} style={{ background: c, borderRadius: 2 }} />
-      ))}
-    </div>
-  );
-}
-
-/* ─── NAVBAR ─── */
-function Navbar() {
-  const scrollTo = (id: string) => document.querySelector(id)?.scrollIntoView({ behavior: "smooth" });
-  return (
-    <header style={{
-      position: "fixed", top: 0, left: 0, right: 0, zIndex: 50,
-      background: "rgba(250,250,248,0.92)", backdropFilter: "blur(16px)",
-      borderBottom: "1px solid #E8E8E4",
-    }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem", display: "flex", alignItems: "center", justifyContent: "space-between", height: 72 }}>
-        <a href="#" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-          style={{ display: "flex", alignItems: "center", gap: 12, textDecoration: "none" }}>
-          <LogoMark size={44} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-            <span style={{ fontFamily: "'DM Serif Display', serif", fontSize: 19, fontWeight: 700, color: "#1a1a2e", lineHeight: 1 }}>MosaicPrint</span>
-            <span style={{ fontSize: 10, fontWeight: 500, letterSpacing: "2px", textTransform: "uppercase", color: "#6B7280" }}>Dein Foto als Kunstwerk</span>
-          </div>
-        </a>
-        <nav style={{ display: "flex", alignItems: "center", gap: 32 }}>
-          {[["Studio", "#studio"], ["So funktioniert's", "#how-it-works"], ["Preise", "#pricing"], ["Galerie", "#gallery"]].map(([label, href]) => (
-            <a key={href} href={href} onClick={(e) => { e.preventDefault(); scrollTo(href); }}
-              style={{ fontSize: 15, fontWeight: 500, color: "#6B7280", textDecoration: "none" }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = "#1a1a2e")}
-              onMouseLeave={(e) => (e.currentTarget.style.color = "#6B7280")}>
-              {label}
-            </a>
-          ))}
-        </nav>
-        <a href={STUDIO_URL} style={{
-          display: "inline-flex", alignItems: "center", justifyContent: "center",
-          background: "linear-gradient(135deg, #FF6B6B, #FF9F43)", color: "white",
-          borderRadius: 9999, padding: "0 1.5rem", height: 40, fontSize: 14, fontWeight: 700,
-          textDecoration: "none", border: "none",
-        }}>
-          Mosaik erstellen
-        </a>
-      </div>
-    </header>
-  );
-}
-
 /* ─── HERO ─── */
 function HeroSection() {
   const scrollTo = (id: string) => document.querySelector(id)?.scrollIntoView({ behavior: "smooth" });
   return (
-    <section style={{ minHeight: "100vh", display: "flex", alignItems: "center", paddingTop: 72, background: "#FAFAF8" }} id="hero">
+    <section style={{ minHeight: "calc(100vh - 64px)", display: "flex", alignItems: "center", background: "#FAFAF8" }} id="hero">
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem", width: "100%" }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5rem", alignItems: "center", padding: "6rem 0" }}>
           {/* Left */}
@@ -206,7 +146,7 @@ function HeroSection() {
                 style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="eager" />
             </div>
             <div style={{
-              position: "absolute", bottom: -16, right: -16, zIndex: 10,
+              position: "absolute", bottom: 20, right: 20, zIndex: 10,
               background: "white", borderRadius: 16, padding: "10px 16px",
               boxShadow: "0 4px 24px rgba(0,0,0,0.1)", display: "flex", alignItems: "center", gap: 10,
               border: "1px solid #E8E8E4",
@@ -319,7 +259,7 @@ function GallerySection() {
                 {[
                   { val: "10'000+", label: "Mosaike erstellt", color: "#FF6B6B" },
                   { val: "4.9 ★", label: "Kundenbewertung", color: "#FFD93D" },
-                  { val: "A3–A0", label: "Druckformate", color: "#00C9B1" },
+                  { val: "20–100 cm", label: "Druckformate", color: "#00C9B1" },
                   { val: "CH", label: "Produktion & Versand", color: "#9B59B6" },
                 ].map((s, i) => (
                   <div key={i} style={{ background: "white", borderRadius: 16, padding: 16, border: "1px solid #E8E8E4", textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.04)" }}>
@@ -339,9 +279,9 @@ function GallerySection() {
 /* ─── HOW IT WORKS ─── */
 function HowItWorksSection() {
   const steps = [
-    { num: "1", icon: Upload, title: "Hauptfoto wählen", desc: "Lade das Bild hoch, das als Mosaik erscheinen soll – Portrait, Landschaft oder Tier.", color: "#FF6B6B", bg: "rgba(255,107,107,0.2)" },
-    { num: "2", icon: Cpu, title: "Tile-Fotos hochladen", desc: "Füge die kleinen Fotos hinzu, aus denen das Mosaik zusammengesetzt wird.", color: "#00C9B1", bg: "rgba(0,201,177,0.2)" },
-    { num: "3", icon: Printer, title: "KI berechnet & druckt", desc: "Unser Algorithmus ordnet jedes Tile optimal zu und wir drucken es für dich.", color: "#FFD93D", bg: "rgba(255,217,61,0.2)" },
+    { num: "1", icon: Upload, title: "Foto hochladen", desc: "Lade dein Lieblingsfoto hoch – Portrait, Landschaft oder Tier. JPG, PNG, HEIC.", color: "#FF6B6B", bg: "rgba(255,107,107,0.2)" },
+    { num: "2", icon: Cpu, title: "KI berechnet Mosaik", desc: "Unser Algorithmus wählt aus über 10'000 Fotos die farblich perfekten Kacheln – in Sekunden.", color: "#00C9B1", bg: "rgba(0,201,177,0.2)" },
+    { num: "3", icon: Printer, title: "Bestellen & geniessen", desc: "Vorschau kostenlos. Erst beim Bestellen zahlen. Lieferung in die ganze Schweiz.", color: "#FFD93D", bg: "rgba(255,217,61,0.2)" },
   ];
   return (
     <section id="how-it-works" style={{ padding: "6rem 0", position: "relative", overflow: "hidden", background: "#1a1a2e" }}>
@@ -374,7 +314,7 @@ function HowItWorksSection() {
 function WhySection() {
   const features = [
     { icon: Zap, title: "KI-gestützte Präzision", desc: "Unser Algorithmus wählt für jede Position das farblich perfekte Tile – automatisch und in Sekunden.", color: "#FF6B6B", bg: "rgba(255,107,107,0.1)" },
-    { icon: Printer, title: "Druckfertig & hochauflösend", desc: "300 dpi – bereit für den Druck in Galeriequalität auf Leinwand, Alu-Dibond oder Fotopapier.", color: "#00C9B1", bg: "rgba(0,201,177,0.1)" },
+    { icon: Printer, title: "Druckfertig & hochauflösend", desc: "150 dpi – bereit für den Druck in Galeriequalität auf Leinwand, Alu-Dibond oder Fotopapier.", color: "#00C9B1", bg: "rgba(0,201,177,0.1)" },
     { icon: Shield, title: "Lieferung in 48h", desc: "Schnelle Produktion und Lieferung in der ganzen Schweiz – pünktlich zum Anlass.", color: "#FFD93D", bg: "rgba(255,217,61,0.1)" },
     { icon: Heart, title: "Persönliche Erinnerungen", desc: "Verwende deine eigenen Fotos als Tiles – jedes Mosaik erzählt eine einzigartige Geschichte.", color: "#FF8FB1", bg: "rgba(255,143,177,0.1)" },
     { icon: Star, title: "Schweizer Qualität", desc: "Produziert und versendet aus der Schweiz – mit höchsten Qualitätsstandards.", color: "#9B59B6", bg: "rgba(155,89,182,0.1)" },
@@ -418,70 +358,101 @@ function WhySection() {
 }
 
 /* ─── PRICING ─── */
+// Echte Formate aus Studio.tsx / Pricing.tsx
+const FORMATS = [
+  { label: "20×20 cm", price: "CHF 29", desc: "Ideal für Schreibtisch oder Regal", popular: false, color: "#FF9F43" },
+  { label: "30×30 cm", price: "CHF 49", desc: "Bestseller – perfekt für Wohnzimmer", popular: true, color: "#FF6B6B" },
+  { label: "40×40 cm", price: "CHF 69", desc: "Imposant & detailreich", popular: false, color: "#00C9B1" },
+  { label: "50×70 cm", price: "CHF 99", desc: "Galerie-Format für grosse Wände", popular: false, color: "#9B59B6" },
+  { label: "70×70 cm", price: "CHF 139", desc: "Maximale Wirkung", popular: false, color: "#4A90D9" },
+  { label: "100×100 cm", price: "CHF 199", desc: "Statement-Piece für besondere Räume", popular: false, color: "#FF8FB1" },
+];
+
+const MATERIALS = [
+  { icon: "🖼️", label: "Leinwand", note: "Inklusive", desc: "Klassisch & warm. Gespannt auf Holzrahmen." },
+  { icon: "✨", label: "Acrylglas", note: "+CHF 20", desc: "Modern & glänzend. Brillante Farben." },
+  { icon: "🔲", label: "Alu-Dibond", note: "+CHF 15", desc: "Zeitlos & robust. Extrem langlebig." },
+  { icon: "📄", label: "Fotopapier", note: "−CHF 10", desc: "Klassischer Fotoabzug. Ideal zum Einrahmen." },
+];
+
 function PricingSection() {
-  const plans = [
-    { name: "Starter", price: "CHF 49", period: "pro Mosaik", desc: "Perfekt für ein erstes Mosaik", features: ["50×50 Tiles", "A3-Format (30×42 cm)", "Fotopapier-Druck", "Lieferung in 5 Werktagen", "Digitale Vorschau"], color: "#FF9F43", popular: false },
-    { name: "Premium", price: "CHF 89", period: "pro Mosaik", desc: "Das beliebteste Paket", features: ["100×100 Tiles", "A2-Format (42×60 cm)", "Leinwand oder Alu-Dibond", "Lieferung in 48h", "Digitale Vorschau", "Unbegrenzte Korrekturen"], color: "#FF6B6B", popular: true },
-    { name: "Galerie", price: "CHF 149", period: "pro Mosaik", desc: "Für Kunstliebhaber", features: ["200×200 Tiles", "A1-Format (60×84 cm)", "Museum-Leinwand mit Rahmen", "Express-Lieferung in 24h", "Digitale Vorschau", "Unbegrenzte Korrekturen", "Persönliche Beratung"], color: "#9B59B6", popular: false },
-  ];
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }} id="pricing">
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="purple">Preise</SectionLabel>
-          <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e", marginBottom: 16 }}>Einfache, transparente Preise</h2>
-          <p style={{ fontSize: 16, color: "#6B7280", maxWidth: 440, margin: "0 auto", lineHeight: 1.75 }}>Keine versteckten Kosten. Wähle das Paket, das zu deinem Projekt passt.</p>
+          <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e", marginBottom: 16 }}>
+            Transparente Preise
+          </h2>
+          <p style={{ fontSize: 16, color: "#6B7280", maxWidth: 480, margin: "0 auto", lineHeight: 1.75 }}>
+            Keine versteckten Kosten. Vorschau immer kostenlos. Erst beim Bestellen zahlen.
+          </p>
         </FadeIn>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 24, maxWidth: 960, margin: "0 auto" }}>
-          {plans.map((plan, i) => (
-            <FadeIn key={i} delay={i * 0.1}>
+
+        {/* Format grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20, maxWidth: 960, margin: "0 auto 48px" }}>
+          {FORMATS.map((fmt, i) => (
+            <FadeIn key={i} delay={i * 0.07}>
               <div style={{
-                position: "relative", background: "white", borderRadius: 24, padding: "2rem",
-                border: plan.popular ? "1.5px solid rgba(255,107,107,0.4)" : "1px solid #E8E8E4",
-                boxShadow: plan.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none",
+                position: "relative", background: "white", borderRadius: 20, padding: "1.75rem",
+                border: fmt.popular ? "1.5px solid rgba(255,107,107,0.4)" : "1px solid #E8E8E4",
+                boxShadow: fmt.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none",
                 transition: "transform 0.3s, box-shadow 0.3s",
               }}
-                onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-8px)"; e.currentTarget.style.boxShadow = plan.popular ? "0 16px 60px rgba(255,107,107,0.2)" : "0 8px 32px rgba(0,0,0,0.08)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = plan.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none"; }}>
-                {plan.popular && (
+                onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-6px)"; e.currentTarget.style.boxShadow = fmt.popular ? "0 16px 60px rgba(255,107,107,0.2)" : "0 8px 32px rgba(0,0,0,0.08)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = fmt.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none"; }}>
+                {fmt.popular && (
                   <div style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)" }}>
                     <span style={{ background: "linear-gradient(135deg, #FF6B6B, #FF9F43)", color: "white", fontSize: 11, fontWeight: 700, padding: "6px 16px", borderRadius: 9999, letterSpacing: "1px", textTransform: "uppercase" }}>
-                      Beliebteste Wahl
+                      Bestseller
                     </span>
                   </div>
                 )}
-                <div style={{ marginBottom: 24 }}>
-                  <h3 style={{ fontSize: 18, fontWeight: 700, color: "#1a1a2e", marginBottom: 4 }}>{plan.name}</h3>
-                  <p style={{ fontSize: 13, color: "#6B7280" }}>{plan.desc}</p>
+                <h3 style={{ fontSize: 20, fontWeight: 700, color: "#1a1a2e", marginBottom: 4 }}>{fmt.label}</h3>
+                <p style={{ fontSize: 13, color: "#6B7280", marginBottom: 16 }}>{fmt.desc}</p>
+                <div style={{ marginBottom: 20 }}>
+                  <span style={{ fontFamily: "'DM Serif Display', serif", fontSize: 36, fontWeight: 700, color: fmt.color }}>{fmt.price}</span>
                 </div>
-                <div style={{ marginBottom: 32 }}>
-                  <span style={{ fontFamily: "'DM Serif Display', serif", fontSize: 40, fontWeight: 700, color: plan.color }}>{plan.price}</span>
-                  <span style={{ fontSize: 13, color: "#6B7280", marginLeft: 8 }}>{plan.period}</span>
-                </div>
-                <ul style={{ listStyle: "none", marginBottom: 32, display: "flex", flexDirection: "column", gap: 12 }}>
-                  {plan.features.map((f, j) => (
-                    <li key={j} style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 14, color: "#1a1a2e" }}>
-                      <CheckCircle2 size={16} style={{ color: plan.color, marginTop: 2, flexShrink: 0 }} />
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-                <a href={STUDIO_URL} style={{
+                <Link to={STUDIO_URL} style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                  width: "100%", height: 44, borderRadius: 9999, fontSize: 14, fontWeight: 700, textDecoration: "none",
-                  ...(plan.popular
+                  width: "100%", height: 42, borderRadius: 9999, fontSize: 14, fontWeight: 700, textDecoration: "none",
+                  ...(fmt.popular
                     ? { background: "linear-gradient(135deg, #FF6B6B, #FF9F43)", color: "white", border: "none" }
                     : { background: "transparent", color: "#1a1a2e", border: "1.5px solid #E8E8E4" }),
-                }}
-                  onMouseEnter={(e) => { if (!plan.popular) { e.currentTarget.style.borderColor = "rgba(255,107,107,0.4)"; e.currentTarget.style.color = "#FF6B6B"; } }}
-                  onMouseLeave={(e) => { if (!plan.popular) { e.currentTarget.style.borderColor = "#E8E8E4"; e.currentTarget.style.color = "#1a1a2e"; } }}>
-                  {plan.popular ? "Jetzt bestellen" : "Auswählen"}
-                  <ChevronRight size={16} />
-                </a>
+                }}>
+                  Dieses Format wählen <ChevronRight size={15} />
+                </Link>
               </div>
             </FadeIn>
           ))}
         </div>
+
+        {/* Materials */}
+        <FadeIn delay={0.1}>
+          <div style={{ maxWidth: 960, margin: "0 auto", background: "white", borderRadius: 20, padding: "2rem", border: "1px solid #E8E8E4" }}>
+            <h3 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, color: "#1a1a2e", marginBottom: 20 }}>Materialien</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+              {MATERIALS.map((m, i) => (
+                <div key={i} style={{ background: "#FAFAF8", borderRadius: 14, padding: "1.25rem", border: "1px solid #E8E8E4" }}>
+                  <div style={{ fontSize: 28, marginBottom: 10 }}>{m.icon}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "#1a1a2e" }}>{m.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: m.note.startsWith("+") ? "#FF6B6B" : m.note.startsWith("−") ? "#6BCB77" : "#6B7280" }}>{m.note}</span>
+                  </div>
+                  <p style={{ fontSize: 13, color: "#6B7280", lineHeight: 1.5 }}>{m.desc}</p>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid #E8E8E4", display: "flex", justifyContent: "center" }}>
+              <Link to="/preise" style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                fontSize: 14, fontWeight: 600, color: "#FF6B6B", textDecoration: "none",
+              }}>
+                Alle Preise & Details ansehen <ChevronRight size={15} />
+              </Link>
+            </div>
+          </div>
+        </FadeIn>
       </div>
     </section>
   );
@@ -563,56 +534,11 @@ function CtaSection() {
   );
 }
 
-/* ─── FOOTER ─── */
-function Footer() {
-  return (
-    <footer style={{ background: "#1a1a2e", color: "white", padding: "4rem 0" }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-              <LogoMark size={40} />
-              <span style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, fontWeight: 700, color: "white" }}>MosaicPrint</span>
-            </div>
-            <p style={{ fontSize: 14, color: "rgba(255,255,255,0.5)", lineHeight: 1.7, maxWidth: 280 }}>
-              Verwandle deine schönsten Erinnerungen in ein einzigartiges Kunstwerk. Professioneller Mosaik-Druck aus der Schweiz.
-            </p>
-          </div>
-          <div>
-            <h4 style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "2px", color: "rgba(255,255,255,0.4)", marginBottom: 16 }}>Service</h4>
-            <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 12 }}>
-              {[{ label: "Studio", href: STUDIO_URL }, { label: "Preise", href: "#pricing" }, { label: "Galerie", href: "#gallery" }, { label: "So funktioniert's", href: "#how-it-works" }].map((l) => (
-                <li key={l.label}><a href={l.href} style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", textDecoration: "none" }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = "white")}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(255,255,255,0.6)")}>{l.label}</a></li>
-              ))}
-            </ul>
-          </div>
-          <div>
-            <h4 style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "2px", color: "rgba(255,255,255,0.4)", marginBottom: 16 }}>Rechtliches</h4>
-            <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 12 }}>
-              {["Impressum", "Datenschutz", "AGB", "Kontakt"].map((l) => (
-                <li key={l}><a href="#" style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", textDecoration: "none" }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = "white")}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(255,255,255,0.6)")}>{l}</a></li>
-              ))}
-            </ul>
-          </div>
-        </div>
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 32, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>© 2025 MosaicPrint · Zürich, Schweiz</p>
-          <p style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>Hergestellt mit ❤️ in der Schweiz</p>
-        </div>
-      </div>
-    </footer>
-  );
-}
-
 /* ─── PAGE ─── */
+// Hinweis: Navbar und Footer kommen aus App.tsx (global), nicht aus dieser Datei
 export default function Landing() {
   return (
-    <div style={{ minHeight: "100vh", fontFamily: "'DM Sans', sans-serif" }}>
-      <Navbar />
+    <div style={{ fontFamily: "'DM Sans', sans-serif" }}>
       <HeroSection />
       <RainbowBand />
       <UseCasesSection />
@@ -623,7 +549,6 @@ export default function Landing() {
       <PricingSection />
       <TestimonialsSection />
       <CtaSection />
-      <Footer />
     </div>
   );
 }
