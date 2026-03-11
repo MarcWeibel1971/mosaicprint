@@ -351,20 +351,23 @@ export default function Studio() {
           const hasCustomSettings = Object.keys(currentSettings).length > 0;
 
           if (imageType === 'portrait' && !hasCustomSettings) {
-            // Portrait preset (Mosaicer-inspired): NO overlay, brightness drives face structure
-            // Larger tiles (recognizable photos), strong brightness matching, no color transfer
+            // Portrait preset: fine grid for sharp face details, strong brightness + SSD matching
+            // More tiles (90 cols) + smaller tile size (12px) = 3× more cells for eyes/nose/mouth
             const portraitPreset = {
-              baseTiles: 60,        // Mosaicer-style: ~60 columns for recognizable tiles
-              tilePx: 16,           // Larger tiles = each photo is clearly visible
-              neighborRadius: 4,    // wider anti-repetition radius
-              neighborPenalty: 180, // strong anti-repetition
-              contrastBoost: 1.20,  // subtle contrast boost only
+              baseTiles: 90,        // More columns = finer grid = sharper face details
+              tilePx: 12,           // Smaller tiles = more detail in face regions
+              neighborRadius: 5,    // wider anti-repetition radius for portrait
+              neighborPenalty: 200, // strong anti-repetition
+              contrastBoost: 1.25,  // stronger contrast for face clarity
               histogramBlend: 0.0,  // NO overlay – tiles match naturally
-              labWeight: 0.15,
-              brightnessWeight: 0.40, // KEY: brightness drives face structure without overlay
-              textureWeight: 0.08,
+              labWeight: 0.12,
+              brightnessWeight: 0.45, // KEY: brightness drives face structure without overlay
+              textureWeight: 0.10,
+              portraitMode: true,   // enables skin-tone boost in matching
             };
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(portraitPreset));
+            // Also clear theme filter so ALL tiles are available for skin tone matching
+            localStorage.removeItem('mosaicprint_selected_theme');
             setAutoPresetApplied('Portrait');
           } else if (imageType === 'landscape' && !hasCustomSettings) {
             // Landscape preset: wider tiles, more color accuracy, no overlay
@@ -1111,13 +1114,20 @@ export default function Studio() {
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
           const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
-          // Face region: boost edge and texture weights for sharper eye/nose/mouth rendering
+          // Face region: boost SSD, brightness, edge and texture weights for sharper eye/nose/mouth
           if (inFace) {
-            const wLabF = wLabBase * 0.75;
-            const wBrightF = wBrightBase * 1.20; // extra brightness boost in face areas
-            const faceEdgeWeight = edgeWeight * 1.6; // stronger edge matching in faces
-            const faceTextureWeight = wTextureBase * 1.3;
-            let dist = wSsdBase * ssdScore * 100 + wLabF * labDist + 0.08 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
+            const wSsdFace = 0.50;             // SSD dominates in face areas (pixel accuracy)
+            const wLabF = wLabBase * 0.60;     // less LAB weight – SSD handles color
+            const wBrightF = wBrightBase * 1.30; // extra brightness boost in face areas
+            const faceEdgeWeight = edgeWeight * 1.8; // stronger edge matching in faces
+            const faceTextureWeight = wTextureBase * 1.5; // texture matters for skin/hair
+            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.06 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
+            // Skin-tone bonus: if target cell is skin-toned (warm L:40-80, a:5-25, b:10-35)
+            // and tile is also skin-toned, reduce distance (better match)
+            const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
+            const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
+            if (isTargetSkin && isTileSkin) dist -= 8; // skin-tone bonus: prefer matching skin tiles
+            if (isTargetSkin && !isTileSkin) dist += 12; // penalize non-skin tiles in skin areas
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
