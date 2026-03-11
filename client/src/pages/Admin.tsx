@@ -177,10 +177,10 @@ export default function Admin() {
     if (!activeJob) return
     const interval = setInterval(async () => {
       try {
-        const params = encodeURIComponent(JSON.stringify({ json: { sourceId: activeJob } }))
+        const params = encodeURIComponent(JSON.stringify({ sourceId: activeJob }))
         const res = await fetch(`/api/trpc/getImportStatus?input=${params}`)
         const data = await res.json()
-        const job: ImportJob = data.result?.data?.json ?? data.result?.data ?? data
+        const job: ImportJob = data.result?.data ?? data
         setImportProgress(prev => ({ ...prev, [activeJob]: job }))
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
@@ -199,10 +199,10 @@ export default function Admin() {
     const sourceId = activeJob.replace('smart_', '')
     const interval = setInterval(async () => {
       try {
-        const params = encodeURIComponent(JSON.stringify({ json: { sourceId } }))
+        const params = encodeURIComponent(JSON.stringify({ sourceId }))
         const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
         const data = await res.json()
-        const job: SmartImportJob = data.result?.data?.json ?? data.result?.data ?? data
+        const job: SmartImportJob = data.result?.data ?? data
         setSmartJob(job)
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
@@ -587,10 +587,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
-      const encoded = encodeURIComponent(JSON.stringify({ json: params }))
+      const encoded = encodeURIComponent(JSON.stringify(params))
       const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
       const data = await res.json()
-      const parsed = data.result?.data?.json ?? data.result?.data ?? data
+      const parsed = data.result?.data ?? data
       setImages(parsed.images ?? [])
       setTotal(parsed.total ?? 0)
     } catch {
