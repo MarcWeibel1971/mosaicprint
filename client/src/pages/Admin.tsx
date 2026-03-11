@@ -133,7 +133,7 @@ export default function Admin() {
   const [importProgress, setImportProgress] = useState<Record<string, ImportJob>>({})
   const [cronStatus, setCronStatus] = useState<CronStatus | null>(null)
   const [smartJob, setSmartJob] = useState<SmartImportJob | null>(null)
-  const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels'>('pexels')
+  const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels' | 'pixabay'>('pexels')
   const [importAllBatch, setImportAllBatch] = useState(500)
   const [importAllRunning, setImportAllRunning] = useState(false)
   // Gezielte Importe (Empfehlungen)
@@ -153,7 +153,7 @@ export default function Admin() {
     } catch { /* ignore */ }
   }, [])
 
-  const startSmartImport = async (sourceId: 'unsplash' | 'pexels') => {
+  const startSmartImport = async (sourceId: 'unsplash' | 'pexels' | 'pixabay') => {
     if (activeJob) return
     setActiveJob(`smart_${sourceId}`)
     setSmartJob({ running: true, log: [], imported: 0, total: 0 })
@@ -649,7 +649,7 @@ export default function Admin() {
               <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-indigo-900 text-sm mb-0.5">Alle Quellen gleichzeitig</div>
-                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash + Shutterstock parallel für maximalen Durchsatz</div>
+                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash + Pixabay parallel für maximalen Durchsatz</div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <input

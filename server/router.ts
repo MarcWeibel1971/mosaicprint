@@ -42,19 +42,19 @@ const COLOR_BRIGHTNESS_KEYWORDS: Record<string, Record<string, string[]>> = {
     bright: ["bright yellow", "lemon yellow", "yellow dandelion", "sunshine", "yellow rose"],
   },
   green: {
-    dark: ["dark forest", "dark green leaves", "pine forest", "deep jungle", "dark moss"],
-    mid:  ["green nature", "green grass", "green leaves", "fern", "meadow"],
-    bright: ["bright green", "lime green", "spring leaves", "fresh grass", "green apple"],
+    dark: ["dark forest", "dark green leaves", "pine forest", "deep jungle", "dark moss", "dark emerald", "deep green abstract", "dark olive", "forest shadow", "dark fern"],
+    mid:  ["green nature", "green grass", "green leaves", "fern", "meadow", "emerald green", "sage green", "mint green", "olive green", "green bokeh", "green abstract", "jade green"],
+    bright: ["bright green", "lime green", "spring leaves", "fresh grass", "green apple", "vivid green", "neon green", "bright emerald", "electric green", "bright lime"],
   },
   blue: {
-    dark: ["dark blue ocean", "midnight blue", "deep sea", "dark navy", "night sky"],
-    mid:  ["blue sky", "blue ocean", "blue water", "blue lake", "cornflower"],
-    bright: ["bright blue sky", "turquoise water", "light blue", "azure sky", "cyan sea"],
+    dark: ["dark blue ocean", "midnight blue", "deep sea", "dark navy", "night sky", "deep blue abstract", "dark indigo", "navy blue texture", "dark cobalt", "deep ocean blue"],
+    mid:  ["blue sky", "blue ocean", "blue water", "blue lake", "cornflower", "cobalt blue", "sapphire blue", "blue abstract", "blue bokeh", "royal blue", "periwinkle", "blue gradient"],
+    bright: ["bright blue sky", "turquoise water", "light blue", "azure sky", "cyan sea", "vivid blue", "electric blue", "bright cobalt", "sky blue clear", "bright azure", "neon blue"],
   },
   purple: {
-    dark: ["dark purple", "deep violet", "dark plum", "dark lavender", "eggplant", "purple night", "violet shadow", "amethyst dark", "purple abstract dark", "indigo dark"],
-    mid:  ["purple flower", "lavender field", "violet", "purple sunset", "lilac", "wisteria", "purple iris", "violet abstract", "purple bokeh", "amethyst crystal"],
-    bright: ["bright purple", "bright violet", "purple orchid", "magenta flower", "fuchsia", "purple neon", "violet light", "purple gradient", "bright lavender", "purple sky"],
+    dark: ["dark purple", "deep violet", "dark plum", "dark lavender", "eggplant", "purple night", "violet shadow", "amethyst dark", "purple abstract dark", "indigo dark", "dark indigo texture", "deep violet abstract"],
+    mid:  ["purple flower", "lavender field", "violet", "purple sunset", "lilac", "wisteria", "purple iris", "violet abstract", "purple bokeh", "amethyst crystal", "violet bokeh", "purple nature", "indigo blue", "violet gradient"],
+    bright: ["bright purple", "bright violet", "purple orchid", "magenta flower", "fuchsia", "purple neon", "violet light", "purple gradient", "bright lavender", "purple sky", "vivid violet", "electric purple", "bright magenta"],
   },
   pink: {
     dark: ["dark pink", "deep rose", "dark coral", "dark salmon", "mauve", "dark magenta", "dark fuchsia", "deep pink abstract", "rose dark", "pink shadow"],
@@ -62,9 +62,9 @@ const COLOR_BRIGHTNESS_KEYWORDS: Record<string, Record<string, string[]>> = {
     bright: ["bright pink", "hot pink", "pink tulip", "pink sakura", "light pink", "neon pink", "pink neon light", "bright rose", "pink sky", "pink sunset"],
   },
   cyan: {
-    dark: ["dark teal", "deep teal", "dark turquoise", "teal shadow", "dark cyan", "deep aqua", "dark seafoam", "teal abstract dark", "dark emerald water", "deep teal texture"],
-    mid:  ["teal color", "turquoise water", "cyan abstract", "teal texture", "aqua color", "teal bokeh", "cyan gradient", "teal nature", "turquoise sea", "teal pattern"],
-    bright: ["bright teal", "bright turquoise", "bright cyan", "neon teal", "bright aqua", "cyan neon", "turquoise bright", "teal neon light", "bright seafoam", "cyan sky"],
+    dark: ["dark teal", "deep teal", "dark turquoise", "teal shadow", "dark cyan", "deep aqua", "dark seafoam", "teal abstract dark", "dark emerald water", "deep teal texture", "dark teal wall", "deep cyan ocean"],
+    mid:  ["teal color", "turquoise water", "cyan abstract", "teal texture", "aqua color", "teal bokeh", "cyan gradient", "teal nature", "turquoise sea", "teal pattern", "cyan blue water", "teal green nature", "aquamarine", "seafoam green"],
+    bright: ["bright teal", "bright turquoise", "bright cyan", "neon teal", "bright aqua", "cyan neon", "turquoise bright", "teal neon light", "bright seafoam", "cyan sky", "tropical turquoise water", "bright aqua pool", "vivid cyan"],
   },
   brown: {
     dark: ["dark wood", "dark soil", "dark bark", "dark coffee", "dark chocolate"],
@@ -122,6 +122,23 @@ const LOW_SAT_KEYWORDS = [
   "bright white overexposed", "deep shadow abstract minimal",
   // Desaturated nature
   "black white bokeh", "monochrome fog landscape", "grayscale water reflection",
+];
+
+// HIGH_SAT_KEYWORDS: Vivid, saturated images – critical for colorful mosaics
+// Score shows only 4% high-sat (target 30%) – these fill the gap
+const HIGH_SAT_KEYWORDS = [
+  // Vivid nature
+  "vivid rainbow colors", "colorful tropical fish", "bright coral reef", "vivid butterfly",
+  "colorful parrot", "vivid flowers macro", "bright tropical bird", "rainbow abstract",
+  // Vivid food & objects
+  "colorful macarons", "vivid fruit market", "bright candy colors", "colorful vegetables",
+  "vivid paint splatter", "bright neon lights", "colorful umbrellas", "vivid balloons",
+  // Vivid abstract
+  "vibrant abstract art", "colorful gradient vivid", "neon abstract bright", "vivid color explosion",
+  "saturated color texture", "bright vivid bokeh", "colorful smoke abstract", "rainbow gradient",
+  // Cool vivid
+  "vivid blue turquoise", "bright teal ocean", "electric blue abstract", "vivid cyan water",
+  "bright indigo purple", "vivid violet abstract", "electric green nature", "bright lime abstract",
 ];
 
 // EXTREME_BRIGHTNESS_KEYWORDS: Very dark and very bright tiles for eyes, hair, highlights
@@ -252,6 +269,27 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
         deficit: lowSatDeficit,
         label: 'low-sat/neutral/portrait',
         subject: 'portrait',
+      });
+    }
+  }
+
+  // Add HIGH_SAT_KEYWORDS with HIGH priority (1.8×)
+  // Score shows only 4% high-sat (target 30%) – vivid/saturated tiles are critically missing
+  const highSatRes = await pool.query(`
+    SELECT COUNT(*) as cnt FROM mosaic_images
+    WHERE SQRT(avg_a * avg_a + avg_b * avg_b) >= 42
+  `);
+  const highSatCnt = Number(highSatRes.rows[0]?.cnt ?? 0);
+  const highSatTarget = Math.round(targetPerBucket * 30); // 30% of total target
+  const highSatDeficit = Math.max(0, highSatTarget - highSatCnt);
+  if (highSatDeficit > 0) {
+    for (const kw of HIGH_SAT_KEYWORDS) {
+      tasks.push({
+        query: kw,
+        priority: 1.8,
+        deficit: highSatDeficit,
+        label: 'high-sat/vivid/general',
+        subject: 'general',
       });
     }
   }
@@ -519,15 +557,18 @@ export const appRouter = router({
             : process.env.PIXABAY_API_KEY;
           if (!apiKey) { status.error = `${input.source} API key missing`; return; }
           let imported = 0;
-          // Use diverse keyword search instead of /curated (which always returns same ~1000 popular photos)
-          // Shuffle keywords and rotate through them with random page offsets for maximum diversity
+          // Use gap-based keyword ordering: fill most-needed color buckets first
+          // Falls back to random shuffle from all keywords for variety
+          const gapTasks = await analyzeDbGaps(200);
+          const gapKeywords = gapTasks.map(t => t.query);
           const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
-          const shuffled = allKeywords.sort(() => Math.random() - 0.5);
+          const extraKeywords = allKeywords.filter(k => !gapKeywords.includes(k)).sort(() => Math.random() - 0.5);
+          const orderedKeywords = [...gapKeywords, ...extraKeywords];
           const perPage = input.source === "pexels" ? 80 : input.source === "pixabay" ? 200 : 30;
           const CONCURRENCY = 5;
           let kwIdx = 0;
-          while (imported < input.count && kwIdx < shuffled.length) {
-            const keyword = shuffled[kwIdx++];
+          while (imported < input.count && kwIdx < orderedKeywords.length) {
+            const keyword = orderedKeywords[kwIdx++];
             // Random page offset (1-5) to avoid always getting the same first results
             const page = Math.floor(Math.random() * 5) + 1;
             try {
@@ -595,7 +636,7 @@ export const appRouter = router({
   // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
   smartImport: publicProcedure
     .input(z.object({
-      sourceId: z.enum(["unsplash", "pexels"]).default("pexels"),
+      sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
       count: z.number().min(1).max(5000).default(500),
       targetPerBucket: z.number().min(100).max(2000).default(400),
     }))
@@ -606,7 +647,9 @@ export const appRouter = router({
       const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
       (async () => {
         try {
-          const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
+          const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY
+            : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
+            : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
 
           // Analyse DB gaps: get prioritized list of (query, deficit, label)
@@ -616,7 +659,7 @@ export const appRouter = router({
 
           let imported = 0;
           const CONCURRENCY = 3; // parallel LAB computation
-          const perPage = input.sourceId === "pexels" ? 30 : 20;
+          const perPage = input.sourceId === "pexels" ? 30 : input.sourceId === "pixabay" ? 200 : 20;
 
           for (const task of tasks) {
             if (imported >= input.count) break;
@@ -633,6 +676,17 @@ export const appRouter = router({
                   sourceUrl: p.src.large,
                   tile128Url: p.src.small,
                 }));
+              } else if (input.sourceId === "pixabay") {
+                const res = await fetch(
+                  `https://pixabay.com/api/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(task.query)}&per_page=${perPage}&image_type=photo&safesearch=true&orientation=horizontal`,
+                  { headers: { 'Accept': 'application/json' } }
+                );
+                if (!res.ok) { log(`⚠️ Pixabay API error ${res.status} for "${task.query}"`); continue; }
+                const data = await res.json() as any;
+                photos = (data.hits ?? []).map((p: any) => ({
+                  sourceUrl: p.webformatURL ?? p.largeImageURL ?? '',
+                  tile128Url: p.previewURL ?? p.webformatURL ?? '',
+                })).filter((p: any) => p.sourceUrl && p.tile128Url);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
