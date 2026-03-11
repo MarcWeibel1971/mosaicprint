@@ -360,10 +360,68 @@ export const appRouter = router({
       `);
       const bySubject: Record<string, number> = {};
       for (const row of subjectRes.rows) bySubject[row.subject] = Number(row.cnt);
+      // Warm vs. Cool distribution (hue angle: a>0 = warm/red side, b<0 = cool/blue side)
+      const warmCoolRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'neutral'
+            WHEN avg_a > 0 AND avg_b >= 0 THEN 'warm'
+            WHEN avg_a > 0 AND avg_b < 0 THEN 'warm'
+            WHEN avg_b < -8 THEN 'kuehl'
+            WHEN avg_a < -8 THEN 'kuehl'
+            ELSE 'neutral'
+          END as temp,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY temp
+      `);
+      const byWarmCool: Record<string, number> = {};
+      for (const row of warmCoolRes.rows) byWarmCool[row.temp] = Number(row.cnt);
+
+      // Extended brightness: extreme dark (<10), dark (10-35), mid (35-65), bright (65-90), extreme bright (>90)
+      const extBrightRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN avg_l < 10 THEN 'extrem_dunkel'
+            WHEN avg_l < 35 THEN 'dunkel'
+            WHEN avg_l < 65 THEN 'mittel'
+            WHEN avg_l < 90 THEN 'hell'
+            ELSE 'extrem_hell'
+          END as brightness5,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY brightness5
+      `);
+      const byBrightness5: Record<string, number> = {};
+      for (const row of extBrightRes.rows) byBrightness5[row.brightness5] = Number(row.cnt);
+
+      // Saturation buckets: low (<30%), mid (30-70%), high (>70%) – chroma = sqrt(a²+b²)
+      const satRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN SQRT(avg_a * avg_a + avg_b * avg_b) < 18 THEN 'niedrig'
+            WHEN SQRT(avg_a * avg_a + avg_b * avg_b) < 42 THEN 'mittel'
+            ELSE 'hoch'
+          END as sat,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY sat
+      `);
+      const bySaturation: Record<string, number> = {};
+      for (const row of satRes.rows) bySaturation[row.sat] = Number(row.cnt);
+
+      // Gray/neutral ratio: chroma < 10 = near-gray
+      const grayRes = await pool.query(`
+        SELECT COUNT(*) as cnt FROM mosaic_images
+        WHERE SQRT(avg_a * avg_a + avg_b * avg_b) < 10
+      `);
+      const grayCount = Number(grayRes.rows[0]?.cnt ?? 0);
+
       // 3D matrix gaps analysis
       const gapTasks = await analyzeDbGaps(200);
       const topGaps = gapTasks.slice(0, 20).map(t => ({ label: t.label, deficit: t.deficit, query: t.query }));
-      return { total, labIndexed, bySource, byColor, byBrightness, bySubject, topGaps, count: total, target: TILE_TARGET };
+      return { total, labIndexed, bySource, byColor, byBrightness, bySubject, topGaps, count: total, target: TILE_TARGET,
+        byWarmCool, byBrightness5, bySaturation, grayCount };
     } catch (e) {
       console.error('[getDbStats error]', e);
       return { total: 0, labIndexed: 0, bySource: {}, byColor: {}, byBrightness: {}, bySubject: {}, topGaps: [], count: 0, target: TILE_TARGET };
@@ -655,6 +713,59 @@ export const appRouter = router({
       const buf = await renderMosaicOnServer({ tiles: input.tiles as TileData[], cols: input.cols, rows: input.rows, tilePx: input.tilePx, overlayBase64: input.overlayBase64, overlayAlpha: input.overlayAlpha });
       const base64 = buf.toString("base64");
       return { base64, mimeType: "image/png" };
+    }),
+
+  // Targeted import: import images for a specific search query
+  targetedImport: publicProcedure
+    .input(z.object({
+      sourceId: z.enum(["unsplash", "pexels"]).default("pexels"),
+      query: z.string().min(1).max(200),
+      count: z.number().min(10).max(500).default(100),
+    }))
+    .mutation(async ({ input }) => {
+      const jobKey = `targeted_${input.sourceId}_${Date.now()}`;
+      const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
+      if (!apiKey) return { started: false, error: "API key missing" };
+      // Run in background
+      (async () => {
+        try {
+          const perPage = Math.min(input.count, input.sourceId === "pexels" ? 80 : 30);
+          let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
+          if (input.sourceId === "pexels") {
+            const res = await fetch(
+              `https://api.pexels.com/v1/search?query=${encodeURIComponent(input.query)}&per_page=${perPage}&orientation=square`,
+              { headers: { Authorization: apiKey } }
+            );
+            if (res.ok) {
+              const data = await res.json() as any;
+              photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+            }
+          } else {
+            const res = await fetch(
+              `https://api.unsplash.com/search/photos?query=${encodeURIComponent(input.query)}&per_page=${perPage}&orientation=squarish`,
+              { headers: { Authorization: `Client-ID ${apiKey}` } }
+            );
+            if (res.ok) {
+              const data = await res.json() as any;
+              photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+            }
+          }
+          // Process photos (same pattern as smartImport)
+          const CONCURRENCY = 3;
+          for (let i = 0; i < photos.length; i += CONCURRENCY) {
+            const batch = photos.slice(i, i + CONCURRENCY);
+            await Promise.all(batch.map(async (photo) => {
+              try {
+                const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
+                await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+              } catch { /* skip duplicates / errors */ }
+            }));
+          }
+        } catch (e) {
+          console.error('[targetedImport error]', e);
+        }
+      })();
+      return { started: true, query: input.query };
     }),
 
   // Upload tile image

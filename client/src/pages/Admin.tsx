@@ -43,6 +43,11 @@ interface DbStatsDetail {
   bySource: Record<string, number>
   byColor: Record<string, number>
   byBrightness: Record<string, number>
+  byWarmCool?: Record<string, number>
+  byBrightness5?: Record<string, number>
+  bySaturation?: Record<string, number>
+  grayCount?: number
+  bySubject?: Record<string, number>
 }
 interface CronStatus {
   enabled: boolean; current: number; target: number; remaining: number; intervalHours: number
@@ -576,6 +581,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [dedupProgress, setDedupProgress] = useState<{ before: number; deleted: number; after: number } | null>(null)
   const [constraintLoading, setConstraintLoading] = useState(false)
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
+  const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
+  const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -644,6 +651,29 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setConstraintLoading(false)
     }
   }, [])
+
+  const runQuickImport = useCallback(async (query: string, label: string) => {
+    setQuickImportLoading(query)
+    setQuickImportResult(prev => ({ ...prev, [query]: '⏳ Importiere...' }))
+    try {
+      const res = await fetch('/api/trpc/targetedImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: 'pexels', query, count: 80 }),
+      })
+      const data = await res.json()
+      if (data.result?.data?.started || data.started) {
+        setQuickImportResult(prev => ({ ...prev, [query]: `✅ Import gestartet (bis zu 80 Bilder für "${label}")` }))
+        setTimeout(() => { fetchDbStats(); fetchImages(1) }, 8000)
+      } else {
+        setQuickImportResult(prev => ({ ...prev, [query]: `❌ Fehler: ${data.result?.data?.error ?? 'Unbekannt'}` }))
+      }
+    } catch (e) {
+      setQuickImportResult(prev => ({ ...prev, [query]: `❌ Netzwerkfehler` }))
+    } finally {
+      setQuickImportLoading(null)
+    }
+  }, [fetchDbStats, fetchImages])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter])
@@ -748,6 +778,183 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                 })}
               </div>
             </div>
+
+            {/* Warm vs. Cool */}
+            {dbStats.byWarmCool && (() => {
+              const warm = dbStats.byWarmCool!['warm'] ?? 0
+              const kuehl = dbStats.byWarmCool!['kuehl'] ?? 0
+              const neutral = dbStats.byWarmCool!['neutral'] ?? 0
+              const total = warm + kuehl + neutral || 1
+              const warmPct = Math.round(warm / total * 100)
+              const kuehlPct = Math.round(kuehl / total * 100)
+              const neutralPct = Math.round(neutral / total * 100)
+              const kuehlOk = kuehlPct >= 20
+              return (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Warm vs. Kühl (Farbtemperatur)</h3>
+                  <div className="flex gap-2 mb-2">
+                    <div className="flex-1 bg-orange-50 border border-orange-200 rounded-xl p-3 text-center">
+                      <div className="text-2xl mb-1">🔥</div>
+                      <div className="text-xs text-gray-500">Warm</div>
+                      <div className="text-lg font-bold text-orange-600">{warmPct}%</div>
+                      <div className="text-xs text-gray-400">{warm.toLocaleString()}</div>
+                    </div>
+                    <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                      <div className="text-2xl mb-1">⚪</div>
+                      <div className="text-xs text-gray-500">Neutral</div>
+                      <div className="text-lg font-bold text-gray-600">{neutralPct}%</div>
+                      <div className="text-xs text-gray-400">{neutral.toLocaleString()}</div>
+                    </div>
+                    <div className={`flex-1 rounded-xl p-3 text-center border ${kuehlOk ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
+                      <div className="text-2xl mb-1">❄️</div>
+                      <div className="text-xs text-gray-500">Kühl</div>
+                      <div className={`text-lg font-bold ${kuehlOk ? 'text-blue-600' : 'text-red-600'}`}>{kuehlPct}%</div>
+                      <div className="text-xs text-gray-400">{kuehl.toLocaleString()}</div>
+                    </div>
+                  </div>
+                  {/* Stacked bar */}
+                  <div className="h-3 rounded-full overflow-hidden flex">
+                    <div className="bg-orange-400 transition-all" style={{ width: `${warmPct}%` }} />
+                    <div className="bg-gray-300 transition-all" style={{ width: `${neutralPct}%` }} />
+                    <div className="bg-blue-400 transition-all" style={{ width: `${kuehlPct}%` }} />
+                  </div>
+                  {!kuehlOk && (
+                    <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                      ⚠️ <strong>Zu wenig kühle Töne ({kuehlPct}%)</strong> – Ziel: mind. 20%. Import von Blau/Cyan/Violett/Grün empfohlen.
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
+            {/* Extended Brightness 5-Level */}
+            {dbStats.byBrightness5 && (() => {
+              const levels = [
+                { key: 'extrem_dunkel', label: 'Extrem Dunkel', color: '#111827', target: 10 },
+                { key: 'dunkel',        label: 'Dunkel',        color: '#374151', target: 20 },
+                { key: 'mittel',        label: 'Mittel',        color: '#9ca3af', target: 40 },
+                { key: 'hell',          label: 'Hell',          color: '#d1d5db', target: 20 },
+                { key: 'extrem_hell',   label: 'Extrem Hell',   color: '#f9fafb', target: 10 },
+              ]
+              const total5 = levels.reduce((s, l) => s + (dbStats.byBrightness5![l.key] ?? 0), 0) || 1
+              const extremeDark = Math.round((dbStats.byBrightness5!['extrem_dunkel'] ?? 0) / total5 * 100)
+              const extremeLight = Math.round((dbStats.byBrightness5!['extrem_hell'] ?? 0) / total5 * 100)
+              const needsContrast = extremeDark < 10 || extremeLight < 10
+              return (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Helligkeit (5 Stufen) – Kontrast-Analyse</h3>
+                  <div className="flex gap-1 h-16 items-end mb-2">
+                    {levels.map(({ key, label, color, target }) => {
+                      const cnt = dbStats.byBrightness5![key] ?? 0
+                      const pct = Math.round(cnt / total5 * 100)
+                      const ok = pct >= target * 0.7
+                      return (
+                        <div key={key} className="flex-1 flex flex-col items-center gap-1">
+                          <div className="text-xs font-bold" style={{ color: ok ? '#16a34a' : '#dc2626' }}>{pct}%</div>
+                          <div className="w-full rounded-t-sm transition-all" style={{ height: `${Math.max(4, pct * 2)}px`, backgroundColor: color, border: '1px solid #e5e7eb' }} />
+                          <div className="text-xs text-gray-400 text-center leading-tight" style={{ fontSize: '10px' }}>{label.replace(' ', '\n')}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {needsContrast && (
+                    <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                      ⚠️ <strong>Kontrast-Lücke:</strong> {extremeDark < 10 ? `Extrem-Dunkel nur ${extremeDark}% (Ziel: 10%)` : ''}{extremeDark < 10 && extremeLight < 10 ? ' · ' : ''}{extremeLight < 10 ? `Extrem-Hell nur ${extremeLight}% (Ziel: 10%)` : ''} – Import von sehr dunklen/hellen Bildern empfohlen.
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
+            {/* Saturation Buckets */}
+            {dbStats.bySaturation && (() => {
+              const low = dbStats.bySaturation!['niedrig'] ?? 0
+              const mid = dbStats.bySaturation!['mittel'] ?? 0
+              const high = dbStats.bySaturation!['hoch'] ?? 0
+              const totalSat = low + mid + high || 1
+              const lowPct = Math.round(low / totalSat * 100)
+              const midPct = Math.round(mid / totalSat * 100)
+              const highPct = Math.round(high / totalSat * 100)
+              const grayPct = dbStats.grayCount ? Math.round(dbStats.grayCount / totalSat * 100) : 0
+              const tooHighSat = highPct > 50
+              const tooLowNeutral = lowPct < 25
+              return (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Sättigung – Qualität für Hauttöne & Übergänge</h3>
+                  <div className="flex gap-2 mb-2">
+                    {[
+                      { label: 'Niedrig (glatt)', pct: lowPct, cnt: low, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', icon: '🌫️', tip: 'Ideal für Hauttöne & Hintergründe', target: 30 },
+                      { label: 'Mittel', pct: midPct, cnt: mid, color: 'bg-yellow-50 border-yellow-200', text: 'text-yellow-700', icon: '🎨', tip: 'Gute Allround-Tiles', target: 40 },
+                      { label: 'Hoch (bunt)', pct: highPct, cnt: high, color: 'bg-pink-50 border-pink-200', text: 'text-pink-700', icon: '🌈', tip: 'Zu viele → Haut wirkt unruhig', target: 30 },
+                    ].map(({ label, pct, cnt, color, text, icon, tip }) => (
+                      <div key={label} className={`flex-1 rounded-xl p-3 border ${color}`}>
+                        <div className="text-xl mb-1">{icon}</div>
+                        <div className="text-xs font-semibold text-gray-700">{label}</div>
+                        <div className={`text-lg font-bold ${text}`}>{pct}%</div>
+                        <div className="text-xs text-gray-400">{cnt.toLocaleString()}</div>
+                        <div className="text-xs text-gray-500 mt-1 leading-tight">{tip}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="h-3 rounded-full overflow-hidden flex">
+                    <div className="bg-emerald-400" style={{ width: `${lowPct}%` }} />
+                    <div className="bg-yellow-400" style={{ width: `${midPct}%` }} />
+                    <div className="bg-pink-400" style={{ width: `${highPct}%` }} />
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <span>Grau/Neutral: {grayPct}% ({(dbStats.grayCount ?? 0).toLocaleString()} Bilder)</span>
+                    <span>Ziel: 30% niedrig · 40% mittel · 30% hoch</span>
+                  </div>
+                  {(tooHighSat || tooLowNeutral) && (
+                    <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                      ⚠️ {tooHighSat ? `Zu viele hochgesättigte Bilder (${highPct}%) → Haut wirkt unruhig in Portraits. ` : ''}{tooLowNeutral ? `Zu wenig neutrale/desaturierte Bilder (${lowPct}%) → Import von abstrakten Texturen, Grau, Beton, Himmel empfohlen.` : ''}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
+            {/* Portrait Quality Score */}
+            {dbStats.byWarmCool && dbStats.byBrightness5 && dbStats.bySaturation && (() => {
+              const total5 = Object.values(dbStats.byBrightness5!).reduce((a, b) => a + b, 0) || 1
+              const totalWC = Object.values(dbStats.byWarmCool!).reduce((a, b) => a + b, 0) || 1
+              const totalSat = Object.values(dbStats.bySaturation!).reduce((a, b) => a + b, 0) || 1
+              const kuehlPct = Math.round((dbStats.byWarmCool!['kuehl'] ?? 0) / totalWC * 100)
+              const extremeDark = Math.round((dbStats.byBrightness5!['extrem_dunkel'] ?? 0) / total5 * 100)
+              const extremeLight = Math.round((dbStats.byBrightness5!['extrem_hell'] ?? 0) / total5 * 100)
+              const lowSat = Math.round((dbStats.bySaturation!['niedrig'] ?? 0) / totalSat * 100)
+              const grayPct = dbStats.grayCount ? Math.round(dbStats.grayCount / totalSat * 100) : 0
+              // Score: 0-100
+              let score = 0
+              score += Math.min(kuehlPct / 20 * 25, 25)       // kühl: max 25 pts bei ≥20%
+              score += Math.min(extremeDark / 10 * 15, 15)    // extrem dunkel: max 15 pts
+              score += Math.min(extremeLight / 10 * 15, 15)   // extrem hell: max 15 pts
+              score += Math.min(lowSat / 30 * 25, 25)         // niedrig sättigung: max 25 pts
+              score += Math.min(grayPct / 15 * 20, 20)        // grau: max 20 pts
+              const scoreInt = Math.round(score)
+              const scoreColor = scoreInt >= 75 ? 'text-green-600' : scoreInt >= 50 ? 'text-yellow-600' : 'text-red-600'
+              const scoreBg = scoreInt >= 75 ? 'bg-green-50 border-green-200' : scoreInt >= 50 ? 'bg-yellow-50 border-yellow-200' : 'bg-red-50 border-red-200'
+              const scoreLabel = scoreInt >= 75 ? 'Gut – Pool eignet sich gut für Portraits' : scoreInt >= 50 ? 'Mittel – Verbesserungen empfohlen' : 'Schwach – Pool für Portraits nicht optimal'
+              return (
+                <div className={`rounded-xl border p-4 ${scoreBg}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold text-gray-700">🎭 Portrait-Qualitäts-Score</h3>
+                    <span className={`text-2xl font-bold ${scoreColor}`}>{scoreInt}/100</span>
+                  </div>
+                  <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden mb-2">
+                    <div className={`h-full rounded-full transition-all ${scoreInt >= 75 ? 'bg-green-500' : scoreInt >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${scoreInt}%` }} />
+                  </div>
+                  <p className={`text-xs ${scoreColor} font-medium`}>{scoreLabel}</p>
+                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-500">
+                    <span>❄️ Kühl: {kuehlPct}% / 20% Ziel</span>
+                    <span>⚫ Extrem Dunkel: {extremeDark}% / 10% Ziel</span>
+                    <span>⚪ Extrem Hell: {extremeLight}% / 10% Ziel</span>
+                    <span>🌫️ Niedrig-Sättigung: {lowSat}% / 30% Ziel</span>
+                  </div>
+                </div>
+              )
+            })()}
+
           </div>
         )}
       </div>
@@ -801,6 +1008,44 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {constraintLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🔒</span>}
             {constraintLoading ? 'Setze Constraint...' : 'UNIQUE-Constraint setzen'}
           </button>
+        </div>
+      </div>
+
+      {/* Quick Import Section */}
+      <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+        <p className="text-sm font-semibold text-blue-800 mb-1">⚡ Gezielte Importe (Empfehlungen)</p>
+        <p className="text-xs text-blue-600 mb-3">Importiert bis zu 80 Bilder pro Kategorie via Pexels – ideal für unterrepräsentierte Farb-Buckets.</p>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+          {([
+            { query: 'abstract blue texture', label: 'Blau-Texturen' },
+            { query: 'cyan teal water', label: 'Cyan/Teal' },
+            { query: 'violet purple abstract', label: 'Violett/Lila' },
+            { query: 'pink rose flower', label: 'Pink/Rosa' },
+            { query: 'gray concrete stone', label: 'Grau-Texturen' },
+            { query: 'white cloud sky minimal', label: 'Weiss/Hell' },
+            { query: 'dark black background night', label: 'Schwarz/Dunkel' },
+            { query: 'green nature forest leaf', label: 'Grün-Natur' },
+            { query: 'skin portrait face close', label: 'Hauttöne (Portrait)' },
+            { query: 'colorful saturated vibrant', label: 'Hoch-Sättigung' },
+            { query: 'pastel soft light color', label: 'Pastell/Niedrig-Sättigung' },
+            { query: 'abstract texture gradient', label: 'Abstrakt/Gradient' },
+          ] as { query: string; label: string }[]).map(({ query, label }) => (
+            <button
+              key={query}
+              onClick={() => runQuickImport(query, label)}
+              disabled={quickImportLoading === query}
+              className="flex flex-col items-start gap-0.5 bg-white border border-blue-200 hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50 rounded-xl px-3 py-2 text-left transition-colors"
+            >
+              <span className="text-xs font-semibold text-blue-800">{label}</span>
+              <span className="text-[10px] text-gray-400 truncate w-full">{query}</span>
+              {quickImportResult[query] && (
+                <span className="text-[10px] text-gray-600 mt-0.5">{quickImportResult[query]}</span>
+              )}
+              {quickImportLoading === query && (
+                <span className="text-[10px] text-blue-600 animate-pulse">⏳ läuft...</span>
+              )}
+            </button>
+          ))}
         </div>
       </div>
 
