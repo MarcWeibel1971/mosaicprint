@@ -37,12 +37,12 @@ app.use(express.json({ limit: "50mb" }));
 
 // GET /api/tile-lab-index
 // Returns ALL tile feature vectors as a compact binary Float32Array
-// Format: [id, L, a, b, edge, brightness, saturation] per tile = 7 floats = 28 bytes
-// ~330 KB for 14,000 tiles - loaded once, used for fast multi-dimensional pre-filter
-// This enables 2-stage matching: 4D k-NN (LAB+edge) over ALL tiles, then SSD on Top-30
-// edge = Sobel-edge energy 0-1 (computed server-side from 8x8 pixel data)
+// Format: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness] per tile = 14 floats = 56 bytes
+// ~1.3 MB for 23,000 tiles - loaded once, used for fast multi-dimensional pre-filter
+// This enables 2-stage matching: 14D k-NN (LAB+quadrant colors+edge) over ALL tiles, then SSD on Top-80
+// Quadrant a/b values encode color distribution (warm/cool, green/magenta) per quadrant
+// edge = variance of L across quadrants (proxy for Sobel edge energy)
 // brightness = avg_l normalized 0-1
-// saturation = sqrt(a²+b²) normalized 0-1
 app.get("/api/tile-lab-index", async (req, res) => {
   try {
     const pool = db.getPool();
@@ -63,32 +63,41 @@ app.get("/api/tile-lab-index", async (req, res) => {
       queryParams
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b, edge, brightness, saturation] per tile = 7 floats = 28 bytes
-    // edge: estimated from quadrant LAB variance (proxy for Sobel edge energy)
+    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness] = 14 floats
+    // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
+    // edge: variance of L across quadrants (high variance = high edge energy)
     // brightness: avg_l / 100
-    // saturation: sqrt(a²+b²) / 100
-    const FLOATS_PER_TILE = 7;
+    const FLOATS_PER_TILE = 14;
     const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
       const L = Number(row.avg_l);
       const a = Number(row.avg_a);
       const b = Number(row.avg_b);
-      // Compute edge proxy: variance of L across quadrants (high variance = high edge)
-      const tlL = Number(row.tl_l ?? L), trL = Number(row.tr_l ?? L);
-      const blL = Number(row.bl_l ?? L), brL = Number(row.br_l ?? L);
+      // Quadrant LAB values (fallback to global if null)
+      const tlL = Number(row.tl_l ?? L), tlA = Number(row.tl_a ?? a), tlB = Number(row.tl_b ?? b);
+      const trL = Number(row.tr_l ?? L), trA = Number(row.tr_a ?? a), trB = Number(row.tr_b ?? b);
+      const blL = Number(row.bl_l ?? L), blA = Number(row.bl_a ?? a), blB = Number(row.bl_b ?? b);
+      const brL = Number(row.br_l ?? L), brA = Number(row.br_a ?? a), brB = Number(row.br_b ?? b);
+      // Compute edge proxy: variance of L across quadrants
       const quadMeanL = (tlL + trL + blL + brL) / 4;
       const quadVarL = ((tlL-quadMeanL)**2 + (trL-quadMeanL)**2 + (blL-quadMeanL)**2 + (brL-quadMeanL)**2) / 4;
-      const edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30); // normalize: 30 L-units = max edge
+      const edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30);
       const brightness = L / 100;
-      const saturation = Math.min(1, Math.sqrt(a*a + b*b) / 60); // normalize: 60 = max chroma
-      buf.writeFloatLE(Number(row.id), offset);   offset += 4;
-      buf.writeFloatLE(L, offset);                offset += 4;
-      buf.writeFloatLE(a, offset);                offset += 4;
-      buf.writeFloatLE(b, offset);                offset += 4;
-      buf.writeFloatLE(edgeProxy, offset);        offset += 4;
-      buf.writeFloatLE(brightness, offset);       offset += 4;
-      buf.writeFloatLE(saturation, offset);       offset += 4;
+      buf.writeFloatLE(Number(row.id), offset);   offset += 4;  // [0]  id
+      buf.writeFloatLE(L, offset);                offset += 4;  // [1]  avg L
+      buf.writeFloatLE(a, offset);                offset += 4;  // [2]  avg a
+      buf.writeFloatLE(b, offset);                offset += 4;  // [3]  avg b
+      buf.writeFloatLE(tlA, offset);              offset += 4;  // [4]  TL a
+      buf.writeFloatLE(tlB, offset);              offset += 4;  // [5]  TL b
+      buf.writeFloatLE(trA, offset);              offset += 4;  // [6]  TR a
+      buf.writeFloatLE(trB, offset);              offset += 4;  // [7]  TR b
+      buf.writeFloatLE(blA, offset);              offset += 4;  // [8]  BL a
+      buf.writeFloatLE(blB, offset);              offset += 4;  // [9]  BL b
+      buf.writeFloatLE(brA, offset);              offset += 4;  // [10] BR a
+      buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
+      buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
+      buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
     }
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', buf.length);

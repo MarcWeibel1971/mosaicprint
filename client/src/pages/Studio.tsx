@@ -185,7 +185,7 @@ export default function Studio() {
   // Loaded once at startup, used for fast multi-dimensional k-NN pre-filter over entire DB
   const labIndexRef = useRef<Float32Array | null>(null);
   const labIndexLoadedRef = useRef<boolean>(false);
-  const floatsPerTileRef = useRef<number>(4); // 4 (legacy) or 7 (new 7D format)
+  const floatsPerTileRef = useRef<number>(4); // 4 (legacy), 7 (7D), or 14 (14D with quadrant colors)
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
@@ -599,33 +599,35 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy) or 7 (new 7D)
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), or 14 (14D)
     const USE_2STAGE = labIndex !== null && labIndex.length >= FPT;
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
+    const IS_14D = FPT >= 14;
     console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles, ${FPT}D index)` : 'NO (fallback to legacy)'}`);
 
     // ── Stage A helper: multi-dimensional k-NN over all DB tiles ─────────────────────
-    // 7D distance: weighted LAB (primary) + edge (shape) + brightness + saturation
-    // Weights: L=1.0, a=1.0, b=1.0, edge=30 (shape priority!), brightness=20, saturation=10
-    // Edge gets high weight because shape-matching is the key quality driver (AMP S.M.A.R.T.)
-    const TOP_K = isMobileOrSlow ? 25 : 40; // more candidates = better SSD selection
+    // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
+    // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
+    // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
+    const TOP_K = isMobileOrSlow ? 35 : 80; // more candidates = better diversity + SSD selection
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
-      targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0
+      targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
+      targetQuadA: [number,number,number,number] = [targetA,targetA,targetA,targetA],
+      targetQuadB: [number,number,number,number] = [targetB,targetB,targetB,targetB]
     ): Array<{tileId: number; labDist: number}> => {
       if (!labIndex) return [];
       // Weighted distance in feature space
-      // LAB: perceptual color distance (CIE76)
-      // Edge: shape similarity (high weight = prioritize shape-matching tiles)
-      // Brightness: prevents dark tiles in bright areas and vice versa
-      const W_L = 1.0, W_A = 1.0, W_B = 1.0;
-      const W_EDGE = IS_7D ? 30.0 : 0;       // shape priority: 30× LAB weight
-      const W_BRIGHT = IS_7D ? 20.0 : 0;     // brightness: 20× LAB weight
-      const W_SAT = IS_7D ? 10.0 : 0;        // saturation: 10× LAB weight
+      // Global LAB: perceptual color distance (primary signal)
+      // Quadrant a/b: color distribution within tile (catches gradients)
+      // Edge: shape similarity
+      // Brightness: prevents dark tiles in bright areas
+      const W_L = 1.0, W_A = 1.5, W_B = 1.5; // slightly higher weight on a/b for color accuracy
+      const W_QUAD = IS_14D ? 0.4 : 0;        // quadrant color weight (per quadrant a/b pair)
+      const W_EDGE = IS_7D ? 25.0 : 0;        // shape priority
+      const W_BRIGHT = IS_7D ? 15.0 : 0;      // brightness matching
       // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
-      // This prevents the 55% gray tiles from dominating colorful cells
-      // Penalty scales with target saturation: more colorful cell = stronger gray penalty
       const GRAY_PENALTY = IS_7D ? Math.max(0, (targetSat - 0.15) * 200) : 0;
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
@@ -637,14 +639,29 @@ export default function Studio() {
         const b = labIndex[i + 3];
         const dL = targetL - L, dA = targetA - a, dB = targetB - b;
         let dist = W_L*dL*dL + W_A*dA*dA + W_B*dB*dB;
-        if (IS_7D) {
+        if (IS_14D) {
+          // Quadrant a/b: [4]=TL_a, [5]=TL_b, [6]=TR_a, [7]=TR_b
+          //               [8]=BL_a, [9]=BL_b, [10]=BR_a, [11]=BR_b
+          const dTLa = targetQuadA[0] - labIndex[i+4], dTLb = targetQuadB[0] - labIndex[i+5];
+          const dTRa = targetQuadA[1] - labIndex[i+6], dTRb = targetQuadB[1] - labIndex[i+7];
+          const dBLa = targetQuadA[2] - labIndex[i+8], dBLb = targetQuadB[2] - labIndex[i+9];
+          const dBRa = targetQuadA[3] - labIndex[i+10], dBRb = targetQuadB[3] - labIndex[i+11];
+          dist += W_QUAD*(dTLa*dTLa + dTLb*dTLb + dTRa*dTRa + dTRb*dTRb +
+                          dBLa*dBLa + dBLb*dBLb + dBRa*dBRa + dBRb*dBRb);
+          const edge = labIndex[i + 12];
+          const brightness = labIndex[i + 13];
+          dist += W_EDGE*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
+          // Gray-penalty: penalize gray tiles when target is colorful
+          const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
+          if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+        } else if (IS_7D) {
           const edge = labIndex[i + 4];
           const brightness = labIndex[i + 5];
           const sat = labIndex[i + 6];
           const dEdge = targetEdge - edge;
           const dBright = targetBrightness - brightness;
           const dSat = targetSat - sat;
-          dist += W_EDGE*dEdge*dEdge + W_BRIGHT*dBright*dBright + W_SAT*dSat*dSat;
+          dist += W_EDGE*dEdge*dEdge + W_BRIGHT*dBright*dBright + (10.0)*dSat*dSat;
           // Gray-penalty: penalize gray tiles when target is colorful
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
         }
@@ -682,14 +699,17 @@ export default function Studio() {
     const neededTileIds = new Set<number>();
 
     if (USE_2STAGE) {
-      // 2-pass: first collect all candidates (with 7D features), then load images
+      // 2-pass: first collect all candidates (with 14D features), then load images
       for (let ci = 0; ci < TOTAL_TILES; ci++) {
         const [tL, tA, tB] = cellLab[ci];
-        // 7D features for this cell
-        const targetEdge = IS_7D ? edgeMap[ci] : 0;          // Sobel edge energy 0-1
-        const targetBright = IS_7D ? tL / 100 : 0;            // brightness 0-1
-        const targetSat = IS_7D ? Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60) : 0; // saturation 0-1
-        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat);
+        const targetEdge = IS_7D ? edgeMap[ci] : 0;
+        const targetBright = IS_7D ? tL / 100 : 0;
+        const targetSat = IS_7D ? Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60) : 0;
+        // For 14D: use cell LAB for all quadrants (cell resolution = 1px, so all quads equal)
+        // The quadrant matching happens on the TILE side (DB has per-quadrant data)
+        const tQuadA: [number,number,number,number] = [tA, tA, tA, tA];
+        const tQuadB: [number,number,number,number] = [tB, tB, tB, tB];
+        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB);
         cellCandidates.push(candidates);
         candidates.forEach(c => neededTileIds.add(c.tileId));
         if (ci % 500 === 0) {
@@ -697,7 +717,7 @@ export default function Studio() {
           await new Promise(r => setTimeout(r, 0));
         }
       }
-      console.log(`[Studio] ${IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
+      console.log(`[Studio] ${IS_14D ? '14D' : IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
     }
 
     // ── Stage B: Load only the needed tile images ─────────────────────────────
