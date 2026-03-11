@@ -140,8 +140,8 @@ export default function Admin() {
   interface ImportRecommendation { query: string; label: string; priority: number; deficit: number; subject: string }
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
   const [recsLoading, setRecsLoading] = useState(false)
-  const [recsJob, setRecsJob] = useState<SmartImportJob | null>(null)
-  const [recsSource, setRecsSource] = useState<'unsplash' | 'pexels' | 'pixabay'>('pexels')
+  const [recsJobs, setRecsJobs] = useState<Record<string, SmartImportJob>>({})
+  const [recsRunning, setRecsRunning] = useState(false)
   const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
   const [recsExpanded, setRecsExpanded] = useState(false)
 
@@ -186,24 +186,29 @@ export default function Admin() {
   }, [])
 
   const startRecsImport = async () => {
-    if (activeJob) return
+    if (recsRunning) return
     const queriesToRun = recommendations.filter(r => selectedRecs.has(r.query))
     if (queriesToRun.length === 0) return
-    // Use smart_ prefix so existing polling useEffect picks it up automatically
-    const jobKey = `smart_${recsSource}`
-    setActiveJob(jobKey)
-    setRecsJob({ running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${recsSource}...`], imported: 0, total: queriesToRun.length * 80 })
-    setMessage({ text: `Gezielte Importe gestartet: ${queriesToRun.length} Kategorien via ${recsSource}`, type: 'info' })
-    try {
-      await fetch('/api/trpc/smartImport', {
+    const sources: Array<'pexels' | 'unsplash' | 'pixabay'> = ['pexels', 'unsplash', 'pixabay']
+    const activeSources = sources.filter(s => apiKeys?.[s])
+    if (activeSources.length === 0) return
+    setRecsRunning(true)
+    const initialJobs: Record<string, SmartImportJob> = {}
+    activeSources.forEach(src => {
+      initialJobs[src] = { running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${src}...`], imported: 0, total: queriesToRun.length * 80 }
+    })
+    setRecsJobs(initialJobs)
+    setMessage({ text: `Gezielte Importe gestartet: ${queriesToRun.length} Kategorien via ${activeSources.join(' + ')}`, type: 'info' })
+    // Start all sources in parallel
+    await Promise.allSettled(activeSources.map(src =>
+      fetch('/api/trpc/smartImport', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId: recsSource, count: queriesToRun.length * 80, targetPerBucket: 200 }),
+        body: JSON.stringify({ sourceId: src, count: queriesToRun.length * 80, targetPerBucket: 200 }),
+      }).catch(() => {
+        setRecsJobs(prev => ({ ...prev, [src]: { ...prev[src], running: false, error: 'Fehler beim Starten' } }))
       })
-    } catch {
-      setActiveJob(null)
-      setMessage({ text: 'Fehler beim Starten der gezielten Importe', type: 'error' })
-    }
+    ))
   }
 
   const fetchStats = useCallback(async () => {
@@ -274,7 +279,7 @@ export default function Admin() {
     return () => intervals.forEach(clearInterval)
   }, [activeJobs, fetchStats])
 
-  // Poll smart import status (also used by Gezielte Importe / recs import)
+  // Poll smart import status (for smartImport button only)
   useEffect(() => {
     if (!activeJob?.startsWith('smart_')) return
     const sourceId = activeJob.replace('smart_', '')
@@ -286,13 +291,11 @@ export default function Admin() {
         const raw2 = data.result?.data ?? data
         const job: SmartImportJob = { log: [], ...raw2 }
         setSmartJob(job)
-        // Also update recsJob if it's running (Gezielte Importe uses same endpoint)
-        setRecsJob(prev => prev?.running ? job : prev)
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
           fetchStats()
           fetchCronStatus()
-          fetchRecommendations() // Refresh recommendations after import
+          fetchRecommendations()
           if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
           else setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
         }
@@ -300,6 +303,43 @@ export default function Admin() {
     }, 1500)
     return () => clearInterval(interval)
   }, [activeJob, fetchStats, fetchCronStatus, fetchRecommendations])
+
+  // Poll recsJobs (Gezielte Importe - all sources in parallel)
+  useEffect(() => {
+    if (!recsRunning) return
+    const runningSources = Object.keys(recsJobs).filter(src => recsJobs[src]?.running)
+    if (runningSources.length === 0) { setRecsRunning(false); return }
+    const intervals: ReturnType<typeof setInterval>[] = []
+    runningSources.forEach(src => {
+      const interval = setInterval(async () => {
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: src }))
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
+          const data = await res.json()
+          const raw = data.result?.data ?? data
+          const job: SmartImportJob = { log: [], ...raw }
+          setRecsJobs(prev => ({ ...prev, [src]: job }))
+          if (!job.running && job.finishedAt) {
+            setRecsJobs(prev => {
+              const updated = { ...prev, [src]: job }
+              const allDone = Object.values(updated).every(j => !j.running)
+              if (allDone) {
+                setRecsRunning(false)
+                fetchStats()
+                fetchCronStatus()
+                fetchRecommendations()
+                const total = Object.values(updated).reduce((sum, j) => sum + (j.imported ?? 0), 0)
+                setMessage({ text: `Gezielte Importe abgeschlossen: ${total} neue Bilder importiert`, type: 'success' })
+              }
+              return updated
+            })
+          }
+        } catch { /* ignore */ }
+      }, 1500)
+      intervals.push(interval)
+    })
+    return () => intervals.forEach(clearInterval)
+  }, [recsRunning, recsJobs, fetchStats, fetchCronStatus, fetchRecommendations])
 
   const startImport = async (sourceId: string, batchSize: number) => {
     if (activeJob) return
@@ -594,45 +634,48 @@ export default function Admin() {
                 </div>
               )}
 
-              {/* Job progress */}
-              {recsJob && (
-                <div className="mb-4 bg-gray-50 rounded-xl p-3 text-xs">
-                  <div className="font-medium text-gray-700 mb-1">
-                    {recsJob.running
-                      ? `⏳ Läuft... ${recsJob.imported ?? 0} importiert`
-                      : `✅ Fertig: ${recsJob.imported ?? 0} neue Bilder`}
-                  </div>
-                  <div className="max-h-20 overflow-y-auto space-y-0.5">
-                    {(recsJob.log ?? []).slice(-8).map((l, i) => (
-                      <div key={i} className={l.startsWith('✓') ? 'text-green-600' : l.startsWith('✅') ? 'text-green-700 font-medium' : 'text-gray-500'}>{l}</div>
-                    ))}
-                  </div>
+              {/* Job progress - one row per source */}
+              {Object.keys(recsJobs).length > 0 && (
+                <div className="mb-4 space-y-2">
+                  {(['pexels', 'unsplash', 'pixabay'] as const).filter(src => recsJobs[src]).map(src => {
+                    const job = recsJobs[src]
+                    return (
+                      <div key={src} className="bg-gray-50 rounded-xl p-3 text-xs">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-medium text-gray-700 capitalize">{src}</span>
+                          <span className={job.running ? 'text-amber-600' : job.error ? 'text-red-500' : 'text-green-600'}>
+                            {job.running ? `⏳ ${job.imported ?? 0} importiert` : job.error ? `❌ ${job.error}` : `✅ ${job.imported ?? 0} neu`}
+                          </span>
+                        </div>
+                        {job.running && (
+                          <div className="w-full bg-gray-200 rounded-full h-1 mb-1">
+                            <div className="bg-amber-500 h-1 rounded-full transition-all" style={{ width: `${Math.min(100, ((job.imported ?? 0) / (job.total || 1)) * 100)}%` }} />
+                          </div>
+                        )}
+                        <div className="max-h-12 overflow-y-auto space-y-0.5">
+                          {(job.log ?? []).slice(-4).map((l, i) => (
+                            <div key={i} className={l.startsWith('✓') ? 'text-green-600' : l.startsWith('✅') ? 'text-green-700 font-medium' : 'text-gray-500'}>{l}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
 
               {/* Controls */}
               <div className="flex items-center gap-3 flex-wrap">
-                <select
-                  value={recsSource}
-                  onChange={e => setRecsSource(e.target.value as 'unsplash' | 'pexels')}
-                  className="text-sm border border-gray-200 rounded-xl px-3 py-2"
-                  disabled={!!activeJob}
-                >
-                  <option value="pexels" disabled={!apiKeys?.pexels}>Pexels{!apiKeys?.pexels ? ' (kein Key)' : ''}</option>
-                  <option value="unsplash" disabled={!apiKeys?.unsplash}>Unsplash{!apiKeys?.unsplash ? ' (kein Key)' : ''}</option>
-                  <option value="pixabay" disabled={!apiKeys?.pixabay}>Pixabay{!apiKeys?.pixabay ? ' (kein Key)' : ''}</option>
-                </select>
                 <button
                   onClick={startRecsImport}
-                  disabled={!!activeJob || selectedRecs.size === 0 || (!apiKeys?.pexels && !apiKeys?.unsplash)}
+                  disabled={recsRunning || selectedRecs.size === 0 || (!apiKeys?.pexels && !apiKeys?.unsplash && !apiKeys?.pixabay)}
                   className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-semibold px-5 py-2 rounded-xl transition-colors text-sm"
                 >
-                  {activeJob === 'recs_import' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                  {activeJob === 'recs_import'
-                    ? 'Import läuft...'
+                  {recsRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {recsRunning
+                    ? 'Import läuft (alle Quellen)...'
                     : selectedRecs.size === recommendations.length
-                      ? `⚡ Alle ${selectedRecs.size} gleichzeitig starten`
-                      : `⚡ ${selectedRecs.size} Empfehlungen starten`}
+                      ? `⚡ Alle ${selectedRecs.size} via Pexels + Unsplash + Pixabay`
+                      : `⚡ ${selectedRecs.size} Empfehlungen (alle Quellen)`}
                 </button>
               </div>
             </div>
