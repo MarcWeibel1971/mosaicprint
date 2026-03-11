@@ -577,6 +577,32 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const LIMIT = 60
 
+  const fetchDbStats = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trpc/getDbStats')
+      const data = await res.json()
+      setDbStats(data.result?.data?.json ?? data.result?.data ?? data)
+    } catch { /* ignore */ }
+  }, [])
+
+  const fetchImages = useCallback(async (p: number) => {
+    setLoading(true)
+    try {
+      const params: Record<string, string | number> = { page: p, limit: LIMIT }
+      if (sourceFilter !== 'alle') params.sourceId = sourceFilter
+      if (colorFilter !== 'alle') params.colorFilter = colorFilter
+      if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
+      const encoded = encodeURIComponent(JSON.stringify(params))
+      const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
+      const data = await res.json()
+      const parsed = data.result?.data ?? data
+      setImages(parsed.images ?? [])
+      setTotal(parsed.total ?? 0)
+    } catch {
+      onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
+    } finally { setLoading(false) }
+  }, [sourceFilter, colorFilter, brightnessFilter, onMessage])
+
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
     setDedupLoading(true)
@@ -616,32 +642,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setConstraintLoading(false)
     }
   }, [])
-
-  const fetchDbStats = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trpc/getDbStats')
-      const data = await res.json()
-      setDbStats(data.result?.data?.json ?? data.result?.data ?? data)
-    } catch { /* ignore */ }
-  }, [])
-
-  const fetchImages = useCallback(async (p: number) => {
-    setLoading(true)
-    try {
-      const params: Record<string, string | number> = { page: p, limit: LIMIT }
-      if (sourceFilter !== 'alle') params.sourceId = sourceFilter
-      if (colorFilter !== 'alle') params.colorFilter = colorFilter
-      if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
-      const encoded = encodeURIComponent(JSON.stringify(params))
-      const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
-      const data = await res.json()
-      const parsed = data.result?.data ?? data
-      setImages(parsed.images ?? [])
-      setTotal(parsed.total ?? 0)
-    } catch {
-      onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
-    } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, onMessage])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter])
