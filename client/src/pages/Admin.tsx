@@ -573,6 +573,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [selectedImage, setSelectedImage] = useState<TileImage | null>(null)
   const [dedupLoading, setDedupLoading] = useState(false)
   const [dedupResult, setDedupResult] = useState<string | null>(null)
+  const [dedupProgress, setDedupProgress] = useState<{ before: number; deleted: number; after: number } | null>(null)
   const [constraintLoading, setConstraintLoading] = useState(false)
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const LIMIT = 60
@@ -611,7 +612,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const res = await fetch('/api/admin/dedup-tiles', { method: 'POST' })
       const data = await res.json()
       if (data.ok) {
-        setDedupResult(`✅ ${data.message} (${data.before.duplicates} Duplikate entfernt)`)
+        setDedupResult(`✅ ${data.message}`)
+        setDedupProgress({ before: data.before.total, deleted: data.deleted, after: data.after.total })
         fetchDbStats()
         fetchImages(1)
       } else {
@@ -755,7 +757,31 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         <div className="flex-1">
           <p className="text-sm font-semibold text-amber-800">🔧 Datenbankwartung</p>
           <p className="text-xs text-amber-600 mt-0.5">Entfernt echte Duplikate (gleiche source_url) – behält jeweils das Bild mit der niedrigsten ID.</p>
-          {dedupResult && <p className="text-xs mt-1 font-medium text-gray-700">{dedupResult}</p>}
+          {dedupLoading && (
+            <div className="mt-2">
+              <div className="flex justify-between text-xs text-amber-700 mb-1">
+                <span>Bereinige Datenbank...</span>
+                <span className="animate-pulse">⏳</span>
+              </div>
+              <div className="h-2 bg-amber-200 rounded-full overflow-hidden">
+                <div className="h-full bg-amber-500 rounded-full animate-pulse" style={{ width: '100%' }} />
+              </div>
+            </div>
+          )}
+          {dedupProgress && !dedupLoading && (
+            <div className="mt-2">
+              <div className="flex justify-between text-xs text-gray-600 mb-1">
+                <span>Entfernt: {dedupProgress.deleted.toLocaleString()} Duplikate</span>
+                <span>{dedupProgress.after.toLocaleString()} verbleiben</span>
+              </div>
+              <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div className="h-full bg-green-500 rounded-full transition-all"
+                  style={{ width: `${Math.round((dedupProgress.after / dedupProgress.before) * 100)}%` }} />
+              </div>
+              <p className="text-xs text-green-700 mt-1 font-medium">{dedupResult}</p>
+            </div>
+          )}
+          {!dedupProgress && dedupResult && <p className="text-xs mt-1 font-medium text-red-600">{dedupResult}</p>}
           {constraintResult && <p className="text-xs mt-1 font-medium text-gray-700">{constraintResult}</p>}
         </div>
         <div className="flex flex-col gap-2">

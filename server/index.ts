@@ -260,17 +260,17 @@ app.post("/api/admin/dedup-tiles", async (_req, res) => {
     // Count duplicates before
     const beforeRes = await pool.query(`
       SELECT COUNT(*) as total, COUNT(DISTINCT source_url) as unique_count
-      FROM tiles
+      FROM mosaic_images
     `);
     const before = beforeRes.rows[0];
     const dupsBefore = parseInt(before.total) - parseInt(before.unique_count);
 
     // Delete duplicates: keep the row with the lowest id for each source_url
     const deleteRes = await pool.query(`
-      DELETE FROM tiles
+      DELETE FROM mosaic_images
       WHERE id NOT IN (
         SELECT MIN(id)
-        FROM tiles
+        FROM mosaic_images
         GROUP BY source_url
       )
     `);
@@ -279,7 +279,7 @@ app.post("/api/admin/dedup-tiles", async (_req, res) => {
     // Count after
     const afterRes = await pool.query(`
       SELECT COUNT(*) as total, COUNT(DISTINCT source_url) as unique_count
-      FROM tiles
+      FROM mosaic_images
     `);
     const after = afterRes.rows[0];
 
@@ -304,13 +304,13 @@ app.post("/api/admin/add-unique-constraint", async (_req, res) => {
       BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'tiles_source_url_unique'
+          WHERE conname = 'mosaic_images_source_url_unique'
         ) THEN
-          ALTER TABLE tiles ADD CONSTRAINT tiles_source_url_unique UNIQUE (source_url);
+          ALTER TABLE mosaic_images ADD CONSTRAINT mosaic_images_source_url_unique UNIQUE (source_url);
         END IF;
       END $$;
     `);
-    res.json({ ok: true, message: "UNIQUE constraint on source_url added (or already existed)." });
+    res.json({ ok: true, message: "UNIQUE constraint auf mosaic_images.source_url gesetzt (oder war bereits vorhanden)." });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
