@@ -663,6 +663,7 @@ export default function Studio() {
         texture: saliency[ci] * 50, // use saliency as proxy for target texture
         saturation: sat,
         edgeEnergy: edgeMap[ci], // use Sobel edge strength as target edge energy
+        ssdPixels: new Uint8Array(8*8*3), // not used for cell features (targetRegions used instead)
       });
     }
 
