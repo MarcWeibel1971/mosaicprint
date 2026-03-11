@@ -589,9 +589,10 @@ export const appRouter = router({
                 if (!res.ok) { log(`⚠️ Pixabay ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
                 photos = (data.hits ?? []).map((p: any) => ({
-                  sourceUrl: p.webformatURL ?? p.largeImageURL ?? '',
-                  tile128Url: p.previewURL ?? p.webformatURL ?? ''
-                })).filter((p: any) => p.sourceUrl && p.tile128Url);
+                  // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
+                  sourceUrl: p.previewURL ?? '',
+                  tile128Url: p.previewURL ?? '',
+                })).filter((p: any) => p.sourceUrl);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
@@ -684,9 +685,11 @@ export const appRouter = router({
                 if (!res.ok) { log(`⚠️ Pixabay API error ${res.status} for "${task.query}"`); continue; }
                 const data = await res.json() as any;
                 photos = (data.hits ?? []).map((p: any) => ({
-                  sourceUrl: p.webformatURL ?? p.largeImageURL ?? '',
-                  tile128Url: p.previewURL ?? p.webformatURL ?? '',
-                })).filter((p: any) => p.sourceUrl && p.tile128Url);
+                   // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
+                  // webformatURL uses rotating tokens and cannot be used for dedup
+                  sourceUrl: p.previewURL ?? '',
+                  tile128Url: p.previewURL ?? '',
+                })).filter((p: any) => p.sourceUrl);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
@@ -815,9 +818,10 @@ export const appRouter = router({
                   if (!res.ok) continue;
                   const data = await res.json() as any;
                   photos = (data.hits ?? []).map((p: any) => ({
-                    sourceUrl: p.webformatURL ?? p.largeImageURL ?? '',
-                    tile128Url: p.previewURL ?? p.webformatURL ?? ''
-                  })).filter((p: any) => p.sourceUrl && p.tile128Url);
+                    // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
+                    sourceUrl: p.previewURL ?? '',
+                    tile128Url: p.previewURL ?? '',
+                  })).filter((p: any) => p.sourceUrl);
                 } else {
                   const res = await fetch(
                     `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
