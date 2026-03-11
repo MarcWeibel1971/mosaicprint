@@ -572,7 +572,12 @@ export const appRouter = router({
       colorFilter: z.string().optional(),
       sourceId: z.string().optional(),    // filter by source: 'pexels' | 'unsplash' | 'picsum'
     }))
-    .query(async ({ input }) => db.getAdminImages(input)),
+    .query(async ({ input }) => {
+      console.log('[getAdminImages] input received:', JSON.stringify(input));
+      const result = await db.getAdminImages(input);
+      console.log('[getAdminImages] returning total:', result.total);
+      return result;
+    }),
 
   // Admin: Delete image
   deleteMosaicImage: publicProcedure
