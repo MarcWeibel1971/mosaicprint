@@ -229,12 +229,14 @@ export default function Admin() {
   // Poll import job status
   useEffect(() => {
     if (!activeJob) return
+    if (activeJob.startsWith('smart_')) return  // smart_ jobs use separate polling
     const interval = setInterval(async () => {
       try {
         const params = encodeURIComponent(JSON.stringify({ sourceId: activeJob }))
         const res = await fetch(`/api/trpc/getImportStatus?input=${params}`)
         const data = await res.json()
-        const job: ImportJob = data.result?.data ?? data
+        const raw = data.result?.data ?? data
+        const job: ImportJob = { log: [], ...raw }
         setImportProgress(prev => ({ ...prev, [activeJob]: job }))
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
@@ -256,7 +258,8 @@ export default function Admin() {
         const params = encodeURIComponent(JSON.stringify({ sourceId }))
         const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
         const data = await res.json()
-        const job: SmartImportJob = data.result?.data ?? data
+        const raw2 = data.result?.data ?? data
+        const job: SmartImportJob = { log: [], ...raw2 }
         setSmartJob(job)
         // Also update recsJob if it's running (Gezielte Importe uses same endpoint)
         setRecsJob(prev => prev?.running ? job : prev)
@@ -573,7 +576,7 @@ export default function Admin() {
                       : `✅ Fertig: ${recsJob.imported ?? 0} neue Bilder`}
                   </div>
                   <div className="max-h-20 overflow-y-auto space-y-0.5">
-                    {recsJob.log.slice(-8).map((l, i) => (
+                    {(recsJob.log ?? []).slice(-8).map((l, i) => (
                       <div key={i} className={l.startsWith('✓') ? 'text-green-600' : l.startsWith('✅') ? 'text-green-700 font-medium' : 'text-gray-500'}>{l}</div>
                     ))}
                   </div>
