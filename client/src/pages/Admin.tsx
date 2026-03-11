@@ -15,6 +15,12 @@ function getHighResUrl(url: string, size = 600): string {
   if (url.includes('images.unsplash.com')) {
     return url.replace(/&?w=\d+/g, `&w=${size}`).replace(/&?h=\d+/g, `&h=${size}`)
   }
+  // Pexels: replace or add w= and h= params for higher resolution
+  if (url.includes('images.pexels.com')) {
+    const base = url.replace(/[&?]w=\d+/g, '').replace(/[&?]h=\d+/g, '')
+    const sep = base.includes('?') ? '&' : '?'
+    return `${base}${sep}w=${size}&h=${size}&fit=crop`
+  }
   return url
 }
 
@@ -742,7 +748,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button key={img.id} onClick={() => setSelectedImage(img)}
               className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200 hover:border-indigo-400 hover:scale-105 transition-all">
               <img
-                src={img.tile128Url || img.sourceUrl}
+                src={getHighResUrl(img.tile128Url || img.sourceUrl, 300)}
                 alt=""
                 className="w-full h-full object-cover"
                 loading="lazy"
