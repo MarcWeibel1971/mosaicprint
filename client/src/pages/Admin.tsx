@@ -140,7 +140,7 @@ export default function Admin() {
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
   const [recsLoading, setRecsLoading] = useState(false)
   const [recsJob, setRecsJob] = useState<SmartImportJob | null>(null)
-  const [recsSource, setRecsSource] = useState<'unsplash' | 'pexels'>('pexels')
+  const [recsSource, setRecsSource] = useState<'unsplash' | 'pexels' | 'shutterstock'>('pexels')
   const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
   const [recsExpanded, setRecsExpanded] = useState(false)
 
@@ -281,7 +281,7 @@ export default function Admin() {
       await fetch('/api/trpc/importFromSource', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: sourceId as 'pexels' | 'unsplash', count: batchSize }),
+        body: JSON.stringify({ source: sourceId as 'pexels' | 'unsplash' | 'shutterstock', count: batchSize }),
       })
     } catch {
       setActiveJob(null)
@@ -428,6 +428,7 @@ export default function Admin() {
                   { key: 'stripe', label: 'Stripe (Checkout)', active: apiKeys?.stripe },
                   { key: 'unsplash', label: 'Unsplash', active: apiKeys?.unsplash },
                   { key: 'pexels', label: 'Pexels', active: apiKeys?.pexels },
+                  { key: 'shutterstock', label: 'Shutterstock', active: (apiKeys as any)?.shutterstock },
                 ].map(({ key, label, active }) => (
                   <div key={key} className={`flex items-center gap-3 p-3 rounded-xl border ${active ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     {active ? <CheckCircle className="w-5 h-5 text-green-600 shrink-0" /> : <XCircle className="w-5 h-5 text-red-500 shrink-0" />}
@@ -588,6 +589,7 @@ export default function Admin() {
                 >
                   <option value="pexels" disabled={!apiKeys?.pexels}>Pexels{!apiKeys?.pexels ? ' (kein Key)' : ''}</option>
                   <option value="unsplash" disabled={!apiKeys?.unsplash}>Unsplash{!apiKeys?.unsplash ? ' (kein Key)' : ''}</option>
+                  <option value="shutterstock" disabled={!(apiKeys as any)?.shutterstock}>Shutterstock{!(apiKeys as any)?.shutterstock ? ' (kein Key)' : ''}</option>
                 </select>
                 <button
                   onClick={startRecsImport}
@@ -616,7 +618,7 @@ export default function Admin() {
               </p>
 
               {/* Progress bars for running jobs */}
-              {(['pexels', 'unsplash'] as const).map(src => {
+              {(['pexels', 'unsplash', 'shutterstock'] as const).map(src => {
                 const job = importProgress[src]
                 if (!job?.running && !job?.finishedAt) return null
                 return (
@@ -646,7 +648,7 @@ export default function Admin() {
               <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-indigo-900 text-sm mb-0.5">Alle Quellen gleichzeitig</div>
-                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash parallel für maximalen Durchsatz</div>
+                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash + Shutterstock parallel für maximalen Durchsatz</div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <input
@@ -659,7 +661,7 @@ export default function Admin() {
                   />
                   <button
                     onClick={startImportAll}
-                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash)}
+                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash && !(apiKeys as any)?.shutterstock)}
                     className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm whitespace-nowrap"
                   >
                     {importAllRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
@@ -669,9 +671,10 @@ export default function Admin() {
               </div>
 
               {/* Individual source cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <ImportCard title="Pexels" description="Bis zu 80 Bilder/Keyword, diverse Suche. Empfohlen für große Batches." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={500} maxBatch={2000} />
                 <ImportCard title="Unsplash" description="Bis zu 30 Bilder/Keyword, hochwertige Fotos. Ergänzt Pexels gut." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={300} maxBatch={1000} />
+                <ImportCard title="Shutterstock" description="Bis zu 50 Bilder/Keyword, professionelle Stockfotos. Ideal für Portraits & Hauttöne." icon={<Camera className="w-5 h-5 text-orange-600" />} color="orange" available={!!(apiKeys as any)?.shutterstock} job={importProgress['shutterstock']} isActive={activeJob === 'shutterstock'} onImport={(n) => startImport('shutterstock', n)} defaultBatch={300} maxBatch={1000} />
               </div>
             </div>
 

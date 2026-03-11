@@ -351,6 +351,7 @@ export const appRouter = router({
       stripe: !!process.env.STRIPE_SECRET_KEY,
       unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
       pexels: !!process.env.PEXELS_API_KEY,
+      shutterstock: !!(process.env.SHUTTERSTOCK_KEY && process.env.SHUTTERSTOCK_SECRET),
     };
   }),
 
@@ -505,7 +506,7 @@ export const appRouter = router({
 
   // Admin: Import from source (Pexels/Unsplash)
   importFromSource: publicProcedure
-    .input(z.object({ source: z.enum(["pexels", "unsplash"]), count: z.number().min(1).max(5000).default(500) }))
+    .input(z.object({ source: z.enum(["pexels", "unsplash", "shutterstock"]), count: z.number().min(1).max(5000).default(500) }))
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
       if (status.running) return { started: false, message: "Import läuft bereits" };
@@ -513,14 +514,16 @@ export const appRouter = router({
       const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
       (async () => {
         try {
-          const apiKey = input.source === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
+          const apiKey = input.source === "pexels" ? process.env.PEXELS_API_KEY
+            : input.source === "unsplash" ? process.env.UNSPLASH_ACCESS_KEY
+            : (process.env.SHUTTERSTOCK_KEY && process.env.SHUTTERSTOCK_SECRET ? `${process.env.SHUTTERSTOCK_KEY}:${process.env.SHUTTERSTOCK_SECRET}` : undefined);
           if (!apiKey) { status.error = `${input.source} API key missing`; return; }
           let imported = 0;
           // Use diverse keyword search instead of /curated (which always returns same ~1000 popular photos)
           // Shuffle keywords and rotate through them with random page offsets for maximum diversity
           const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
           const shuffled = allKeywords.sort(() => Math.random() - 0.5);
-          const perPage = input.source === "pexels" ? 80 : 30;
+          const perPage = input.source === "pexels" ? 80 : input.source === "shutterstock" ? 50 : 30;
           const CONCURRENCY = 5;
           let kwIdx = 0;
           while (imported < input.count && kwIdx < shuffled.length) {
@@ -537,6 +540,19 @@ export const appRouter = router({
                 if (!res.ok) { log(`⚠️ Pexels ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
                 photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+              } else if (input.source === "shutterstock") {
+                const [ssKey, ssSecret] = apiKey.split(':');
+                const basicAuth = Buffer.from(`${ssKey}:${ssSecret}`).toString('base64');
+                const res = await fetch(
+                  `https://api.shutterstock.com/v2/images/search?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&image_type=photo&safe=true`,
+                  { headers: { Authorization: `Basic ${basicAuth}`, 'Accept': 'application/json', 'User-Agent': 'MosaicPrint/1.0' } }
+                );
+                if (!res.ok) { log(`⚠️ Shutterstock ${res.status} for "${keyword}"`); continue; }
+                const data = await res.json() as any;
+                photos = (data.data ?? []).map((p: any) => ({
+                  sourceUrl: p.assets?.preview_1000?.url ?? p.assets?.preview?.url ?? '',
+                  tile128Url: p.assets?.large_thumb?.url ?? p.assets?.small_thumb?.url ?? ''
+                })).filter((p: any) => p.sourceUrl && p.tile128Url);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
@@ -575,7 +591,7 @@ export const appRouter = router({
 
   // Admin: Import status
   getImportStatus: publicProcedure
-    .input(z.object({ source: z.enum(["pexels", "unsplash"]).default("pexels") }))
+    .input(z.object({ source: z.enum(["pexels", "unsplash", "shutterstock"]).default("pexels") }))
     .query(({ input }) => getImportStatus(input.source)),
 
   // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
@@ -697,9 +713,10 @@ export const appRouter = router({
     .input(z.object({ count: z.number().min(50).max(5000).default(500) }))
     .mutation(async ({ input }) => {
       const results: Record<string, boolean> = {};
-      const sources: Array<'pexels' | 'unsplash'> = [];
+      const sources: Array<'pexels' | 'unsplash' | 'shutterstock'> = [];
       if (process.env.PEXELS_API_KEY) sources.push('pexels');
       if (process.env.UNSPLASH_ACCESS_KEY) sources.push('unsplash');
+      if (process.env.SHUTTERSTOCK_KEY && process.env.SHUTTERSTOCK_SECRET) sources.push('shutterstock');
       if (sources.length === 0) return { started: false, error: 'Keine API-Keys konfiguriert' };
       // Start each source as a separate background job
       for (const source of sources) {
@@ -714,13 +731,15 @@ export const appRouter = router({
         const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
         results[source] = true;
         // Fire-and-forget background job (same logic as importFromSource)
-        (async (src: 'pexels' | 'unsplash') => {
+        (async (src: 'pexels' | 'unsplash' | 'shutterstock') => {
           try {
-            const apiKey = src === 'pexels' ? process.env.PEXELS_API_KEY! : process.env.UNSPLASH_ACCESS_KEY!;
+            const apiKey = src === 'pexels' ? process.env.PEXELS_API_KEY!
+              : src === 'shutterstock' ? `${process.env.SHUTTERSTOCK_KEY}:${process.env.SHUTTERSTOCK_SECRET}`
+              : process.env.UNSPLASH_ACCESS_KEY!;
             let imported = 0;
             const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
             const shuffled = allKeywords.sort(() => Math.random() - 0.5);
-            const perPage = src === 'pexels' ? 80 : 30;
+            const perPage = src === 'pexels' ? 80 : src === 'shutterstock' ? 50 : 30;
             const CONCURRENCY = 5;
             let kwIdx = 0;
             while (imported < input.count && kwIdx < shuffled.length) {
@@ -736,6 +755,19 @@ export const appRouter = router({
                   if (!res.ok) continue;
                   const data = await res.json() as any;
                   photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+                } else if (src === 'shutterstock') {
+                  const [ssKey, ssSecret] = apiKey.split(':');
+                  const basicAuth = Buffer.from(`${ssKey}:${ssSecret}`).toString('base64');
+                  const res = await fetch(
+                    `https://api.shutterstock.com/v2/images/search?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&image_type=photo&safe=true`,
+                    { headers: { Authorization: `Basic ${basicAuth}`, 'Accept': 'application/json', 'User-Agent': 'MosaicPrint/1.0' } }
+                  );
+                  if (!res.ok) continue;
+                  const data = await res.json() as any;
+                  photos = (data.data ?? []).map((p: any) => ({
+                    sourceUrl: p.assets?.preview_1000?.url ?? p.assets?.preview?.url ?? '',
+                    tile128Url: p.assets?.large_thumb?.url ?? p.assets?.small_thumb?.url ?? ''
+                  })).filter((p: any) => p.sourceUrl && p.tile128Url);
                 } else {
                   const res = await fetch(
                     `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
