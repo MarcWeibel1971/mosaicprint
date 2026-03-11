@@ -613,7 +613,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const data = await res.json()
       if (data.ok) {
         setDedupResult(`✅ ${data.message}`)
-        setDedupProgress({ before: data.before.total, deleted: data.deleted, after: data.after.total })
+        setDedupProgress({ before: data.before?.total ?? 0, deleted: data.deleted ?? 0, after: data.after?.total ?? 0 })
         fetchDbStats()
         fetchImages(1)
       } else {

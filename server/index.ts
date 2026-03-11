@@ -257,16 +257,12 @@ app.get("/api/health", async (_req, res) => {
 app.post("/api/admin/dedup-tiles", async (_req, res) => {
   try {
     const pool = db.getPool();
-    // Count duplicates before
-    const beforeRes = await pool.query(`
-      SELECT COUNT(*) as total, COUNT(DISTINCT source_url) as unique_count
-      FROM mosaic_images
-    `);
+    // Count before
+    const beforeRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
     const before = beforeRes.rows[0];
-    const dupsBefore = parseInt(before.total) - parseInt(before.unique_count);
 
-    // Delete duplicates: keep the row with the lowest id for each source_url
-    const deleteRes = await pool.query(`
+    // Step 1: Delete exact source_url duplicates (keep lowest id)
+    const step1 = await pool.query(`
       DELETE FROM mosaic_images
       WHERE id NOT IN (
         SELECT MIN(id)
@@ -274,21 +270,58 @@ app.post("/api/admin/dedup-tiles", async (_req, res) => {
         GROUP BY source_url
       )
     `);
-    const deleted = deleteRes.rowCount ?? 0;
+
+    // Step 2: Delete Pexels photo-ID duplicates
+    // Pexels URLs contain the photo ID: /photos/1234567/pexels-photo-1234567.jpeg
+    // Extract the numeric photo ID and deduplicate on it
+    const step2 = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE source_url LIKE '%pexels%'
+        AND id NOT IN (
+          SELECT MIN(id)
+          FROM mosaic_images
+          WHERE source_url LIKE '%pexels%'
+          GROUP BY
+            CASE
+              WHEN source_url ~ '/photos/([0-9]+)/' THEN
+                (regexp_match(source_url, '/photos/([0-9]+)/'))[1]
+              ELSE source_url
+            END
+        )
+    `);
+
+    // Step 3: Delete Unsplash photo-ID duplicates
+    // Unsplash URLs: /photos/AbCdEfGh or ?photo=AbCdEfGh
+    const step3 = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE source_url LIKE '%unsplash%'
+        AND id NOT IN (
+          SELECT MIN(id)
+          FROM mosaic_images
+          WHERE source_url LIKE '%unsplash%'
+          GROUP BY
+            CASE
+              WHEN source_url ~ 'photo-([A-Za-z0-9_-]+)-' THEN
+                (regexp_match(source_url, 'photo-([A-Za-z0-9_-]+)-'))[1]
+              WHEN source_url ~ '/photos/([A-Za-z0-9_-]+)' THEN
+                (regexp_match(source_url, '/photos/([A-Za-z0-9_-]+)'))[1]
+              ELSE source_url
+            END
+        )
+    `);
+
+    const deleted = (step1.rowCount ?? 0) + (step2.rowCount ?? 0) + (step3.rowCount ?? 0);
 
     // Count after
-    const afterRes = await pool.query(`
-      SELECT COUNT(*) as total, COUNT(DISTINCT source_url) as unique_count
-      FROM mosaic_images
-    `);
+    const afterRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
     const after = afterRes.rows[0];
 
     res.json({
       ok: true,
-      before: { total: parseInt(before.total), unique: parseInt(before.unique_count), duplicates: dupsBefore },
+      before: { total: parseInt(before.total) },
       deleted,
-      after: { total: parseInt(after.total), unique: parseInt(after.unique_count) },
-      message: `Removed ${deleted} duplicate rows. DB now has ${after.total} unique tiles.`,
+      after: { total: parseInt(after.total) },
+      message: `${deleted} Duplikate entfernt. DB hat jetzt ${after.total} eindeutige Bilder.`,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
