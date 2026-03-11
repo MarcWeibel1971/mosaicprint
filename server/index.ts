@@ -177,6 +177,21 @@ app.get("/api/proxy/portrait", async (req, res) => {
   }
 });
 
+// Debug: Test color filter SQL directly
+app.get("/api/debug-color-filter", async (req, res) => {
+  const color = (req.query.color as string) ?? 'cyan';
+  const pool = db.getPool();
+  try {
+    let condition = '1=1';
+    if (color === 'cyan') condition = "avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a < -10 AND avg_b < -5";
+    else if (color === 'grau') condition = "ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80";
+    else if (color === 'rot') condition = "avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 20";
+    const r = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${condition}`);
+    const sample = await pool.query(`SELECT id, avg_l::float, avg_a::float, avg_b::float FROM mosaic_images WHERE ${condition} LIMIT 3`);
+    res.json({ color, condition, count: Number(r.rows[0]?.cnt), sample: sample.rows });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // Debug endpoint - shows which env vars are set (not their values)
 // Useful for diagnosing Railway environment variable issues
 app.get("/api/debug-env", (_req, res) => {
