@@ -39,14 +39,19 @@ const SMART_KEYWORDS: Record<string, Record<string, string[]>> = {
     bright: ["bright blue sky", "turquoise water", "light blue", "azure sky", "cyan sea"],
   },
   purple: {
-    dark: ["dark purple", "deep violet", "dark plum", "dark lavender", "eggplant"],
-    mid:  ["purple flower", "lavender field", "violet", "purple sunset", "lilac"],
-    bright: ["bright purple", "bright violet", "purple orchid", "magenta flower", "fuchsia"],
+    dark: ["dark purple", "deep violet", "dark plum", "dark lavender", "eggplant", "purple night", "violet shadow", "amethyst dark", "purple abstract dark", "indigo dark"],
+    mid:  ["purple flower", "lavender field", "violet", "purple sunset", "lilac", "wisteria", "purple iris", "violet abstract", "purple bokeh", "amethyst crystal"],
+    bright: ["bright purple", "bright violet", "purple orchid", "magenta flower", "fuchsia", "purple neon", "violet light", "purple gradient", "bright lavender", "purple sky"],
   },
   pink: {
-    dark: ["dark pink", "deep rose", "dark coral", "dark salmon", "mauve"],
-    mid:  ["pink flower", "pink blossom", "rose pink", "pink peony", "flamingo"],
-    bright: ["bright pink", "hot pink", "pink tulip", "pink sakura", "light pink"],
+    dark: ["dark pink", "deep rose", "dark coral", "dark salmon", "mauve", "dark magenta", "dark fuchsia", "deep pink abstract", "rose dark", "pink shadow"],
+    mid:  ["pink flower", "pink blossom", "rose pink", "pink peony", "flamingo", "pink abstract", "pink bokeh", "pink texture", "rose petal", "pink gradient"],
+    bright: ["bright pink", "hot pink", "pink tulip", "pink sakura", "light pink", "neon pink", "pink neon light", "bright rose", "pink sky", "pink sunset"],
+  },
+  cyan: {
+    dark: ["dark teal", "deep teal", "dark turquoise", "teal shadow", "dark cyan", "deep aqua", "dark seafoam", "teal abstract dark", "dark emerald water", "deep teal texture"],
+    mid:  ["teal color", "turquoise water", "cyan abstract", "teal texture", "aqua color", "teal bokeh", "cyan gradient", "teal nature", "turquoise sea", "teal pattern"],
+    bright: ["bright teal", "bright turquoise", "bright cyan", "neon teal", "bright aqua", "cyan neon", "turquoise bright", "teal neon light", "bright seafoam", "cyan sky"],
   },
   brown: {
     dark: ["dark wood", "dark soil", "dark bark", "dark coffee", "dark chocolate"],
