@@ -10,9 +10,22 @@ const CRON_INTERVAL_MS = 60 * 60 * 1000;
 
 // ---- Color helpers for Smart Import ----
 
-// Detailed keyword map per color × brightness combination
-// Each entry: [color_category][brightness_category] = search queries
-const SMART_KEYWORDS: Record<string, Record<string, string[]>> = {
+// Subject/Motiv categories for 3D matrix
+const SUBJECTS = ['landscape', 'portrait', 'city', 'nature', 'abstract', 'animal'] as const;
+type Subject = typeof SUBJECTS[number];
+
+// Subject-specific search term modifiers
+const SUBJECT_MODIFIERS: Record<Subject, string[]> = {
+  landscape: ['landscape', 'scenery', 'vista', 'panorama', 'outdoor scene'],
+  portrait:  ['portrait', 'face close up', 'person', 'human', 'people'],
+  city:      ['city', 'urban', 'street', 'architecture', 'building'],
+  nature:    ['nature', 'forest', 'flower', 'plant', 'botanical'],
+  abstract:  ['abstract', 'texture', 'pattern', 'bokeh', 'gradient'],
+  animal:    ['animal', 'wildlife', 'bird', 'pet', 'creature'],
+};
+
+// Color × brightness base keywords (combined with subject modifiers for 3D queries)
+const COLOR_BRIGHTNESS_KEYWORDS: Record<string, Record<string, string[]>> = {
   red: {
     dark: ["dark red", "deep crimson", "burgundy wine", "dark rose", "maroon"],
     mid:  ["red flowers", "red autumn leaves", "red fabric", "cherry blossom", "red berries"],
@@ -114,10 +127,10 @@ function getBrightnessCategory(avgL: number): string {
 }
 
 // Analyse the full database and return prioritized import tasks
-// Returns array of {query, priority, deficit} sorted by most needed first
-async function analyzeDbGaps(targetPerBucket = 400): Promise<Array<{query: string; priority: number; deficit: number; label: string}>> {
+// Uses 3D matrix: Color × Brightness × Subject (Motiv)
+async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: string; priority: number; deficit: number; label: string; subject: string}>> {
   const pool = db.getPool();
-  // Count by color × brightness bucket
+  // Count by color × brightness × subject bucket
   const res = await pool.query(`
     SELECT
       CASE
@@ -127,6 +140,7 @@ async function analyzeDbGaps(targetPerBucket = 400): Promise<Array<{query: strin
         WHEN avg_a > 20 THEN 'red'
         WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
         WHEN avg_b > 20 THEN 'yellow'
+        WHEN avg_a < -10 AND avg_b < -5 THEN 'cyan'
         WHEN avg_a < -10 THEN 'green'
         WHEN avg_b < -15 THEN 'blue'
         WHEN avg_a > 10 AND avg_b < 0 THEN 'purple'
@@ -138,28 +152,62 @@ async function analyzeDbGaps(targetPerBucket = 400): Promise<Array<{query: strin
         WHEN avg_l > 65 THEN 'bright'
         ELSE 'mid'
       END as brightness_cat,
+      COALESCE(subject, 'general') as subject_cat,
       COUNT(*) as cnt
     FROM mosaic_images
-    GROUP BY color_cat, brightness_cat
+    GROUP BY color_cat, brightness_cat, subject_cat
     ORDER BY cnt ASC
   `);
 
-  const tasks: Array<{query: string; priority: number; deficit: number; label: string}> = [];
-
+  // Build a set of existing buckets
+  const existing = new Map<string, number>();
   for (const row of res.rows) {
-    const cnt = Number(row.cnt);
-    const deficit = Math.max(0, targetPerBucket - cnt);
-    if (deficit <= 0) continue;
-    const colorKws = SMART_KEYWORDS[row.color_cat]?.[row.brightness_cat] ?? [];
-    const priority = deficit / targetPerBucket; // 0-1, higher = more needed
-    for (const kw of colorKws) {
-      tasks.push({ query: kw, priority, deficit, label: `${row.color_cat}/${row.brightness_cat}` });
-    }
+    existing.set(`${row.color_cat}|${row.brightness_cat}|${row.subject_cat}`, Number(row.cnt));
   }
 
-  // Also add subject diversity tasks (always needed for variety)
-  for (const kw of SUBJECT_KEYWORDS) {
-    tasks.push({ query: kw, priority: 0.3, deficit: 50, label: "subject-diversity" });
+  const tasks: Array<{query: string; priority: number; deficit: number; label: string; subject: string}> = [];
+  const colors = Object.keys(COLOR_BRIGHTNESS_KEYWORDS);
+  const brightnesses = ['dark', 'mid', 'bright'];
+
+  for (const color of colors) {
+    for (const brightness of brightnesses) {
+      const baseKws = COLOR_BRIGHTNESS_KEYWORDS[color]?.[brightness] ?? [];
+      if (baseKws.length === 0) continue;
+
+      for (const subject of SUBJECTS) {
+        const bucketKey = `${color}|${brightness}|${subject}`;
+        const cnt = existing.get(bucketKey) ?? 0;
+        const deficit = Math.max(0, targetPerBucket - cnt);
+        if (deficit <= 0) continue;
+
+        const priority = deficit / targetPerBucket;
+        const subjectMods = SUBJECT_MODIFIERS[subject];
+
+        // Generate combined queries: colorKeyword + subjectModifier
+        for (const baseKw of baseKws.slice(0, 3)) { // top 3 color keywords
+          for (const subMod of subjectMods.slice(0, 2)) { // top 2 subject modifiers
+            tasks.push({
+              query: `${baseKw} ${subMod}`,
+              priority,
+              deficit,
+              label: `${color}/${brightness}/${subject}`,
+              subject,
+            });
+          }
+        }
+      }
+
+      // Also add pure color queries (subject='general') for overall coverage
+      const generalKey = `${color}|${brightness}|general`;
+      const generalCnt = existing.get(generalKey) ?? 0;
+      const generalDeficit = Math.max(0, targetPerBucket - generalCnt);
+      if (generalDeficit > 0) {
+        const priority = generalDeficit / targetPerBucket;
+        for (const kw of baseKws) {
+          tasks.push({ query: kw, priority: priority * 0.8, deficit: generalDeficit, label: `${color}/${brightness}/general`, subject: 'general' });
+        }
+      }
+    }
   }
 
   // Sort by priority descending (most needed first)
@@ -303,10 +351,22 @@ export const appRouter = router({
       `);
       const byBrightness: Record<string, number> = {};
       for (const row of brightRes.rows) byBrightness[row.brightness] = Number(row.cnt);
-      return { total, labIndexed, bySource, byColor, byBrightness, count: total, target: TILE_TARGET };
+      // By subject (motiv)
+      const subjectRes = await pool.query(`
+        SELECT COALESCE(subject, 'general') as subject, COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY subject
+        ORDER BY cnt DESC
+      `);
+      const bySubject: Record<string, number> = {};
+      for (const row of subjectRes.rows) bySubject[row.subject] = Number(row.cnt);
+      // 3D matrix gaps analysis
+      const gapTasks = await analyzeDbGaps(200);
+      const topGaps = gapTasks.slice(0, 20).map(t => ({ label: t.label, deficit: t.deficit, query: t.query }));
+      return { total, labIndexed, bySource, byColor, byBrightness, bySubject, topGaps, count: total, target: TILE_TARGET };
     } catch (e) {
       console.error('[getDbStats error]', e);
-      return { total: 0, labIndexed: 0, bySource: {}, byColor: {}, byBrightness: {}, count: 0, target: TILE_TARGET };
+      return { total: 0, labIndexed: 0, bySource: {}, byColor: {}, byBrightness: {}, bySubject: {}, topGaps: [], count: 0, target: TILE_TARGET };
     }
   }),
 
@@ -433,7 +493,7 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0, subject: task.subject ?? 'general' });
                     imported++;
                     batchImported++;
                     smartImportJobs[jobKey].imported = imported;

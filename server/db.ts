@@ -40,9 +40,12 @@ export async function ensureSchema(): Promise<void> {
       tr_l REAL DEFAULT 50, tr_a REAL DEFAULT 0, tr_b REAL DEFAULT 0,
       bl_l REAL DEFAULT 50, bl_a REAL DEFAULT 0, bl_b REAL DEFAULT 0,
       br_l REAL DEFAULT 50, br_a REAL DEFAULT 0, br_b REAL DEFAULT 0,
+      subject TEXT DEFAULT 'general',
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Add subject column if missing (migration for existing tables)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT 'general'`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mosaic_orders (
       id SERIAL PRIMARY KEY,
@@ -144,13 +147,14 @@ export async function deleteMosaicImage(id: number): Promise<boolean> {
 export async function insertMosaicImage(data: {
   sourceUrl: string; tile128Url: string | null;
   avgL: number; avgA: number; avgB: number;
+  subject?: string;
 }): Promise<void> {
   const pool = getPool();
   await pool.query(
-    `INSERT INTO mosaic_images (source_url, tile128_url, avg_l, avg_a, avg_b)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO mosaic_images (source_url, tile128_url, avg_l, avg_a, avg_b, subject)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT DO NOTHING`,
-    [data.sourceUrl, data.tile128Url, data.avgL, data.avgA, data.avgB]
+    [data.sourceUrl, data.tile128Url, data.avgL, data.avgA, data.avgB, data.subject ?? 'general']
   );
 }
 
