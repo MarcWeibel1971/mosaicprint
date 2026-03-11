@@ -211,6 +211,52 @@ export default function Studio() {
   // Progressive rendering: show LAB-only preview while SSD matching runs
   const [renderPass, setRenderPass] = useState<1 | 2 | null>(null);
 
+  // ── Debug Report: detailed algorithm trace after generation ──────────────
+  const [debugReport, setDebugReport] = useState<{
+    // Tile pool
+    dbTilesTotal: number;       // tiles in LAB index
+    indexDimension: string;     // '4D' | '7D' | '14D' | '15D'
+    tilesLoaded: number;        // images actually loaded
+    tilesAfterFilter: number;   // after clipart filter
+    tilesFiltered: number;      // removed by clipart filter
+    // Grid
+    cols: number;
+    rows: number;
+    totalCells: number;
+    tilePx: number;
+    // Matching
+    use2Stage: boolean;
+    topK: number;
+    maxReuse: number;
+    neighborRadius: number;
+    neighborPenalty: number;
+    enableRotation: boolean;
+    // Scoring weights (Stage C)
+    wSsd: number;
+    wLab: number;
+    wBrightness: number;
+    wTexture: number;
+    wSaturation: number;
+    wQuad: number;
+    // Face
+    facesDetected: number;
+    faceCellCount: number;      // cells inside face regions
+    faceCellPct: number;        // % of total cells
+    // Color transfer
+    lBlend: number;
+    abBlend: number;
+    maxColorShift: number;
+    histogramBlend: number;
+    contrastBoost: number;
+    // Overlay
+    overlayMode: string;
+    baseOverlay: number;
+    edgeBoost: number;
+    // Timing
+    generationMs: number;
+  } | null>(null);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+
   // Update cache size display
   useEffect(() => {
     getIDBCacheSize().then(n => setCacheSize(n + getMemoryCacheSize()));
@@ -532,6 +578,8 @@ export default function Studio() {
     resetHiRes();
     setQualityMetrics(null);
     setRenderPass(null);
+    setDebugReport(null);
+    const _debugStartMs = performance.now();
 
     const savedSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
     const BASE_TILES = savedSettings.baseTiles ?? 60;  // Mosaicer-style: fewer, larger tiles
@@ -1059,6 +1107,7 @@ export default function Studio() {
     setProgressMsg("Gesichtserkennung...");
     setProgress(48);
     const faceMask: boolean[] = new Array(TOTAL_TILES).fill(false);
+    let _debugFacesDetected = 0;
     try {
       if ('FaceDetector' in window) {
         const faceDetector = new (window as any).FaceDetector({ fastMode: false, maxDetectedFaces: 10 });
@@ -1067,6 +1116,7 @@ export default function Studio() {
         const fCtx = faceCanvas.getContext('2d')!;
         fCtx.drawImage(targetImg, 0, 0);
         const faces = await faceDetector.detect(faceCanvas);
+        _debugFacesDetected = faces.length;
         for (const face of faces) {
           const { x, y, width, height } = face.boundingBox;
           // Expand bounding box by 20% for better coverage
@@ -1382,6 +1432,53 @@ export default function Studio() {
         satHigh: (satHighCount / validCount) * 100,
         totalTiles: TOTAL_TILES,
         uniqueTiles: uniqueUsed.size,
+      });
+
+      // ── Build Debug Report ──────────────────────────────────────────────
+      const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
+      const faceCellCount = faceMask.filter(Boolean).length;
+      setDebugReport({
+        // Tile pool
+        dbTilesTotal: TOTAL_DB_TILES,
+        indexDimension: IS_15D ? '15D' : IS_14D ? '14D' : IS_7D ? '7D' : '4D',
+        tilesLoaded: filteredValidImgs.length + (imgFeatures.length - filteredImgFeatures.length),
+        tilesAfterFilter: filteredValidImgs.length,
+        tilesFiltered: imgFeatures.length - filteredImgFeatures.length,
+        // Grid
+        cols: COLS,
+        rows: ROWS,
+        totalCells: TOTAL_TILES,
+        tilePx: TILE_PX,
+        // Matching
+        use2Stage: USE_2STAGE,
+        topK: TOP_K,
+        maxReuse: MAX_REUSE,
+        neighborRadius: NEIGHBOR_RADIUS,
+        neighborPenalty: NEIGHBOR_PENALTY,
+        enableRotation: ENABLE_ROTATION,
+        // Scoring weights (Stage C non-face)
+        wSsd: savedSettings.ssdWeight ?? 0.30,
+        wLab: savedSettings.labWeight ?? 0.15,
+        wBrightness: savedSettings.brightnessWeight ?? 0.40,
+        wTexture: savedSettings.textureWeight ?? 0.08,
+        wSaturation: savedSettings.saturationWeight ?? 0.25,
+        wQuad: 0.10,
+        // Face
+        facesDetected: _debugFacesDetected,
+        faceCellCount,
+        faceCellPct: (faceCellCount / TOTAL_TILES) * 100,
+        // Color transfer
+        lBlend: 0.20 + 0.50 * blendFactor,
+        abBlend: 0.10 + 0.20 * blendFactor,
+        maxColorShift: 12,
+        histogramBlend: savedSettings.histogramBlend ?? 0.0,
+        contrastBoost: savedSettings.contrastBoost ?? 1.30,
+        // Overlay
+        overlayMode: savedSettings.overlayMode ?? 'softlight',
+        baseOverlay: savedSettings.baseOverlay ?? 0.15,
+        edgeBoost: savedSettings.edgeBoost ?? 0.20,
+        // Timing
+        generationMs: performance.now() - _debugStartMs,
       });
     } catch { /* metrics are optional */ }
 
@@ -2180,6 +2277,173 @@ export default function Studio() {
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* ── DEBUG PANEL ── */}
+        {ready && debugReport && (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm mb-6 overflow-hidden">
+            {/* Header / toggle */}
+            <button
+              onClick={() => setShowDebugPanel(v => !v)}
+              className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-gray-50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-gray-800">🔬 Algorithmus-Bericht</span>
+                <span className="text-[10px] font-semibold text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">
+                  {(debugReport.generationMs / 1000).toFixed(1)}s
+                </span>
+              </div>
+              <span className="text-gray-400 text-sm">{showDebugPanel ? '▲' : '▼'}</span>
+            </button>
+
+            {showDebugPanel && (
+              <div className="px-5 pb-5 space-y-5 border-t border-gray-100">
+
+                {/* 1. Tile-Pool */}
+                <div className="pt-4">
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">1 · Tile-Pool</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <p className="text-[10px] text-gray-400 mb-0.5">DB-Index (gesamt)</p>
+                      <p className="text-base font-bold text-gray-900">{debugReport.dbTilesTotal.toLocaleString()}</p>
+                      <p className="text-[10px] text-gray-400">{debugReport.indexDimension} Feature-Vektor</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <p className="text-[10px] text-gray-400 mb-0.5">Geladen</p>
+                      <p className="text-base font-bold text-gray-900">{debugReport.tilesLoaded.toLocaleString()}</p>
+                      <p className="text-[10px] text-gray-400">Bilder im Speicher</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <p className="text-[10px] text-gray-400 mb-0.5">Nach Filter</p>
+                      <p className="text-base font-bold text-gray-900">{debugReport.tilesAfterFilter.toLocaleString()}</p>
+                      <p className={`text-[10px] ${debugReport.tilesFiltered > 0 ? 'text-amber-500' : 'text-gray-400'}`}>
+                        {debugReport.tilesFiltered} Clipart entfernt
+                      </p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <p className="text-[10px] text-gray-400 mb-0.5">Matching-Modus</p>
+                      <p className={`text-base font-bold ${debugReport.use2Stage ? 'text-green-600' : 'text-amber-600'}`}>
+                        {debugReport.use2Stage ? '2-Stage' : 'Legacy'}
+                      </p>
+                      <p className="text-[10px] text-gray-400">Top-K = {debugReport.topK}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Gitter & Matching-Konfiguration */}
+                <div>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">2 · Gitter & Matching</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                    {[
+                      { label: 'Spalten', value: debugReport.cols },
+                      { label: 'Zeilen', value: debugReport.rows },
+                      { label: 'Kacheln', value: debugReport.totalCells },
+                      { label: 'Tile-Px', value: `${debugReport.tilePx}px` },
+                      { label: 'Max-Reuse', value: debugReport.maxReuse },
+                      { label: 'Rotation', value: debugReport.enableRotation ? 'Ja' : 'Nein' },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="bg-gray-50 rounded-xl p-2.5 text-center">
+                        <p className="text-[10px] text-gray-400">{label}</p>
+                        <p className="text-sm font-bold text-gray-900">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div className="bg-gray-50 rounded-xl p-2.5">
+                      <p className="text-[10px] text-gray-400">Anti-Repetitions-Radius</p>
+                      <p className="text-sm font-bold text-gray-900">{debugReport.neighborRadius} Kacheln · Penalty {debugReport.neighborPenalty}</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-2.5">
+                      <p className="text-[10px] text-gray-400">Gesichtserkennung</p>
+                      <p className="text-sm font-bold text-gray-900">
+                        {debugReport.facesDetected} Gesicht{debugReport.facesDetected !== 1 ? 'er' : ''} · {debugReport.faceCellPct.toFixed(0)}% Kacheln
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Scoring-Gewichte */}
+                <div>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">3 · Scoring-Gewichte (Stage C)</p>
+                  <div className="space-y-1.5">
+                    {[
+                      { label: 'SSD (Pixel-Matching 8×8)', value: debugReport.wSsd, color: 'bg-blue-500' },
+                      { label: 'Helligkeit (Brightness)', value: debugReport.wBrightness, color: 'bg-amber-500' },
+                      { label: 'LAB-Farb-Abstand (CIEDE2000)', value: debugReport.wLab, color: 'bg-coral-500' },
+                      { label: 'Sättigung', value: debugReport.wSaturation, color: 'bg-purple-500' },
+                      { label: 'Textur', value: debugReport.wTexture, color: 'bg-green-500' },
+                      { label: 'Quadrant-Farben', value: debugReport.wQuad, color: 'bg-teal-500' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-500 w-44 shrink-0">{label}</span>
+                        <div className="flex-1 bg-gray-100 rounded-full h-2">
+                          <div
+                            className={`${color} h-2 rounded-full`}
+                            style={{ width: `${Math.min(100, value * 200)}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-bold text-gray-700 w-8 text-right">{(value * 100).toFixed(0)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1.5">In Gesichts-Regionen: SSD 35% · Brightness ×1.3 · Edge ×1.8 · Texture ×1.5</p>
+                </div>
+
+                {/* 4. Farb-Transfer */}
+                <div>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">4 · Farb-Transfer (Reinhard-Stil)</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {[
+                      { label: 'L-Blend', value: debugReport.lBlend.toFixed(2), hint: 'Helligkeit' },
+                      { label: 'AB-Blend', value: debugReport.abBlend.toFixed(2), hint: 'Farb-Shift' },
+                      { label: 'Max Shift', value: `±${debugReport.maxColorShift}`, hint: 'a/b Clamp' },
+                      { label: 'Histogram', value: debugReport.histogramBlend.toFixed(2), hint: 'Blend-Stärke' },
+                      { label: 'Kontrast', value: `×${debugReport.contrastBoost.toFixed(2)}`, hint: 'Boost' },
+                    ].map(({ label, value, hint }) => (
+                      <div key={label} className="bg-gray-50 rounded-xl p-2.5 text-center">
+                        <p className="text-[10px] text-gray-400">{label}</p>
+                        <p className="text-sm font-bold text-gray-900">{value}</p>
+                        <p className="text-[10px] text-gray-400">{hint}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 5. Overlay */}
+                <div>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">5 · Overlay</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="bg-gray-50 rounded-xl p-2.5 text-center">
+                      <p className="text-[10px] text-gray-400">Modus</p>
+                      <p className="text-sm font-bold text-gray-900">{debugReport.overlayMode}</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-2.5 text-center">
+                      <p className="text-[10px] text-gray-400">Base Opacity</p>
+                      <p className="text-sm font-bold text-gray-900">{(debugReport.baseOverlay * 100).toFixed(0)}%</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-2.5 text-center">
+                      <p className="text-[10px] text-gray-400">Edge Boost</p>
+                      <p className="text-sm font-bold text-gray-900">+{(debugReport.edgeBoost * 100).toFixed(0)}%</p>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1.5">
+                    Effektive Stärke: {(debugReport.baseOverlay * 100).toFixed(0)}% (flach) bis {((debugReport.baseOverlay + debugReport.edgeBoost) * 100).toFixed(0)}% (Kanten)
+                  </p>
+                </div>
+
+                {/* Hinweis */}
+                <div className="bg-blue-50 border border-blue-100 rounded-xl p-3">
+                  <p className="text-[10px] text-blue-700 font-semibold mb-1">💡 Wie verbessere ich das Ergebnis?</p>
+                  <ul className="text-[10px] text-blue-600 space-y-0.5 list-disc list-inside">
+                    <li>Hoher ΔE (&gt;20): Mehr Tiles importieren – Admin → Gezielte Importe</li>
+                    <li>Gesicht unklar: Overlay erhöhen (Admin → Einstellungen → baseOverlay)</li>
+                    <li>Zu bunt: Sättigungs-Gewicht erhöhen (wSaturation → 0.35+)</li>
+                    <li>Wiederholungen: Mehr Tiles importieren oder MAX_REUSE reduzieren</li>
+                  </ul>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
