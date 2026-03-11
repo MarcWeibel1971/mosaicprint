@@ -83,6 +83,34 @@ app.get("/api/tile/:id", async (req, res) => {
   }
 });
 
+// Image proxy endpoint - proxies external images to avoid CORS issues
+// Used by image-cache.ts for picsum, unsplash, cloudfront, and pexels images
+app.get("/api/proxy/portrait", async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ error: "Missing url parameter" });
+  try {
+    const parsed = new URL(url);
+    const allowedDomains = [
+      "picsum.photos", "fastly.picsum.photos",
+      "images.unsplash.com",
+      "cloudfront.net",
+      "images.pexels.com"
+    ];
+    const isAllowed = allowedDomains.some(d => parsed.hostname.endsWith(d));
+    if (!isAllowed) return res.status(403).json({ error: "Domain not allowed" });
+    const response = await fetch(url);
+    if (!response.ok) return res.status(response.status).json({ error: "Upstream error" });
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    const buffer = await response.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // Debug endpoint - shows which env vars are set (not their values)
 // Useful for diagnosing Railway environment variable issues
 app.get("/api/debug-env", (_req, res) => {

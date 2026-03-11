@@ -190,7 +190,7 @@ export async function loadImageCached(
 function toProxiedUrl(src: string): string {
   try {
     const url = new URL(src);
-    const external = ["picsum.photos", "fastly.picsum.photos", "images.unsplash.com"];
+    const external = ["picsum.photos", "fastly.picsum.photos", "images.unsplash.com", "cloudfront.net", "images.pexels.com"];
     if (external.some(h => url.hostname.endsWith(h))) {
       // Build absolute proxy URL using window.location.origin so it works
       // regardless of the app's base path (e.g. /)
