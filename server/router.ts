@@ -670,6 +670,27 @@ export const appRouter = router({
       return smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
     }),
 
+  // Admin: Get import recommendations from analyzeDbGaps
+  // Returns the top-N tasks sorted by priority for display in the UI
+  getImportRecommendations: publicProcedure
+    .input(z.object({ limit: z.number().min(5).max(50).default(20) }))
+    .query(async ({ input }) => {
+      const tasks = await analyzeDbGaps(200);
+      // Group by label and pick top tasks
+      const seen = new Set<string>();
+      const topTasks = tasks
+        .filter(t => { const key = t.label; if (seen.has(key)) return false; seen.add(key); return true; })
+        .slice(0, input.limit)
+        .map(t => ({
+          query: t.query,
+          label: t.label,
+          priority: Math.round(t.priority * 100) / 100,
+          deficit: t.deficit,
+          subject: t.subject,
+        }));
+      return { tasks: topTasks, total: tasks.length };
+    }),
+
   // Admin: Import All Sources simultaneously (Pexels + Unsplash in parallel)
   // This starts both importFromSource jobs at the same time for maximum throughput
   importAll: publicProcedure

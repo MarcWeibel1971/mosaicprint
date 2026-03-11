@@ -135,6 +135,14 @@ export default function Admin() {
   const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels'>('pexels')
   const [importAllBatch, setImportAllBatch] = useState(500)
   const [importAllRunning, setImportAllRunning] = useState(false)
+  // Gezielte Importe (Empfehlungen)
+  interface ImportRecommendation { query: string; label: string; priority: number; deficit: number; subject: string }
+  const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
+  const [recsLoading, setRecsLoading] = useState(false)
+  const [recsJob, setRecsJob] = useState<SmartImportJob | null>(null)
+  const [recsSource, setRecsSource] = useState<'unsplash' | 'pexels'>('pexels')
+  const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
+  const [recsExpanded, setRecsExpanded] = useState(false)
 
   const fetchCronStatus = useCallback(async () => {
     try {
@@ -161,6 +169,40 @@ export default function Admin() {
     }
   }
 
+  const fetchRecommendations = useCallback(async () => {
+    setRecsLoading(true)
+    try {
+      const params = encodeURIComponent(JSON.stringify({ limit: 30 }))
+      const res = await fetch(`/api/trpc/getImportRecommendations?input=${params}`)
+      const data = await res.json()
+      const result = data.result?.data ?? data
+      setRecommendations(result.tasks ?? [])
+      // Select all by default
+      setSelectedRecs(new Set((result.tasks ?? []).map((t: { query: string }) => t.query)))
+    } catch { /* ignore */ } finally {
+      setRecsLoading(false)
+    }
+  }, [])
+
+  const startRecsImport = async () => {
+    if (activeJob) return
+    const queriesToRun = recommendations.filter(r => selectedRecs.has(r.query))
+    if (queriesToRun.length === 0) return
+    setActiveJob('recs_import')
+    setRecsJob({ running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${recsSource}...`], imported: 0, total: queriesToRun.length * 30 })
+    setMessage({ text: `Gezielte Importe gestartet: ${queriesToRun.length} Kategorien via ${recsSource}`, type: 'info' })
+    try {
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: recsSource, count: queriesToRun.length * 80, targetPerBucket: 200 }),
+      })
+    } catch {
+      setActiveJob(null)
+      setMessage({ text: 'Fehler beim Starten der gezielten Importe', type: 'error' })
+    }
+  }
+
   const fetchStats = useCallback(async () => {
     setLoading(true)
     try {
@@ -179,6 +221,7 @@ export default function Admin() {
 
   useEffect(() => { fetchStats() }, [fetchStats])
   useEffect(() => { fetchCronStatus() }, [fetchCronStatus])
+  useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
 
   // Poll import job status
   useEffect(() => {
@@ -430,32 +473,111 @@ export default function Admin() {
               </div>
             )}
 
-            {/* Smart Import */}
+            {/* Gezielte Importe (Empfehlungen) */}
             <div className="bg-white rounded-2xl p-6 border border-amber-200">
-              <h2 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-amber-500" />
-                Smart-Import (unterrepräsentierte Farben)
-              </h2>
-              <p className="text-gray-600 text-sm mb-4">
-                Analysiert die aktuelle Farbverteilung und importiert gezielt Bilder für unterrepräsentierte Farben (&lt;5% Anteil).
-                Jede fehlende Farbe wird mit passenden Keywords bei der gewählten Quelle gesucht.
+              <div className="flex items-start justify-between mb-1">
+                <h2 className="font-bold text-gray-900 flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-amber-500" />
+                  Gezielte Importe (Empfehlungen)
+                </h2>
+                <button
+                  onClick={fetchRecommendations}
+                  disabled={recsLoading}
+                  className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-amber-50 transition-colors"
+                >
+                  {recsLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                  Aktualisieren
+                </button>
+              </div>
+              <p className="text-gray-500 text-sm mb-4">
+                KI analysiert den aktuellen Tile-Pool und empfiehlt die wichtigsten Import-Kategorien.
+                Wähle einzelne Kategorien oder starte alle gleichzeitig.
               </p>
-              {smartJob && (
+
+              {/* Recommendation tiles */}
+              {recsLoading ? (
+                <div className="flex items-center gap-2 text-sm text-gray-400 mb-4">
+                  <RefreshCw className="w-4 h-4 animate-spin" /> Analysiere Tile-Pool...
+                </div>
+              ) : recommendations.length === 0 ? (
+                <div className="text-sm text-gray-400 mb-4">Keine Empfehlungen verfügbar. Klicke auf Aktualisieren.</div>
+              ) : (
+                <div className="mb-4">
+                  {/* Select all / deselect all */}
+                  <div className="flex items-center gap-3 mb-3">
+                    <button
+                      onClick={() => setSelectedRecs(new Set(recommendations.map(r => r.query)))}
+                      className="text-xs text-blue-600 hover:underline"
+                    >Alle auswählen</button>
+                    <span className="text-gray-300">|</span>
+                    <button
+                      onClick={() => setSelectedRecs(new Set())}
+                      className="text-xs text-gray-500 hover:underline"
+                    >Alle abwählen</button>
+                    <span className="text-xs text-gray-400 ml-auto">{selectedRecs.size} / {recommendations.length} ausgewählt</span>
+                  </div>
+                  {/* Tile grid */}
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {(recsExpanded ? recommendations : recommendations.slice(0, 12)).map(rec => {
+                      const isSelected = selectedRecs.has(rec.query)
+                      const priorityColor = rec.priority >= 1.5 ? 'border-red-300 bg-red-50' : rec.priority >= 1.0 ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50'
+                      const priorityBadge = rec.priority >= 1.5 ? 'bg-red-100 text-red-700' : rec.priority >= 1.0 ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                      return (
+                        <button
+                          key={rec.query}
+                          onClick={() => {
+                            const next = new Set(selectedRecs)
+                            if (isSelected) next.delete(rec.query); else next.add(rec.query)
+                            setSelectedRecs(next)
+                          }}
+                          className={`text-left rounded-xl border-2 p-3 transition-all ${
+                            isSelected ? `${priorityColor} ring-2 ring-amber-400` : 'border-gray-200 bg-white opacity-50'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs font-semibold text-gray-800 truncate">{rec.label}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ml-1 shrink-0 ${priorityBadge}`}>
+                              {rec.priority >= 1.5 ? '🔥' : rec.priority >= 1.0 ? '⚡' : '↑'}{rec.priority.toFixed(1)}×
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-400 truncate">{rec.query}</div>
+                          <div className="text-xs text-gray-500 mt-1">Fehlt: {rec.deficit} Bilder</div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {recommendations.length > 12 && (
+                    <button
+                      onClick={() => setRecsExpanded(!recsExpanded)}
+                      className="mt-2 text-xs text-amber-600 hover:underline"
+                    >
+                      {recsExpanded ? '▲ Weniger anzeigen' : `▼ Alle ${recommendations.length} anzeigen`}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Job progress */}
+              {recsJob && (
                 <div className="mb-4 bg-gray-50 rounded-xl p-3 text-xs">
                   <div className="font-medium text-gray-700 mb-1">
-                    {smartJob.running ? `Läuft... ${smartJob.imported ?? 0} importiert` : `Fertig: ${smartJob.imported ?? 0} neue Bilder`}
+                    {recsJob.running
+                      ? `⏳ Läuft... ${recsJob.imported ?? 0} importiert`
+                      : `✅ Fertig: ${recsJob.imported ?? 0} neue Bilder`}
                   </div>
-                  <div className="max-h-24 overflow-y-auto space-y-0.5">
-                    {smartJob.log.map((l, i) => (
-                      <div key={i} className={l.startsWith('  →') ? 'text-green-600 pl-2' : 'text-gray-500'}>{l}</div>
+                  <div className="max-h-20 overflow-y-auto space-y-0.5">
+                    {recsJob.log.slice(-8).map((l, i) => (
+                      <div key={i} className={l.startsWith('✓') ? 'text-green-600' : l.startsWith('✅') ? 'text-green-700 font-medium' : 'text-gray-500'}>{l}</div>
                     ))}
                   </div>
                 </div>
               )}
-              <div className="flex items-center gap-3">
+
+              {/* Controls */}
+              <div className="flex items-center gap-3 flex-wrap">
                 <select
-                  value={smartSource}
-                  onChange={e => setSmartSource(e.target.value as 'unsplash' | 'pexels')}
+                  value={recsSource}
+                  onChange={e => setRecsSource(e.target.value as 'unsplash' | 'pexels')}
                   className="text-sm border border-gray-200 rounded-xl px-3 py-2"
                   disabled={!!activeJob}
                 >
@@ -463,12 +585,16 @@ export default function Admin() {
                   <option value="unsplash" disabled={!apiKeys?.unsplash}>Unsplash{!apiKeys?.unsplash ? ' (kein Key)' : ''}</option>
                 </select>
                 <button
-                  onClick={() => startSmartImport(smartSource)}
-                  disabled={!!activeJob || (!apiKeys?.pexels && !apiKeys?.unsplash)}
+                  onClick={startRecsImport}
+                  disabled={!!activeJob || selectedRecs.size === 0 || (!apiKeys?.pexels && !apiKeys?.unsplash)}
                   className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-semibold px-5 py-2 rounded-xl transition-colors text-sm"
                 >
-                  {activeJob?.startsWith('smart_') ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                  {activeJob?.startsWith('smart_') ? 'Smart-Import läuft...' : 'Smart-Import starten'}
+                  {activeJob === 'recs_import' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {activeJob === 'recs_import'
+                    ? 'Import läuft...'
+                    : selectedRecs.size === recommendations.length
+                      ? `⚡ Alle ${selectedRecs.size} gleichzeitig starten`
+                      : `⚡ ${selectedRecs.size} Empfehlungen starten`}
                 </button>
               </div>
             </div>
