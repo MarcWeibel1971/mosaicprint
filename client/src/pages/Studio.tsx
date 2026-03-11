@@ -124,6 +124,8 @@ export default function Studio() {
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentSuccess, setPaymentSuccess] = useState(false);
+  const [detectedImageType, setDetectedImageType] = useState<'portrait' | 'landscape' | 'abstract' | null>(null);
+  const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
 
   // Update cache size display
   useEffect(() => {
@@ -283,13 +285,104 @@ export default function Studio() {
       const dataUrl = e.target?.result as string;
       setUserPhoto(dataUrl);
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         setUserPhotoImg(img);
         setReady(false);
         setError(null);
         setZoom(1);
         setPan({ x: 0, y: 0 });
         setCompareMode(false);
+
+        // ── Auto Portrait Detection ──────────────────────────────────────────
+        // Detect if the image is a portrait (face-heavy) and auto-apply optimal settings
+        try {
+          const aspectRatio = img.naturalWidth / img.naturalHeight;
+          let imageType: 'portrait' | 'landscape' | 'abstract' = 'abstract';
+
+          // Step 1: Aspect ratio heuristic (portrait photos are usually taller than wide)
+          const isVertical = aspectRatio < 0.85;
+
+          // Step 2: Try browser FaceDetector API
+          let hasFace = false;
+          if ('FaceDetector' in window) {
+            try {
+              const faceDetector = new (window as any).FaceDetector({ fastMode: true, maxDetectedFaces: 5 });
+              const smallCanvas = document.createElement('canvas');
+              const scale = Math.min(1, 400 / Math.max(img.naturalWidth, img.naturalHeight));
+              smallCanvas.width = Math.round(img.naturalWidth * scale);
+              smallCanvas.height = Math.round(img.naturalHeight * scale);
+              const sCtx = smallCanvas.getContext('2d')!;
+              sCtx.drawImage(img, 0, 0, smallCanvas.width, smallCanvas.height);
+              const faces = await faceDetector.detect(smallCanvas);
+              hasFace = faces.length > 0;
+            } catch { /* FaceDetector not available */ }
+          }
+
+          // Step 3: Skin-tone heuristic (center region analysis)
+          // Portrait photos typically have skin tones in the center
+          if (!hasFace) {
+            const sampleCanvas = document.createElement('canvas');
+            sampleCanvas.width = 32; sampleCanvas.height = 32;
+            const sCtx = sampleCanvas.getContext('2d')!;
+            sCtx.drawImage(img, 0, 0, 32, 32);
+            const pixels = sCtx.getImageData(8, 4, 16, 20).data; // center crop
+            let skinPixels = 0, totalPixels = 0;
+            for (let pi = 0; pi < pixels.length; pi += 4) {
+              const r = pixels[pi], g = pixels[pi+1], b = pixels[pi+2];
+              // Skin tone detection: r > 95, g > 40, b > 20, r > g, r > b, |r-g| > 15
+              if (r > 95 && g > 40 && b > 20 && r > g && r > b && Math.abs(r - g) > 15) skinPixels++;
+              totalPixels++;
+            }
+            hasFace = skinPixels / totalPixels > 0.15; // >15% skin pixels in center
+          }
+
+          if (hasFace || isVertical) {
+            imageType = 'portrait';
+          } else if (aspectRatio > 1.3) {
+            imageType = 'landscape';
+          }
+
+          setDetectedImageType(imageType);
+
+          // Step 4: Auto-apply optimal preset if no custom settings exist
+          const currentSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+          const hasCustomSettings = Object.keys(currentSettings).length > 0;
+
+          if (imageType === 'portrait' && !hasCustomSettings) {
+            // Portrait preset (Mosaicer-inspired): NO overlay, brightness drives face structure
+            // Larger tiles (recognizable photos), strong brightness matching, no color transfer
+            const portraitPreset = {
+              baseTiles: 60,        // Mosaicer-style: ~60 columns for recognizable tiles
+              tilePx: 16,           // Larger tiles = each photo is clearly visible
+              neighborRadius: 4,    // wider anti-repetition radius
+              neighborPenalty: 180, // strong anti-repetition
+              contrastBoost: 1.20,  // subtle contrast boost only
+              histogramBlend: 0.0,  // NO overlay – tiles match naturally
+              labWeight: 0.15,
+              brightnessWeight: 0.40, // KEY: brightness drives face structure without overlay
+              textureWeight: 0.08,
+            };
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(portraitPreset));
+            setAutoPresetApplied('Portrait');
+          } else if (imageType === 'landscape' && !hasCustomSettings) {
+            // Landscape preset: wider tiles, more color accuracy, no overlay
+            const landscapePreset = {
+              baseTiles: 60,
+              tilePx: 18,           // Even larger tiles for landscapes
+              neighborRadius: 3,
+              neighborPenalty: 120,
+              contrastBoost: 1.15,
+              histogramBlend: 0.0,  // NO overlay
+              labWeight: 0.20,
+              brightnessWeight: 0.35,
+              textureWeight: 0.08,
+            };
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(landscapePreset));
+            setAutoPresetApplied('Landschaft');
+          }
+        } catch (e) {
+          console.warn('[Studio] Auto-detection failed:', e);
+        }
       };
       img.src = dataUrl;
     };
@@ -323,11 +416,11 @@ export default function Studio() {
     resetHiRes();
 
     const savedSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-    const BASE_TILES = savedSettings.baseTiles ?? 80;
+    const BASE_TILES = savedSettings.baseTiles ?? 60;  // Mosaicer-style: fewer, larger tiles
     const imgAspect = targetImg.naturalWidth / targetImg.naturalHeight;
     const COLS = imgAspect >= 1 ? BASE_TILES : Math.round(BASE_TILES * imgAspect);
     const ROWS = imgAspect >= 1 ? Math.round(BASE_TILES / imgAspect) : BASE_TILES;
-    const TILE_PX = savedSettings.tilePx ?? 12;
+    const TILE_PX = savedSettings.tilePx ?? 16;  // Larger tiles = more recognizable photos
     const CANVAS_W = COLS * TILE_PX;
     const CANVAS_H = ROWS * TILE_PX;
     const MAX_DISPLAY_W = 720;
@@ -852,7 +945,13 @@ export default function Studio() {
     }
 
     const useCount = new Array(filteredValidImgs.length).fill(0);
-    const MAX_REUSE = Math.max(2, Math.ceil((TOTAL_TILES * 1.2) / Math.max(1, filteredValidImgs.length)));
+    // MAX_REUSE: hard cap — if we have enough tiles, limit to 1-2 uses per tile
+    // With 17k+ tiles and 2k cells, each tile should ideally be used at most once
+    const MAX_REUSE = filteredValidImgs.length >= TOTAL_TILES * 3
+      ? 1  // plenty of tiles: each used max once
+      : filteredValidImgs.length >= TOTAL_TILES * 1.5
+        ? 2  // good coverage: max 2 uses
+        : Math.max(3, Math.ceil((TOTAL_TILES * 1.5) / Math.max(1, filteredValidImgs.length)));
     const assignment: number[] = new Array(TOTAL_TILES).fill(-1);
     // Also store best rotation per tile (0=0°, 1=90°, 2=180°, 3=270°)
     const assignmentRotation: number[] = new Array(TOTAL_TILES).fill(0);
@@ -973,14 +1072,17 @@ export default function Studio() {
           const cellEdge = edgeMap[ci]; // 0-1
           const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
           const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
-          // Hybrid-SSD weights: SSD 40% · LAB 20% · Brightness 25% · Texture 10% · Quad 5%
-          // Brightness gets higher weight (25%) to improve contrast rendering (Mosaicer-inspired)
-          const wSsdBase = 0.40;
-          const wLabBase = savedSettings.labWeight ?? 0.20;
-          const wBrightBase = savedSettings.brightnessWeight ?? 0.25; // boosted from 0.20
-          const wTextureBase = savedSettings.textureWeight ?? 0.10;
-          // Repetition penalty: proportional (15% per reuse) instead of fixed
-          const repPenalty = (useCount[j] || 0) * 0.15 * 100;
+          // Mosaicer-inspired weights: Brightness dominates (35%) for natural luminance matching
+          // Without overlay, brightness matching IS the luminance structure of the mosaic
+          // SSD 30% · LAB 15% · Brightness 40% · Texture 8% · Quad 7%
+          const wSsdBase = 0.30;
+          const wLabBase = savedSettings.labWeight ?? 0.15;
+          const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
+          const wTextureBase = savedSettings.textureWeight ?? 0.08;
+          // Repetition penalty: exponential growth to strongly discourage reuse
+          // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
+          const rc = useCount[j] || 0;
+          const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
           // Face region: boost edge and texture weights for sharper eye/nose/mouth rendering
           if (inFace) {
             const wLabF = wLabBase * 0.75;
@@ -1074,10 +1176,12 @@ export default function Studio() {
         // MAX_COLOR_SHIFT = 18 (prevents unnatural tinting)
         //
         // histogramBlend slider (0–0.15) scales both: 0.10 = full strength
-        const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.10) / 0.10);
-        const L_BLEND  = 0.90 * blendFactor;  // luminance scaling strength (0.90 = aggressive)
-        const AB_BLEND = 0.35 * blendFactor;  // color shift strength (0.35 = moderate-strong)
-        const MAX_COLOR_SHIFT = 25;            // max a/b channel shift
+        // Mosaicer reference: NO overlay by default – tiles match naturally via precise color selection
+        // Only apply subtle luminance correction to preserve face structure
+        const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
+        const L_BLEND  = 0.30 * blendFactor;  // very subtle luminance nudge (was 0.90 – too aggressive)
+        const AB_BLEND = 0.15 * blendFactor;  // very subtle color nudge (was 0.35 – too aggressive)
+        const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors            // max a/b channel shift
         const [tL, tA, tB] = cellLab[ci];
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
         const td = tilePixels.data;
