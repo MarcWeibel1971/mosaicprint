@@ -128,6 +128,18 @@ export default function Studio() {
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
+  // Post-generation quality metrics
+  const [qualityMetrics, setQualityMetrics] = useState<{
+    avgDeltaE: number;
+    reuseRate: number;
+    satLow: number;   // % tiles with saturation < 20 (muted/gray)
+    satMid: number;   // % tiles with saturation 20–60 (moderate)
+    satHigh: number;  // % tiles with saturation > 60 (vivid)
+    totalTiles: number;
+    uniqueTiles: number;
+  } | null>(null);
+  // Progressive rendering: show LAB-only preview while SSD matching runs
+  const [renderPass, setRenderPass] = useState<1 | 2 | null>(null);
 
   // Update cache size display
   useEffect(() => {
@@ -419,6 +431,8 @@ export default function Studio() {
     const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext("2d"); if (!ctx) return;
     resetHiRes();
+    setQualityMetrics(null);
+    setRenderPass(null);
 
     const savedSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
     const BASE_TILES = savedSettings.baseTiles ?? 60;  // Mosaicer-style: fewer, larger tiles
@@ -959,6 +973,41 @@ export default function Studio() {
       }
     } catch { /* FaceDetector not available or failed – continue without */ }
 
+    // ── Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
+    // Before running the expensive SSD matching loop, draw a fast LAB-color preview:
+    // each cell gets the average color of its best k-NN candidate (from Stage A).
+    // This gives the user immediate visual feedback while the full SSD pass runs.
+    setRenderPass(1);
+    setProgressMsg("Vorschau (Pass 1)...");
+    setProgress(49);
+    if (USE_2STAGE) {
+      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+        const col = ci % COLS, row = Math.floor(ci / COLS);
+        const x = col * TILE_PX, y = row * TILE_PX;
+        // Use the best k-NN candidate's LAB color as a solid fill
+        const best = cellCandidates[ci]?.[0];
+        if (best) {
+          // Look up loaded image for this candidate
+          const img = tileImgMap.get(best.tileId);
+          if (img && img.complete && img.naturalWidth > 0) {
+            ctx.drawImage(img, x, y, TILE_PX, TILE_PX);
+          } else {
+            // Fallback: fill with target cell color
+            const [tL, tA, tB] = cellLab[ci];
+            const [fr, fg, fb] = labToRgb(tL, tA, tB);
+            ctx.fillStyle = `rgb(${fr},${fg},${fb})`;
+            ctx.fillRect(x, y, TILE_PX, TILE_PX);
+          }
+        } else {
+          const [tL, tA, tB] = cellLab[ci];
+          const [fr, fg, fb] = labToRgb(tL, tA, tB);
+          ctx.fillStyle = `rgb(${fr},${fg},${fb})`;
+          ctx.fillRect(x, y, TILE_PX, TILE_PX);
+        }
+      }
+      await new Promise(r => setTimeout(r, 0)); // flush to screen
+    }
+
     // Step 4: Match tiles
     // 2-STAGE MATCHING:
     //   Stage A (done above): k-NN over ALL DB tiles in LAB space → cellCandidates[ci]
@@ -966,7 +1015,8 @@ export default function Studio() {
     //                   look up their loaded images, run SSD + full scoring, pick best
     //
     // For legacy fallback (no LAB index): use filteredImgFeatures as before
-    setProgressMsg("Matche Fotos...");
+    setRenderPass(2);
+    setProgressMsg("Matche Fotos (Pass 2)...");
     setProgress(50);
 
     // Build a tileId → index map for the loaded images (for 2-stage lookup)
@@ -1105,11 +1155,18 @@ export default function Studio() {
           const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
           // Mosaicer-inspired weights: Brightness dominates (35%) for natural luminance matching
           // Without overlay, brightness matching IS the luminance structure of the mosaic
-          // SSD 30% · LAB 15% · Brightness 40% · Texture 8% · Quad 7%
+          // SSD 30% · LAB 15% · Brightness 40% · Texture 8% · Quad 7% · Saturation 5%
           const wSsdBase = 0.30;
           const wLabBase = savedSettings.labWeight ?? 0.15;
           const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
           const wTextureBase = savedSettings.textureWeight ?? 0.08;
+          // 6. Saturation difference (NEW: Stage C now includes saturation term)
+          // Prevents gray tiles in colorful areas and vice versa
+          // saturation = sqrt(a²+b²), range 0–100
+          const targetSatC = tf.saturation;
+          const tileSatC = mf.saturation;
+          const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0–1
+          const wSatBase = 0.25; // recommended weight from algorithm review
           // Repetition penalty: exponential growth to strongly discourage reuse
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
@@ -1121,7 +1178,9 @@ export default function Studio() {
             const wBrightF = wBrightBase * 1.30; // extra brightness boost in face areas
             const faceEdgeWeight = edgeWeight * 1.8; // stronger edge matching in faces
             const faceTextureWeight = wTextureBase * 1.5; // texture matters for skin/hair
-            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.06 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
+            // Saturation weight in face regions: slightly reduced (SSD handles color accuracy)
+            const faceSatWeight = wSatBase * 0.6;
+            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.06 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone bonus: if target cell is skin-toned (warm L:40-80, a:5-25, b:10-35)
             // and tile is also skin-toned, reduce distance (better match)
             const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
@@ -1132,7 +1191,8 @@ export default function Studio() {
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
           }
-          let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100;
+          // Non-face: full scoring with saturation term
+          let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
@@ -1151,6 +1211,41 @@ export default function Studio() {
     assignmentRef.current = assignment;
     validImgsRef.current = filteredValidImgs;
     tileIdsRef.current = filteredTileIds;
+
+    // ── Compute Quality Metrics ──────────────────────────────────────────────
+    // Compute after matching so we have the final assignment
+    try {
+      let deltaESum = 0;
+      let satLowCount = 0, satMidCount = 0, satHighCount = 0;
+      const uniqueUsed = new Set<number>();
+      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+        const idx = assignment[ci];
+        if (idx < 0) continue;
+        uniqueUsed.add(idx);
+        const mf = filteredImgFeatures[idx];
+        const tf = cellFeatures[ci];
+        // Delta-E approximation: Euclidean distance in LAB space
+        const dL = tf.lab[0] - mf.lab[0];
+        const dA = tf.lab[1] - mf.lab[1];
+        const dB = tf.lab[2] - mf.lab[2];
+        deltaESum += Math.sqrt(dL*dL + dA*dA + dB*dB);
+        // Saturation distribution of assigned tiles
+        const sat = mf.saturation; // sqrt(a²+b²), range 0–100
+        if (sat < 20) satLowCount++;
+        else if (sat <= 60) satMidCount++;
+        else satHighCount++;
+      }
+      const validCount = TOTAL_TILES;
+      setQualityMetrics({
+        avgDeltaE: deltaESum / validCount,
+        reuseRate: uniqueUsed.size / filteredValidImgs.length,
+        satLow: (satLowCount / validCount) * 100,
+        satMid: (satMidCount / validCount) * 100,
+        satHigh: (satHighCount / validCount) * 100,
+        totalTiles: TOTAL_TILES,
+        uniqueTiles: uniqueUsed.size,
+      });
+    } catch { /* metrics are optional */ }
 
     // Step 5: Render with tile rotation and contrast boost
     setProgressMsg("Rendere Mosaik...");
@@ -1610,6 +1705,17 @@ export default function Studio() {
               />
             </div>
             <p className="text-sm text-gray-400">{progress}%</p>
+            {renderPass && (
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border ${
+                  renderPass === 1
+                    ? 'bg-amber-50 border-amber-200 text-amber-700'
+                    : 'bg-coral-50 border-coral-200 text-coral-700'
+                }`}>
+                  {renderPass === 1 ? '⚡ Pass 1: Schnellvorschau' : '🎯 Pass 2: Präzisions-Matching'}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -1825,6 +1931,76 @@ export default function Studio() {
               </div>
             )}
           </>
+        )}
+
+        {/* Quality Metrics Panel */}
+        {ready && qualityMetrics && (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-6">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-base font-bold text-gray-900">Qualitätsanalyse</span>
+              <span className="text-xs font-semibold text-gray-400 bg-gray-50 border border-gray-200 rounded-full px-2 py-0.5">{qualityMetrics.totalTiles} Kacheln</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* Average Delta-E */}
+              <div className="bg-gray-50 rounded-xl p-3 text-center">
+                <p className="text-xs text-gray-500 mb-1">Ø Farb-Abstand</p>
+                <p className={`text-xl font-bold ${
+                  qualityMetrics.avgDeltaE < 12 ? 'text-green-600'
+                  : qualityMetrics.avgDeltaE < 22 ? 'text-amber-600'
+                  : 'text-red-500'
+                }`}>
+                  {qualityMetrics.avgDeltaE.toFixed(1)}
+                </p>
+                <p className="text-[10px] text-gray-400">ΔE (LAB)</p>
+                <p className={`text-[10px] font-semibold mt-0.5 ${
+                  qualityMetrics.avgDeltaE < 12 ? 'text-green-600'
+                  : qualityMetrics.avgDeltaE < 22 ? 'text-amber-600'
+                  : 'text-red-500'
+                }`}>
+                  {qualityMetrics.avgDeltaE < 12 ? '✓ Sehr gut' : qualityMetrics.avgDeltaE < 22 ? '▲ Gut' : '▼ Niedrig'}
+                </p>
+              </div>
+              {/* Unique tiles */}
+              <div className="bg-gray-50 rounded-xl p-3 text-center">
+                <p className="text-xs text-gray-500 mb-1">Einzigartige Fotos</p>
+                <p className="text-xl font-bold text-gray-900">{qualityMetrics.uniqueTiles}</p>
+                <p className="text-[10px] text-gray-400">von {qualityMetrics.totalTiles}</p>
+                <p className={`text-[10px] font-semibold mt-0.5 ${
+                  qualityMetrics.reuseRate > 0.85 ? 'text-green-600'
+                  : qualityMetrics.reuseRate > 0.6 ? 'text-amber-600'
+                  : 'text-red-500'
+                }`}>
+                  {Math.round(qualityMetrics.reuseRate * 100)}% Diversität
+                </p>
+              </div>
+              {/* Saturation distribution */}
+              <div className="bg-gray-50 rounded-xl p-3 col-span-2">
+                <p className="text-xs text-gray-500 mb-2">Sättigungs-Verteilung</p>
+                <div className="flex rounded-full overflow-hidden h-3 mb-1.5">
+                  <div
+                    className="bg-gray-300 transition-all"
+                    style={{ width: `${qualityMetrics.satLow.toFixed(0)}%` }}
+                    title={`Grau/Gedämpft: ${qualityMetrics.satLow.toFixed(0)}%`}
+                  />
+                  <div
+                    className="bg-coral-300 transition-all"
+                    style={{ width: `${qualityMetrics.satMid.toFixed(0)}%` }}
+                    title={`Mittel: ${qualityMetrics.satMid.toFixed(0)}%`}
+                  />
+                  <div
+                    className="bg-coral-500 transition-all"
+                    style={{ width: `${qualityMetrics.satHigh.toFixed(0)}%` }}
+                    title={`Lebendig: ${qualityMetrics.satHigh.toFixed(0)}%`}
+                  />
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-500">
+                  <span>■ Grau {qualityMetrics.satLow.toFixed(0)}%</span>
+                  <span>■ Mittel {qualityMetrics.satMid.toFixed(0)}%</span>
+                  <span>■ Lebendig {qualityMetrics.satHigh.toFixed(0)}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Order panel */}
