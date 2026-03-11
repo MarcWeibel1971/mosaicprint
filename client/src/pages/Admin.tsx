@@ -571,7 +571,30 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [brightnessFilter, setBrightnessFilter] = useState('alle')
   const [showStats, setShowStats] = useState(true)
   const [selectedImage, setSelectedImage] = useState<TileImage | null>(null)
+  const [dedupLoading, setDedupLoading] = useState(false)
+  const [dedupResult, setDedupResult] = useState<string | null>(null)
   const LIMIT = 60
+
+  const runDedup = useCallback(async () => {
+    if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
+    setDedupLoading(true)
+    setDedupResult(null)
+    try {
+      const res = await fetch('/api/admin/dedup-tiles', { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        setDedupResult(`✅ ${data.message} (${data.before.duplicates} Duplikate entfernt)`)
+        fetchDbStats()
+        fetchImages(1)
+      } else {
+        setDedupResult(`❌ Fehler: ${data.error}`)
+      }
+    } catch (e) {
+      setDedupResult(`❌ Netzwerkfehler: ${String(e)}`)
+    } finally {
+      setDedupLoading(false)
+    }
+  }, [fetchDbStats, fetchImages])
 
   const fetchDbStats = useCallback(async () => {
     try {
@@ -704,6 +727,23 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             </div>
           </div>
         )}
+      </div>
+
+      {/* Dedup Button */}
+      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-wrap items-center gap-3">
+        <div className="flex-1">
+          <p className="text-sm font-semibold text-amber-800">🔧 Datenbankwartung</p>
+          <p className="text-xs text-amber-600 mt-0.5">Entfernt echte Duplikate (gleiche source_url) – behält jeweils das Bild mit der niedrigsten ID.</p>
+          {dedupResult && <p className="text-xs mt-1 font-medium text-gray-700">{dedupResult}</p>}
+        </div>
+        <button
+          onClick={runDedup}
+          disabled={dedupLoading}
+          className="flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+        >
+          {dedupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🗑️</span>}
+          {dedupLoading ? 'Bereinige...' : 'Duplikate entfernen'}
+        </button>
       </div>
 
       {/* Filter Bar */}
