@@ -46,13 +46,21 @@ app.use(express.json({ limit: "50mb" }));
 app.get("/api/tile-lab-index", async (req, res) => {
   try {
     const pool = db.getPool();
+    // Optional theme filter: filter by subject column
+    const theme = (req.query.theme as string ?? '').toLowerCase().trim();
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general'];
+    const themeFilter = (theme && VALID_THEMES.includes(theme))
+      ? `AND subject = $1`
+      : ``;
+    const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
     // Also fetch quadrant data for richer feature vector
     const result = await pool.query(
       `SELECT id, avg_l, avg_a, avg_b,
               tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
               bl_l, bl_a, bl_b, br_l, br_a, br_b
        FROM mosaic_images
-       WHERE avg_l IS NOT NULL ORDER BY id ASC`
+       WHERE avg_l IS NOT NULL ${themeFilter} ORDER BY id ASC`,
+      queryParams
     );
     const rows = result.rows;
     // Pack as Float32Array: [id, L, a, b, edge, brightness, saturation] per tile = 7 floats = 28 bytes

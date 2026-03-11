@@ -36,6 +36,7 @@ interface TileImage {
   avgL: number; avgA: number; avgB: number
   createdAt: string; sourceId: string
   colorCategory: string | null; brightnessCategory: string | null
+  subject: string | null
 }
 interface DbStatsDetail {
   total: number; labIndexed: number
@@ -802,6 +803,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               </div>
               <div className="flex justify-between"><span>Helligkeit:</span><span className="font-medium">{selectedImage.brightnessCategory ?? 'Nicht indexiert'}</span></div>
               <div className="flex justify-between"><span>LAB:</span><span className="font-mono text-xs">{selectedImage.avgL.toFixed(1)}, {selectedImage.avgA.toFixed(1)}, {selectedImage.avgB.toFixed(1)}</span></div>
+              <div className="flex justify-between"><span>Thema:</span><span className="font-medium">{selectedImage.subject ?? 'general'}</span></div>
             </div>
             <div className="flex gap-3 mt-5">
               <a href={selectedImage.sourceUrl} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl transition-colors">Öffnen</a>

@@ -126,6 +126,8 @@ export default function Studio() {
   const [paymentSuccess, setPaymentSuccess] = useState(false);
   const [detectedImageType, setDetectedImageType] = useState<'portrait' | 'landscape' | 'abstract' | null>(null);
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
+  const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
+  const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
 
   // Update cache size display
   useEffect(() => {
@@ -574,19 +576,25 @@ export default function Studio() {
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const isMobileOrSlow = isMobile || (navigator as any).connection?.effectiveType === "2g";
 
-    // ── Stage A: Load LAB index (if not already loaded) ──────────────────────
+     // ── Stage A: Load LAB index (if not already loaded) ──────────────────────
     setProgressMsg("Lade LAB-Index aller Kacheln...");
     setProgress(10);
-
-    let labIndex: Float32Array | null = labIndexRef.current;
+    // Theme filter: if a theme is selected, always reload the index with theme param
+    const currentTheme = selectedThemeRef.current;
+    const themeParam = (currentTheme && currentTheme !== 'alle') ? `?theme=${encodeURIComponent(currentTheme)}` : '';
+    let labIndex: Float32Array | null = (currentTheme === 'alle') ? labIndexRef.current : null;
     if (!labIndex) {
       try {
-        const r = await fetch('/api/tile-lab-index');
+        const r = await fetch(`/api/tile-lab-index${themeParam}`);
         if (r.ok) {
+          const floatsPerTile = Number(r.headers.get('X-Floats-Per-Tile') ?? '4');
+          floatsPerTileRef.current = floatsPerTile;
           const buf = await r.arrayBuffer();
           labIndex = new Float32Array(buf);
-          labIndexRef.current = labIndex;
-          labIndexLoadedRef.current = true;
+          if (currentTheme === 'alle') {
+            labIndexRef.current = labIndex;
+            labIndexLoadedRef.current = true;
+          }
         }
       } catch { /* fallback to legacy below */ }
     }
@@ -1504,6 +1512,44 @@ export default function Studio() {
           </div>
         )}
 
+        {/* Theme filter chips */}
+        {!userPhoto && !loading && (
+          <div className="max-w-xl mx-auto mb-6">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Thema wählen</p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              {[
+                { key: 'alle', label: 'Alle', emoji: '🌈' },
+                { key: 'sunset', label: 'Sunset', emoji: '🌅' },
+                { key: 'nature', label: 'Natur', emoji: '🌿' },
+                { key: 'urban', label: 'Urban', emoji: '🏙️' },
+                { key: 'portrait', label: 'Portrait', emoji: '👤' },
+                { key: 'abstract', label: 'Abstrakt', emoji: '🎨' },
+                { key: 'food', label: 'Food', emoji: '🍕' },
+                { key: 'travel', label: 'Reise', emoji: '✈️' },
+                { key: 'ocean', label: 'Ozean', emoji: '🌊' },
+                { key: 'winter', label: 'Winter', emoji: '❄️' },
+              ].map(({ key, label, emoji }) => (
+                <button
+                  key={key}
+                  onClick={() => { setSelectedTheme(key); selectedThemeRef.current = key; }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
+                    selectedTheme === key
+                      ? 'bg-coral-500 text-white border-coral-500 shadow-sm'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-coral-300 hover:text-coral-600'
+                  }`}
+                >
+                  <span>{emoji}</span>
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+            {selectedTheme !== 'alle' && (
+              <p className="text-xs text-center text-coral-600 mt-2 font-medium">
+                Mosaik wird aus <strong>{selectedTheme}</strong>-Kacheln erstellt
+              </p>
+            )}
+          </div>
+        )}
         {/* Upload area (when no photo) */}
         {!userPhoto && !loading && (
           <div
@@ -1556,6 +1602,14 @@ export default function Studio() {
                     <span className="text-xs font-semibold text-gray-700">Dein Foto</span>
                     <button onClick={() => { setUserPhoto(null); setUserPhotoImg(null); setReady(false); setLoading(false); setShowOrderPanel(false); }} className="text-gray-400 hover:text-gray-700 ml-1">
                       <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+                {selectedTheme !== 'alle' && (
+                  <div className="flex items-center gap-1.5 bg-coral-50 border border-coral-200 rounded-xl px-3 py-1.5">
+                    <span className="text-xs font-semibold text-coral-700">Thema: {selectedTheme}</span>
+                    <button onClick={() => { setSelectedTheme('alle'); selectedThemeRef.current = 'alle'; }} className="text-coral-400 hover:text-coral-700 ml-0.5">
+                      <X className="w-3 h-3" />
                     </button>
                   </div>
                 )}

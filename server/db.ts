@@ -121,6 +121,13 @@ export async function getAdminImages(opts: {
   const res = await pool.query(
     `SELECT id, source_url as "sourceUrl", tile128_url as "tile128Url",
       avg_l as "avgL", avg_a as "avgA", avg_b as "avgB", created_at as "createdAt",
+      COALESCE(subject, 'general') as "subject",
+      CASE
+        WHEN source_url LIKE '%pexels%' THEN 'pexels'
+        WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
+        WHEN source_url LIKE '%picsum%' THEN 'picsum'
+        ELSE 'other'
+      END as "sourceId",
       CASE
         WHEN avg_l < 25 THEN 'schwarz'
         WHEN avg_l > 80 THEN 'weiss'
