@@ -19,8 +19,10 @@ export async function renderMosaicOnServer(params: {
   tilePx: number;
   overlayBase64?: string;
   overlayAlpha?: number;
+  dpi?: number;           // Output DPI metadata (default 300 for print quality)
+  sharpen?: boolean;      // Apply post-sharpen after compositing (default true)
 }): Promise<Buffer> {
-  const { tiles, cols, rows, tilePx, overlayBase64, overlayAlpha = 0.18 } = params;
+  const { tiles, cols, rows, tilePx, overlayBase64, overlayAlpha = 0.0, dpi = 300, sharpen = true } = params;
   const canvasW = cols * tilePx;
   const canvasH = rows * tilePx;
 
@@ -125,5 +127,19 @@ export async function renderMosaicOnServer(params: {
       .toBuffer();
   }
 
-  return tileCanvas;
+  // Post-sharpen for crisp tile edges (no overlay = no softening, so sharpen is effective)
+  let result = tileCanvas;
+  if (sharpen) {
+    result = await sharp(tileCanvas)
+      .sharpen({ sigma: 1.0, m1: 1.5, m2: 2.0 })
+      .withMetadata({ density: dpi })
+      .png({ quality: 95 })
+      .toBuffer();
+  } else {
+    result = await sharp(tileCanvas)
+      .withMetadata({ density: dpi })
+      .png({ quality: 95 })
+      .toBuffer();
+  }
+  return result;
 }

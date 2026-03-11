@@ -542,6 +542,7 @@ export default function Studio() {
       texture: number;                   // luminance variance (0-1000)
       saturation: number;                // chroma = sqrt(a²+b²), 0-100
       edgeEnergy: number;                // normalized Sobel energy 0-1 (frequency-aware)
+      ssdPixels: Uint8Array;             // 8×8 RGB pixel data for pixel-accurate SSD matching
     };
 
     const extractFeature = (d: Uint8ClampedArray, SZ: number): ImgFeature => {
@@ -583,6 +584,20 @@ export default function Studio() {
         }
         return qn>0 ? [qL/qn, qA/qn, qB/qn] : [50,0,0];
       };
+      // Extract 8×8 RGB pixel data for SSD matching (downscale from SZ to 8)
+      const SSD_SZ = 8;
+      const ssdPixels = new Uint8Array(SSD_SZ * SSD_SZ * 3);
+      const scaleX = SZ / SSD_SZ, scaleY = SZ / SSD_SZ;
+      let si2 = 0;
+      for (let sy = 0; sy < SSD_SZ; sy++) {
+        for (let sx = 0; sx < SSD_SZ; sx++) {
+          const srcX = Math.floor(sx * scaleX), srcY = Math.floor(sy * scaleY);
+          const idx = (srcY * SZ + srcX) * 4;
+          ssdPixels[si2++] = d[idx];
+          ssdPixels[si2++] = d[idx + 1];
+          ssdPixels[si2++] = d[idx + 2];
+        }
+      }
       return {
         lab: [gL, gA, gB],
         quads: [avgLab(0,0,half,half), avgLab(half,0,SZ,half), avgLab(0,half,half,SZ), avgLab(half,half,SZ,SZ)],
@@ -590,13 +605,14 @@ export default function Studio() {
         texture,
         saturation,
         edgeEnergy,
+        ssdPixels,
       };
     };
 
     const imgFeatures: ImgFeature[] = validImgs.map(img => {
       try {
         if (!img || !img.complete || img.naturalWidth === 0) {
-          return { lab:[50,0,0], quads:[[50,0,0],[50,0,0],[50,0,0],[50,0,0]], brightness:50, texture:0, saturation:0, edgeEnergy:0 } as ImgFeature;
+          return { lab:[50,0,0], quads:[[50,0,0],[50,0,0],[50,0,0],[50,0,0]], brightness:50, texture:0, saturation:0, edgeEnergy:0, ssdPixels: new Uint8Array(8*8*3) } as ImgFeature;
         }
         const SZ = 16;
         const c = document.createElement("canvas"); c.width = SZ; c.height = SZ;
@@ -604,7 +620,7 @@ export default function Studio() {
         const d = cx.getImageData(0, 0, SZ, SZ).data;
         return extractFeature(d, SZ);
       } catch { 
-        return { lab:[50,0,0], quads:[[50,0,0],[50,0,0],[50,0,0],[50,0,0]], brightness:50, texture:0, saturation:0, edgeEnergy:0 } as ImgFeature;
+        return { lab:[50,0,0], quads:[[50,0,0],[50,0,0],[50,0,0],[50,0,0]], brightness:50, texture:0, saturation:0, edgeEnergy:0, ssdPixels: new Uint8Array(8*8*3) } as ImgFeature;
       }
     });
 
@@ -768,7 +784,18 @@ export default function Studio() {
 
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
-          // 1. Global LAB distance (CIELAB 65% per spec)
+          // 0. Pixel-accurate SSD score (8×8 RGB comparison – most accurate signal)
+          // Compares every pixel of the tile against the target region
+          const tRegion = targetRegions[ci]; // 8×8×3 RGB of target cell
+          const mPixels = mf.ssdPixels;       // 8×8×3 RGB of candidate tile
+          let ssdSum = 0;
+          for (let px = 0; px < tRegion.length; px++) {
+            const d2 = tRegion[px] - mPixels[px];
+            ssdSum += d2 * d2;
+          }
+          const ssdScore = ssdSum / (tRegion.length / 3) / (255 * 255); // normalize 0-1
+
+          // 1. Global LAB distance (color matching)
           const [dL,dA,dB] = [tf.lab[0]-mf.lab[0], tf.lab[1]-mf.lab[1], tf.lab[2]-mf.lab[2]];
           const labDist = Math.sqrt(dL*dL + dA*dA + dB*dB);
           // 2. Quadrant LAB distances (spatial color accuracy)
@@ -778,33 +805,35 @@ export default function Studio() {
             quadDist += Math.sqrt(ql*ql + qa*qa + qb*qb);
           }
           quadDist /= 4;
-          // 3. Brightness difference – portrait-optimized: 30% weight (faces = brightness gradients)
+          // 3. Brightness difference
           const brightDiff = Math.abs(tf.brightness - mf.brightness);
-          // 4. Texture similarity – 10% weight
+          // 4. Texture similarity
           const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
           // 5. Edge Priority Matching: adaptive weight 0.05–0.40 based on cell edge strength
           const cellEdge = edgeMap[ci]; // 0-1
           const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
           const edgeWeight = 0.05 + cellEdge * 0.35; // 0.05 (flat) to 0.40 (sharp edge)
-          // Configurable weights from Admin settings (fallback to portrait-optimized defaults)
-          const wLabBase = savedSettings.labWeight ?? 0.40;
-          const wBrightBase = savedSettings.brightnessWeight ?? 0.30;
+          // Weights: SSD 45% · LAB 25% · Brightness 20% · Texture 10% (user-improved)
+          const wSsdBase = 0.45;
+          const wLabBase = savedSettings.labWeight ?? 0.25;
+          const wBrightBase = savedSettings.brightnessWeight ?? 0.20;
           const wTextureBase = savedSettings.textureWeight ?? 0.10;
-          let wLab = wLabBase, wBright = wBrightBase, wTexture = wTextureBase;
+          // Repetition penalty: proportional (15% per reuse) instead of fixed
+          const repPenalty = (useCount[j] || 0) * 0.15 * 100;
           // Face region: boost edge and texture weights for sharper eye/nose/mouth rendering
           if (inFace) {
-            wLab = wLabBase * 0.75; // less color matching in face
-            wBright = wBrightBase * 1.15; // more brightness matching
-            const faceEdgeWeight = edgeWeight * 1.5; // edge weight * 1.5 in face
-            const faceTextureWeight = wTextureBase * 1.3; // texture weight * 1.3 in face
-            let dist = wLab * labDist + 0.08 * quadDist + wBright * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
-            dist += neighborPenalty + reusePenalty;
+            const wLabF = wLabBase * 0.75;
+            const wBrightF = wBrightBase * 1.15;
+            const faceEdgeWeight = edgeWeight * 1.5;
+            const faceTextureWeight = wTextureBase * 1.3;
+            let dist = wSsdBase * ssdScore * 100 + wLabF * labDist + 0.08 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100;
+            dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
           }
-          let dist = wLab * labDist + 0.10 * quadDist + wBright * brightDiff + wTexture * textureDiff * 50 + edgeWeight * edgeDiff * 100;
+          let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100;
           // Anti-repetition penalties
-          dist += neighborPenalty + reusePenalty;
+          dist += neighborPenalty + reusePenalty + repPenalty;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
         }
       }
