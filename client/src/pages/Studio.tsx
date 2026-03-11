@@ -82,6 +82,76 @@ function rgbToLab(r: number, g: number, b: number): [number, number, number] {
   return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
 }
 
+/**
+ * CIEDE2000 color difference formula (perceptually uniform, better than Euclidean ΔE)
+ * Significantly more accurate for skin tones: reduces over-emphasis on blue/yellow differences.
+ * Reference: Sharma et al. 2005, validated against Rochester test data.
+ * Returns ΔE₀₀ in range 0..~100 (< 2 = barely distinguishable, < 5 = small, > 10 = clearly different)
+ */
+function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, b2: number): number {
+  const deg2rad = Math.PI / 180;
+  const rad2deg = 180 / Math.PI;
+  // Step 1: C*ab and h*ab
+  const C1 = Math.sqrt(a1*a1 + b1*b1);
+  const C2 = Math.sqrt(a2*a2 + b2*b2);
+  const Cbar = (C1 + C2) / 2;
+  const Cbar7 = Math.pow(Cbar, 7);
+  const G = 0.5 * (1 - Math.sqrt(Cbar7 / (Cbar7 + 6103515625))); // 25^7 = 6103515625
+  const a1p = a1 * (1 + G);
+  const a2p = a2 * (1 + G);
+  const C1p = Math.sqrt(a1p*a1p + b1*b1);
+  const C2p = Math.sqrt(a2p*a2p + b2*b2);
+  let h1p = (a1p === 0 && b1 === 0) ? 0 : Math.atan2(b1, a1p) * rad2deg;
+  if (h1p < 0) h1p += 360;
+  let h2p = (a2p === 0 && b2 === 0) ? 0 : Math.atan2(b2, a2p) * rad2deg;
+  if (h2p < 0) h2p += 360;
+  // Step 2: ΔL', ΔC', ΔH'
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  let dhp: number;
+  if (C1p * C2p === 0) {
+    dhp = 0;
+  } else if (Math.abs(h2p - h1p) <= 180) {
+    dhp = h2p - h1p;
+  } else if (h2p - h1p > 180) {
+    dhp = h2p - h1p - 360;
+  } else {
+    dhp = h2p - h1p + 360;
+  }
+  const dHp = 2 * Math.sqrt(C1p * C2p) * Math.sin(dhp * deg2rad / 2);
+  // Step 3: CIEDE2000
+  const Lbar = (L1 + L2) / 2;
+  const Cbarp = (C1p + C2p) / 2;
+  let hbarp: number;
+  if (C1p * C2p === 0) {
+    hbarp = h1p + h2p;
+  } else if (Math.abs(h1p - h2p) <= 180) {
+    hbarp = (h1p + h2p) / 2;
+  } else if (h1p + h2p < 360) {
+    hbarp = (h1p + h2p + 360) / 2;
+  } else {
+    hbarp = (h1p + h2p - 360) / 2;
+  }
+  const T = 1
+    - 0.17 * Math.cos((hbarp - 30) * deg2rad)
+    + 0.24 * Math.cos(2 * hbarp * deg2rad)
+    + 0.32 * Math.cos((3 * hbarp + 6) * deg2rad)
+    - 0.20 * Math.cos((4 * hbarp - 63) * deg2rad);
+  const SL = 1 + 0.015 * Math.pow(Lbar - 50, 2) / Math.sqrt(20 + Math.pow(Lbar - 50, 2));
+  const SC = 1 + 0.045 * Cbarp;
+  const SH = 1 + 0.015 * Cbarp * T;
+  const Cbarp7 = Math.pow(Cbarp, 7);
+  const RC = 2 * Math.sqrt(Cbarp7 / (Cbarp7 + 6103515625));
+  const dTheta = 30 * Math.exp(-Math.pow((hbarp - 275) / 25, 2));
+  const RT = -Math.sin(2 * dTheta * deg2rad) * RC;
+  return Math.sqrt(
+    Math.pow(dLp / SL, 2) +
+    Math.pow(dCp / SC, 2) +
+    Math.pow(dHp / SH, 2) +
+    RT * (dCp / SC) * (dHp / SH)
+  );
+}
+
 // Printolino-konforme Druckformate
 // Pixelgrösse bei 150 dpi: px = cm × (150 / 2.54) = cm × 59.055
 // Mindestanforderung Printolino: 72 dpi (= 28.35 px/cm)
@@ -616,11 +686,12 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), or 14 (14D)
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), or 15 (15D with isSkinFriendly)
     const USE_2STAGE = labIndex !== null && labIndex.length >= FPT;
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
     const IS_14D = FPT >= 14;
+    const IS_15D = FPT >= 15; // includes isSkinFriendly flag
     console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles, ${FPT}D index)` : 'NO (fallback to legacy)'}`);
 
     // ── Stage A helper: multi-dimensional k-NN over all DB tiles ─────────────────────
@@ -671,6 +742,14 @@ export default function Studio() {
           // Gray-penalty: penalize gray tiles when target is colorful
           const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+          // isSkinFriendly (15D): in portrait mode, boost skin-friendly tiles for face regions
+          // This ensures the Stage A pre-filter already favors neutral/warm tiles for skin areas
+          if (IS_15D && savedSettings.portraitMode) {
+            const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
+            // If target is a skin-toned cell (warm LAB) and tile is NOT skin-friendly, penalize
+            const isTargetSkinArea = targetL >= 40 && targetL <= 80 && targetA >= 3 && targetA <= 28;
+            if (isTargetSkinArea && !isSkinFriendlyTile) dist += 50; // push non-skin tiles down in ranking
+          }
         } else if (IS_7D) {
           const edge = labIndex[i + 4];
           const brightness = labIndex[i + 5];
@@ -1135,9 +1214,10 @@ export default function Studio() {
           }
           const ssdScore = ssdSum / (tRegion.length / 3) / (255 * 255); // normalize 0-1
 
-          // 1. Global LAB distance (color matching)
-          const [dL,dA,dB] = [tf.lab[0]-mf.lab[0], tf.lab[1]-mf.lab[1], tf.lab[2]-mf.lab[2]];
-          const labDist = Math.sqrt(dL*dL + dA*dA + dB*dB);
+          // 1. Global LAB distance (color matching) – CIEDE2000 (perceptually uniform)
+          // Replaces Euclidean ΔE: CIEDE2000 is more accurate for skin tones and near-neutral colors.
+          // Particularly important for portrait mosaics: reduces over-emphasis on blue/yellow shifts.
+          const labDist = deltaE2000(tf.lab[0], tf.lab[1], tf.lab[2], mf.lab[0], mf.lab[1], mf.lab[2]);
           // 2. Quadrant LAB distances (spatial color accuracy)
           let quadDist = 0;
           for (let q=0; q<4; q++) {
@@ -1187,6 +1267,9 @@ export default function Studio() {
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
             if (isTargetSkin && isTileSkin) dist -= 8; // skin-tone bonus: prefer matching skin tiles
             if (isTargetSkin && !isTileSkin) dist += 12; // penalize non-skin tiles in skin areas
+            // Low-saturation penalty: if target skin area is colorful but tile is gray, penalize
+            // This prevents washed-out gray tiles from appearing in warm skin regions
+            if (isTargetSkin && tileSatC < 8) dist += 15; // strongly penalize desaturated tiles in skin areas
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
@@ -1224,11 +1307,8 @@ export default function Studio() {
         uniqueUsed.add(idx);
         const mf = filteredImgFeatures[idx];
         const tf = cellFeatures[ci];
-        // Delta-E approximation: Euclidean distance in LAB space
-        const dL = tf.lab[0] - mf.lab[0];
-        const dA = tf.lab[1] - mf.lab[1];
-        const dB = tf.lab[2] - mf.lab[2];
-        deltaESum += Math.sqrt(dL*dL + dA*dA + dB*dB);
+        // Delta-E: CIEDE2000 (perceptually uniform, same formula as Stage C scoring)
+        deltaESum += deltaE2000(tf.lab[0], tf.lab[1], tf.lab[2], mf.lab[0], mf.lab[1], mf.lab[2]);
         // Saturation distribution of assigned tiles
         const sat = mf.saturation; // sqrt(a²+b²), range 0–100
         if (sat < 20) satLowCount++;

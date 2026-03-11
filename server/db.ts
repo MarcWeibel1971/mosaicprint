@@ -46,6 +46,17 @@ export async function ensureSchema(): Promise<void> {
   `);
   // Add subject column if missing (migration for existing tables)
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT 'general'`);
+  // Add is_skin_friendly flag for portrait-mode matching
+  // A tile is skin-friendly if: low chroma (sqrt(a²+b²) < 25) AND mid brightness (L 35-80)
+  // This is computed from existing avg_a/avg_b/avg_l – no new data needed.
+  // We store it as a plain boolean column and update it once on migration.
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS is_skin_friendly BOOLEAN DEFAULT false`);
+  // Backfill: mark all existing rows that match the skin-friendly criteria
+  await pool.query(`
+    UPDATE mosaic_images
+    SET is_skin_friendly = (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)
+    WHERE is_skin_friendly IS NULL OR is_skin_friendly = false
+  `).catch(() => { /* ignore if already done */ });
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mosaic_orders (
       id SERIAL PRIMARY KEY,

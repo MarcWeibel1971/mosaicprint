@@ -37,12 +37,13 @@ app.use(express.json({ limit: "50mb" }));
 
 // GET /api/tile-lab-index
 // Returns ALL tile feature vectors as a compact binary Float32Array
-// Format: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness] per tile = 14 floats = 56 bytes
-// ~1.3 MB for 23,000 tiles - loaded once, used for fast multi-dimensional pre-filter
-// This enables 2-stage matching: 14D k-NN (LAB+quadrant colors+edge) over ALL tiles, then SSD on Top-80
+// Format: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly] per tile = 15 floats = 60 bytes
+// ~1.4 MB for 23,000 tiles - loaded once, used for fast multi-dimensional pre-filter
+// This enables 2-stage matching: 15D k-NN (LAB+quadrant colors+edge+skin) over ALL tiles, then SSD on Top-80
 // Quadrant a/b values encode color distribution (warm/cool, green/magenta) per quadrant
 // edge = variance of L across quadrants (proxy for Sobel edge energy)
 // brightness = avg_l normalized 0-1
+// isSkinFriendly = 1.0 if tile is suitable for skin/portrait regions (low chroma, mid brightness)
 app.get("/api/tile-lab-index", async (req, res) => {
   try {
     const pool = db.getPool();
@@ -53,21 +54,23 @@ app.get("/api/tile-lab-index", async (req, res) => {
       ? `AND subject = $1`
       : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
-    // Also fetch quadrant data for richer feature vector
+    // Also fetch quadrant data + is_skin_friendly for richer feature vector
     const result = await pool.query(
       `SELECT id, avg_l, avg_a, avg_b,
               tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
-              bl_l, bl_a, bl_b, br_l, br_a, br_b
+              bl_l, bl_a, bl_b, br_l, br_a, br_b,
+              COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly
        FROM mosaic_images
        WHERE avg_l IS NOT NULL ${themeFilter} ORDER BY id ASC`,
       queryParams
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness] = 14 floats
+    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly] = 15 floats
     // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
     // edge: variance of L across quadrants (high variance = high edge energy)
     // brightness: avg_l / 100
-    const FLOATS_PER_TILE = 14;
+    // isSkinFriendly: 1.0 = skin-friendly tile, 0.0 = not skin-friendly
+    const FLOATS_PER_TILE = 15;
     const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
@@ -84,6 +87,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       const quadVarL = ((tlL-quadMeanL)**2 + (trL-quadMeanL)**2 + (blL-quadMeanL)**2 + (brL-quadMeanL)**2) / 4;
       const edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30);
       const brightness = L / 100;
+      const isSkinFriendly = row.is_skin_friendly ? 1.0 : 0.0;
       buf.writeFloatLE(Number(row.id), offset);   offset += 4;  // [0]  id
       buf.writeFloatLE(L, offset);                offset += 4;  // [1]  avg L
       buf.writeFloatLE(a, offset);                offset += 4;  // [2]  avg a
@@ -98,6 +102,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
       buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
+      buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
     }
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', buf.length);
