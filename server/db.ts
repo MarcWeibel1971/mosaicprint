@@ -85,28 +85,36 @@ export async function getMosaicImagesForMatching() {
 }
 
 export async function getAdminImages(opts: {
-  page: number; pageSize: number;
+  page: number; pageSize?: number; limit?: number;
   brightnessFilter?: string; colorFilter?: string;
+  sourceId?: string;
 }) {
   const pool = getPool();
-  const offset = (opts.page - 1) * opts.pageSize;
+  // Support both 'pageSize' and 'limit' parameter names (client sends 'limit')
+  const pageSize = opts.pageSize ?? opts.limit ?? 50;
+  const offset = (opts.page - 1) * pageSize;
   const conditions: string[] = [];
+  // Source filter: derive from source_url pattern (no source_id column in DB)
+  if (opts.sourceId === 'pexels') conditions.push("source_url LIKE '%pexels%'");
+  else if (opts.sourceId === 'unsplash') conditions.push("source_url LIKE '%unsplash%'");
+  else if (opts.sourceId === 'picsum') conditions.push("(source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%')");
   // Brightness filter
   if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
   else if (opts.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
   else if (opts.brightnessFilter === "hell") conditions.push("avg_l > 65");
-  // Color filter (matching LAB color classification used in getDbStats)
+  // Color filter — exact same LAB thresholds as getDbStats for consistency
+  // Priority order matters: schwarz/weiss first, then grau, then chromatic colors
   if (opts.colorFilter === "schwarz") conditions.push("avg_l < 25");
   else if (opts.colorFilter === "weiss") conditions.push("avg_l > 80");
   else if (opts.colorFilter === "grau") conditions.push("ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80");
-  else if (opts.colorFilter === "rot") conditions.push("avg_a > 20");
-  else if (opts.colorFilter === "orange") conditions.push("avg_a > 10 AND avg_b > 10 AND avg_a <= 20");
-  else if (opts.colorFilter === "gelb") conditions.push("avg_b > 20 AND avg_a <= 10");
-  else if (opts.colorFilter === "cyan") conditions.push("avg_a < -10 AND avg_b < -5");
-  else if (opts.colorFilter === "gruen") conditions.push("avg_a < -10 AND avg_b >= -5");
-  else if (opts.colorFilter === "blau") conditions.push("avg_b < -15 AND avg_a >= -10");
-  else if (opts.colorFilter === "violett") conditions.push("avg_a > 10 AND avg_b < 0 AND avg_a <= 20");
-  else if (opts.colorFilter === "pink") conditions.push("avg_a > 10 AND avg_b >= 0 AND avg_a <= 20");
+  else if (opts.colorFilter === "rot") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 20");
+  else if (opts.colorFilter === "orange") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 10 AND avg_b > 10 AND avg_a <= 20");
+  else if (opts.colorFilter === "gelb") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_b > 20 AND avg_a <= 10");
+  else if (opts.colorFilter === "cyan") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a < -10 AND avg_b < -5");
+  else if (opts.colorFilter === "gruen") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a < -10 AND avg_b >= -5");
+  else if (opts.colorFilter === "blau") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_b < -15 AND avg_a >= -10");
+  else if (opts.colorFilter === "violett") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 10 AND avg_b < 0 AND avg_a <= 20");
+  else if (opts.colorFilter === "pink") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 10 AND avg_b >= 0 AND avg_a <= 20");
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images ${where}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
@@ -116,7 +124,7 @@ export async function getAdminImages(opts: {
       CASE
         WHEN avg_l < 25 THEN 'schwarz'
         WHEN avg_l > 80 THEN 'weiss'
-        WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'grau'
+        WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80 THEN 'grau'
         WHEN avg_a > 20 THEN 'rot'
         WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
         WHEN avg_b > 20 THEN 'gelb'
@@ -133,7 +141,7 @@ export async function getAdminImages(opts: {
         ELSE 'Mittel'
       END as "brightnessCategory"
     FROM mosaic_images ${where} ORDER BY id DESC LIMIT $1 OFFSET $2`,
-    [opts.pageSize, offset]
+    [pageSize, offset]
   );
   return { images: res.rows, total };
 }

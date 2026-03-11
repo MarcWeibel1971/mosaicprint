@@ -564,7 +564,14 @@ export const appRouter = router({
 
   // Admin: Get images with filters
   getAdminImages: publicProcedure
-    .input(z.object({ page: z.number().default(1), pageSize: z.number().default(50), brightnessFilter: z.string().optional(), colorFilter: z.string().optional() }))
+    .input(z.object({
+      page: z.number().default(1),
+      pageSize: z.number().default(50),
+      limit: z.number().optional(),       // alias for pageSize (client sends 'limit')
+      brightnessFilter: z.string().optional(),
+      colorFilter: z.string().optional(),
+      sourceId: z.string().optional(),    // filter by source: 'pexels' | 'unsplash' | 'picsum'
+    }))
     .query(async ({ input }) => db.getAdminImages(input)),
 
   // Admin: Delete image
