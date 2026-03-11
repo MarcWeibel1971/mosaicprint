@@ -46,6 +46,23 @@ export async function ensureSchema(): Promise<void> {
   `);
   // Add subject column if missing (migration for existing tables)
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS subject TEXT DEFAULT 'general'`);
+  // Add UNIQUE constraint on source_url to prevent duplicates at DB level
+  // This is idempotent: IF NOT EXISTS equivalent via DO NOTHING on pg_constraint check
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'mosaic_images_source_url_unique'
+      ) THEN
+        ALTER TABLE mosaic_images ADD CONSTRAINT mosaic_images_source_url_unique UNIQUE (source_url);
+      END IF;
+    END $$
+  `).catch(() => { /* ignore if constraint already exists or duplicate data prevents it */ });
+  // Add url_hash column for fast duplicate lookup (MD5 of normalized URL)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS url_hash TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_url_hash ON mosaic_images (url_hash)`);
+  // Backfill url_hash for existing rows
+  await pool.query(`UPDATE mosaic_images SET url_hash = MD5(source_url) WHERE url_hash IS NULL`).catch(() => {});
   // Add is_skin_friendly flag for portrait-mode matching
   // A tile is skin-friendly if: low chroma (sqrt(a²+b²) < 25) AND mid brightness (L 35-80)
   // This is computed from existing avg_a/avg_b/avg_l – no new data needed.
@@ -176,11 +193,14 @@ export async function insertMosaicImage(data: {
   subject?: string;
 }): Promise<void> {
   const pool = getPool();
+  // Normalize URL: strip query params that change between requests (Pexels/Unsplash add w/h/fit params)
+  // Extract the stable photo ID from the URL to detect duplicates even if URL params differ
+  const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
   await pool.query(
-    `INSERT INTO mosaic_images (source_url, tile128_url, avg_l, avg_a, avg_b, subject)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT DO NOTHING`,
-    [data.sourceUrl, data.tile128Url, data.avgL, data.avgA, data.avgB, data.subject ?? 'general']
+    `INSERT INTO mosaic_images (source_url, tile128_url, avg_l, avg_a, avg_b, subject, url_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, MD5($1))
+     ON CONFLICT (source_url) DO NOTHING`,
+    [normalizedUrl, data.tile128Url, data.avgL, data.avgA, data.avgB, data.subject ?? 'general']
   );
 }
 

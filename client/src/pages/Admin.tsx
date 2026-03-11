@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Database, RefreshCw, Upload, Image, Save, CheckCircle, XCircle,
-  Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X
+  Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -133,6 +133,8 @@ export default function Admin() {
   const [cronStatus, setCronStatus] = useState<CronStatus | null>(null)
   const [smartJob, setSmartJob] = useState<SmartImportJob | null>(null)
   const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels'>('pexels')
+  const [importAllBatch, setImportAllBatch] = useState(500)
+  const [importAllRunning, setImportAllRunning] = useState(false)
 
   const fetchCronStatus = useCallback(async () => {
     try {
@@ -225,17 +227,43 @@ export default function Admin() {
   const startImport = async (sourceId: string, batchSize: number) => {
     if (activeJob) return
     setActiveJob(sourceId)
-    setMessage({ text: `Import von ${sourceId} gestartet...`, type: 'info' })
+    setMessage({ text: `Import von ${sourceId} gestartet (${batchSize} Bilder, diverse Keywords)...`, type: 'info' })
     setImportProgress(prev => ({ ...prev, [sourceId]: { running: true, log: [], imported: 0, total: batchSize } }))
     try {
       await fetch('/api/trpc/importFromSource', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId, batchSize }),
+        body: JSON.stringify({ source: sourceId as 'pexels' | 'unsplash', count: batchSize }),
       })
     } catch {
       setActiveJob(null)
       setMessage({ text: 'Fehler beim Starten des Imports', type: 'error' })
+    }
+  }
+
+  const startImportAll = async () => {
+    if (importAllRunning) return
+    setImportAllRunning(true)
+    setMessage({ text: `Alle Quellen gleichzeitig gestartet (${importAllBatch} Bilder pro Quelle)...`, type: 'info' })
+    try {
+      const res = await fetch('/api/trpc/importAll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count: importAllBatch }),
+      })
+      const data = await res.json()
+      const result = data.result?.data?.json ?? data.result?.data ?? data
+      if (result.sources) {
+        result.sources.forEach((src: string) => {
+          setActiveJob(src)
+          setImportProgress(prev => ({ ...prev, [src]: { running: true, log: [], imported: 0, total: importAllBatch } }))
+        })
+        setMessage({ text: `${result.sources.join(' + ')} gleichzeitig gestartet!`, type: 'success' })
+      }
+    } catch {
+      setMessage({ text: 'Fehler beim Starten des Gesamt-Imports', type: 'error' })
+    } finally {
+      setImportAllRunning(false)
     }
   }
 
@@ -445,11 +473,75 @@ export default function Admin() {
               </div>
             </div>
 
-            {/* Import Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <ImportCard title="Picsum Photos" description="Kostenlose Fotos von picsum.photos – keine API-Key nötig." icon={<Image className="w-5 h-5 text-blue-600" />} color="blue" available={true} job={importProgress['picsum']} isActive={activeJob === 'picsum'} onImport={(n) => startImport('picsum', n)} defaultBatch={100} maxBatch={500} />
-              <ImportCard title="Unsplash" description="Hochwertige Fotos von Unsplash. Max. 30 pro Request." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={30} maxBatch={300} />
-              <ImportCard title="Pexels" description="Professionelle Fotos von Pexels. Zufällige Seiten für frische Bilder." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={80} maxBatch={800} />
+            {/* ── Unified Import Section ── */}
+            <div className="bg-white rounded-2xl p-6 border border-indigo-200">
+              <h2 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
+                <Download className="w-5 h-5 text-indigo-500" />
+                Bilder importieren
+              </h2>
+              <p className="text-gray-500 text-sm mb-4">
+                Importiert diverse Bilder via randomisierter Keyword-Suche (keine Duplikate dank URL-Deduplizierung).
+                Pexels liefert bis zu 80 Bilder/Keyword, Unsplash bis zu 30.
+              </p>
+
+              {/* Progress bars for running jobs */}
+              {(['pexels', 'unsplash'] as const).map(src => {
+                const job = importProgress[src]
+                if (!job?.running && !job?.finishedAt) return null
+                return (
+                  <div key={src} className="mb-3 bg-gray-50 rounded-xl p-3">
+                    <div className="flex justify-between text-xs text-gray-600 mb-1">
+                      <span className="font-medium capitalize">{src}</span>
+                      <span>{job.imported ?? 0} / {job.total ?? '?'} neu importiert</span>
+                    </div>
+                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${job.running ? 'bg-indigo-400 animate-pulse' : 'bg-green-400'}`}
+                        style={{ width: `${job.total ? Math.min(100, Math.round(((job.imported ?? 0) / job.total) * 100)) : 0}%` }}
+                      />
+                    </div>
+                    {job.log && job.log.length > 0 && (
+                      <div className="mt-1 max-h-16 overflow-y-auto">
+                        {job.log.slice(-3).map((l, i) => (
+                          <div key={i} className="text-[10px] text-gray-400 truncate">{l}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+
+              {/* Alle gleichzeitig */}
+              <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-indigo-900 text-sm mb-0.5">Alle Quellen gleichzeitig</div>
+                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash parallel für maximalen Durchsatz</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="number"
+                    value={importAllBatch}
+                    onChange={e => setImportAllBatch(Math.max(50, Math.min(2000, Number(e.target.value))))}
+                    className="w-24 text-sm border border-indigo-200 rounded-lg px-2 py-1.5 text-center"
+                    min={50} max={2000} step={50}
+                    disabled={importAllRunning}
+                  />
+                  <button
+                    onClick={startImportAll}
+                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash)}
+                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm whitespace-nowrap"
+                  >
+                    {importAllRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                    {importAllRunning ? 'Startet...' : '⚡ Alle gleichzeitig'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Individual source cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ImportCard title="Pexels" description="Bis zu 80 Bilder/Keyword, diverse Suche. Empfohlen für große Batches." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={500} maxBatch={2000} />
+                <ImportCard title="Unsplash" description="Bis zu 30 Bilder/Keyword, hochwertige Fotos. Ergänzt Pexels gut." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={300} maxBatch={1000} />
+              </div>
             </div>
 
             {/* LAB + Seed */}

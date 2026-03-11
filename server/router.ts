@@ -451,30 +451,53 @@ export const appRouter = router({
           const apiKey = input.source === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { status.error = `${input.source} API key missing`; return; }
           let imported = 0;
-          const perPage = 80;
-          const pages = Math.ceil(input.count / perPage);
-          for (let page = 1; page <= pages && imported < input.count; page++) {
+          // Use diverse keyword search instead of /curated (which always returns same ~1000 popular photos)
+          // Shuffle keywords and rotate through them with random page offsets for maximum diversity
+          const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
+          const shuffled = allKeywords.sort(() => Math.random() - 0.5);
+          const perPage = input.source === "pexels" ? 80 : 30;
+          const CONCURRENCY = 5;
+          let kwIdx = 0;
+          while (imported < input.count && kwIdx < shuffled.length) {
+            const keyword = shuffled[kwIdx++];
+            // Random page offset (1-5) to avoid always getting the same first results
+            const page = Math.floor(Math.random() * 5) + 1;
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.source === "pexels") {
-                const res = await fetch(`https://api.pexels.com/v1/curated?per_page=${perPage}&page=${page}`, { headers: { Authorization: apiKey } });
+                const res = await fetch(
+                  `https://api.pexels.com/v1/search?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=square`,
+                  { headers: { Authorization: apiKey } }
+                );
+                if (!res.ok) { log(`⚠️ Pexels ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
-                photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.medium, tile128Url: p.src.small }));
+                photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
               } else {
-                const res = await fetch(`https://api.unsplash.com/photos?per_page=${perPage}&page=${page}&order_by=popular`, { headers: { Authorization: `Client-ID ${apiKey}` } });
+                const res = await fetch(
+                  `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
+                  { headers: { Authorization: `Client-ID ${apiKey}` } }
+                );
+                if (!res.ok) { log(`⚠️ Unsplash ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
-                photos = (data ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+                photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
               }
-              for (const photo of photos) {
-                const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
-                imported++;
-                status.imported = imported;
+              // Process in parallel for speed
+              let batchNew = 0;
+              for (let i = 0; i < photos.length; i += CONCURRENCY) {
+                const batch = photos.slice(i, i + CONCURRENCY);
+                await Promise.all(batch.map(async (photo) => {
+                  try {
+                    const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
+                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                    imported++; batchNew++;
+                    status.imported = imported;
+                  } catch { /* duplicate or error – skip */ }
+                }));
               }
-              log(`Page ${page}: +${photos.length} (total: ${imported})`);
-            } catch (e) { log(`Page ${page} error: ${e}`); }
+              if (batchNew > 0) log(`"${keyword}" p${page}: +${batchNew} neu (${imported}/${input.count})`);
+            } catch (e) { log(`"${keyword}" error: ${e}`); }
           }
-          log(`✅ Import fertig: ${imported} Bilder`);
+          log(`✅ Import fertig: ${imported} neue Bilder`);
           status.finishedAt = new Date().toISOString();
         } catch (e: unknown) {
           status.error = e instanceof Error ? e.message : String(e);
@@ -580,6 +603,87 @@ export const appRouter = router({
     .query(({ input }) => {
       const jobKey = `smart_${input.sourceId}`;
       return smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
+    }),
+
+  // Admin: Import All Sources simultaneously (Pexels + Unsplash in parallel)
+  // This starts both importFromSource jobs at the same time for maximum throughput
+  importAll: publicProcedure
+    .input(z.object({ count: z.number().min(50).max(5000).default(500) }))
+    .mutation(async ({ input }) => {
+      const results: Record<string, boolean> = {};
+      const sources: Array<'pexels' | 'unsplash'> = [];
+      if (process.env.PEXELS_API_KEY) sources.push('pexels');
+      if (process.env.UNSPLASH_ACCESS_KEY) sources.push('unsplash');
+      if (sources.length === 0) return { started: false, error: 'Keine API-Keys konfiguriert' };
+      // Start each source as a separate background job
+      for (const source of sources) {
+        const status = getImportStatus(source);
+        if (status.running) { results[source] = false; continue; }
+        status.running = true;
+        status.startedAt = new Date().toISOString();
+        status.log = [];
+        status.imported = 0;
+        status.total = input.count;
+        status.error = null;
+        const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
+        results[source] = true;
+        // Fire-and-forget background job (same logic as importFromSource)
+        (async (src: 'pexels' | 'unsplash') => {
+          try {
+            const apiKey = src === 'pexels' ? process.env.PEXELS_API_KEY! : process.env.UNSPLASH_ACCESS_KEY!;
+            let imported = 0;
+            const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
+            const shuffled = allKeywords.sort(() => Math.random() - 0.5);
+            const perPage = src === 'pexels' ? 80 : 30;
+            const CONCURRENCY = 5;
+            let kwIdx = 0;
+            while (imported < input.count && kwIdx < shuffled.length) {
+              const keyword = shuffled[kwIdx++];
+              const page = Math.floor(Math.random() * 5) + 1;
+              try {
+                let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
+                if (src === 'pexels') {
+                  const res = await fetch(
+                    `https://api.pexels.com/v1/search?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=square`,
+                    { headers: { Authorization: apiKey } }
+                  );
+                  if (!res.ok) continue;
+                  const data = await res.json() as any;
+                  photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+                } else {
+                  const res = await fetch(
+                    `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
+                    { headers: { Authorization: `Client-ID ${apiKey}` } }
+                  );
+                  if (!res.ok) continue;
+                  const data = await res.json() as any;
+                  photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+                }
+                let batchNew = 0;
+                for (let i = 0; i < photos.length; i += CONCURRENCY) {
+                  const batch = photos.slice(i, i + CONCURRENCY);
+                  await Promise.all(batch.map(async (photo) => {
+                    try {
+                      const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
+                      await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                      imported++; batchNew++;
+                      status.imported = imported;
+                    } catch { /* duplicate – skip */ }
+                  }));
+                }
+                if (batchNew > 0) log(`[${src}] "${keyword}" p${page}: +${batchNew} (${imported}/${input.count})`);
+              } catch { /* skip keyword */ }
+            }
+            log(`✅ [${src}] Fertig: ${imported} neue Bilder`);
+            status.finishedAt = new Date().toISOString();
+          } catch (e: unknown) {
+            status.error = e instanceof Error ? e.message : String(e);
+          } finally {
+            status.running = false;
+          }
+        })(source);
+      }
+      return { started: true, sources, results };
     }),
 
   // Admin: Rebuild tile index (LAB reindex)
