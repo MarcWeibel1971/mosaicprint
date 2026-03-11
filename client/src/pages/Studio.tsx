@@ -428,44 +428,73 @@ export default function Studio() {
 
           setDetectedImageType(imageType);
 
-          // Step 4: Auto-apply optimal preset if no custom settings exist
-          const currentSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-          const hasCustomSettings = Object.keys(currentSettings).length > 0;
-
-          if (imageType === 'portrait' && !hasCustomSettings) {
-            // Portrait preset: fine grid for sharp face details, strong brightness + SSD matching
-            // More tiles (90 cols) + smaller tile size (12px) = 3× more cells for eyes/nose/mouth
+          // Step 4: Auto-apply optimal preset on EVERY upload
+          // The preset is always applied so the algorithm uses the best settings for the detected image type.
+          // Users can still override via Admin > Einstellungen – but each new upload resets to the optimal preset.
+          // This ensures: portrait → portrait-optimized weights, landscape → landscape weights.
+          if (imageType === 'portrait') {
+            // Portrait preset: fine grid, strong saturation penalty, skin-tone boost
+            // wSat=0.45, wTexture=0.20 as recommended by algorithm review
             const portraitPreset = {
-              baseTiles: 90,        // More columns = finer grid = sharper face details
-              tilePx: 12,           // Smaller tiles = more detail in face regions
-              neighborRadius: 5,    // wider anti-repetition radius for portrait
-              neighborPenalty: 200, // strong anti-repetition
-              contrastBoost: 1.25,  // stronger contrast for face clarity
-              histogramBlend: 0.0,  // NO overlay – tiles match naturally
-              labWeight: 0.12,
-              brightnessWeight: 0.45, // KEY: brightness drives face structure without overlay
-              textureWeight: 0.10,
-              portraitMode: true,   // enables skin-tone boost in matching
+              baseTiles: 90,          // More columns = finer grid = sharper face details
+              tilePx: 12,             // Smaller tiles = more detail in face regions
+              neighborRadius: 6,      // Wide anti-repetition radius for portrait
+              neighborPenalty: 200,   // Strong anti-repetition → no flower-clusters in face
+              contrastBoost: 1.25,    // Stronger contrast for face clarity
+              histogramBlend: 0.0,    // NO overlay – tiles match naturally
+              baseOverlay: 0.10,      // Subtle overlay only
+              edgeBoost: 0.15,        // Gentle edge boost
+              labWeight: 0.12,        // LAB less dominant – brightness + sat drive matching
+              brightnessWeight: 0.45, // KEY: brightness drives face structure
+              textureWeight: 0.20,    // Higher texture weight for skin/hair detail
+              edgeWeight: 0.15,       // Edge energy for eye/mouth definition
+              saturationWeight: 0.45, // NEW: strong saturation matching for portrait
+              portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(portraitPreset));
-            // Also clear theme filter so ALL tiles are available for skin tone matching
+            // Clear theme filter so ALL tiles are available for skin tone matching
             localStorage.removeItem('mosaicprint_selected_theme');
             setAutoPresetApplied('Portrait');
-          } else if (imageType === 'landscape' && !hasCustomSettings) {
-            // Landscape preset: wider tiles, more color accuracy, no overlay
+          } else if (imageType === 'landscape') {
+            // Landscape preset: wider tiles, more color accuracy
             const landscapePreset = {
               baseTiles: 60,
-              tilePx: 18,           // Even larger tiles for landscapes
+              tilePx: 18,             // Larger tiles for landscapes
               neighborRadius: 3,
               neighborPenalty: 120,
               contrastBoost: 1.15,
-              histogramBlend: 0.0,  // NO overlay
+              histogramBlend: 0.0,
+              baseOverlay: 0.12,
+              edgeBoost: 0.18,
               labWeight: 0.20,
               brightnessWeight: 0.35,
               textureWeight: 0.08,
+              edgeWeight: 0.20,
+              saturationWeight: 0.25,
+              portraitMode: false,
             };
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(landscapePreset));
             setAutoPresetApplied('Landschaft');
+          } else {
+            // Abstract/general preset
+            const abstractPreset = {
+              baseTiles: 70,
+              tilePx: 14,
+              neighborRadius: 4,
+              neighborPenalty: 160,
+              contrastBoost: 1.20,
+              histogramBlend: 0.0,
+              baseOverlay: 0.12,
+              edgeBoost: 0.18,
+              labWeight: 0.18,
+              brightnessWeight: 0.38,
+              textureWeight: 0.10,
+              edgeWeight: 0.20,
+              saturationWeight: 0.30,
+              portraitMode: false,
+            };
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(abstractPreset));
+            setAutoPresetApplied(null);
           }
         } catch (e) {
           console.warn('[Studio] Auto-detection failed:', e);
@@ -1240,13 +1269,14 @@ export default function Studio() {
           const wLabBase = savedSettings.labWeight ?? 0.15;
           const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
           const wTextureBase = savedSettings.textureWeight ?? 0.08;
-          // 6. Saturation difference (NEW: Stage C now includes saturation term)
+          // 6. Saturation difference
           // Prevents gray tiles in colorful areas and vice versa
           // saturation = sqrt(a²+b²), range 0–100
           const targetSatC = tf.saturation;
           const tileSatC = mf.saturation;
           const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0–1
-          const wSatBase = 0.25; // recommended weight from algorithm review
+          // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
+          const wSatBase = savedSettings.saturationWeight ?? 0.25;
           // Repetition penalty: exponential growth to strongly discourage reuse
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
@@ -1258,24 +1288,51 @@ export default function Studio() {
             const wBrightF = wBrightBase * 1.30; // extra brightness boost in face areas
             const faceEdgeWeight = edgeWeight * 1.8; // stronger edge matching in faces
             const faceTextureWeight = wTextureBase * 1.5; // texture matters for skin/hair
-            // Saturation weight in face regions: slightly reduced (SSD handles color accuracy)
-            const faceSatWeight = wSatBase * 0.6;
+            // Saturation weight in face regions: full weight (portrait preset = 0.45)
+            const faceSatWeight = wSatBase;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.06 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
-            // Skin-tone bonus: if target cell is skin-toned (warm L:40-80, a:5-25, b:10-35)
-            // and tile is also skin-toned, reduce distance (better match)
+            // Skin-tone detection: warm L:40-80, a:5-25, b:10-35
             const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
             if (isTargetSkin && isTileSkin) dist -= 8; // skin-tone bonus: prefer matching skin tiles
             if (isTargetSkin && !isTileSkin) dist += 12; // penalize non-skin tiles in skin areas
-            // Low-saturation penalty: if target skin area is colorful but tile is gray, penalize
-            // This prevents washed-out gray tiles from appearing in warm skin regions
-            if (isTargetSkin && tileSatC < 8) dist += 15; // strongly penalize desaturated tiles in skin areas
+            // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
+            // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
+            // in skin-toned target cells. This prevents colorful landscape/nature tiles from
+            // appearing in face/skin regions.
+            // We use the isSkinFriendly heuristic: tile is skin-friendly if its LAB is warm
+            // (a > 0, b > 0) OR if it's low-saturation (neutral/gray)
+            if (isTargetSkin && savedSettings.portraitMode) {
+              const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
+              const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
+              if (!tileIsWarm && !tileIsNeutral && tileSatC > 35) {
+                // Tile is colorful (sat>35) AND not warm AND not neutral → subject penalty
+                dist += 50; // push non-skin-subject tiles down in face ranking
+              }
+            }
+            // Low-saturation penalty (STRENGTHENED):
+            // If target is low-sat (neutral/gray area) and tile is highly saturated → penalty ×4
+            // If target is skin-toned and tile is desaturated → penalty ×4
+            // This is the key fix for "noisy / bunt" skin areas
+            if (targetSatC < 25 && tileSatC > 40) {
+              // Gray/neutral target area: strongly penalize colorful tiles
+              dist += (tileSatC - 40) / 100 * 4 * 100; // ×4 multiplier
+            }
+            if (isTargetSkin && tileSatC < 8) {
+              // Skin area: penalize washed-out gray tiles
+              dist += (8 - tileSatC) / 8 * 4 * 100; // ×4 multiplier
+            }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
           }
           // Non-face: full scoring with saturation term
+          // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
           let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
+          // Low-sat penalty for non-face areas (×2 multiplier, less aggressive than face)
+          if (targetSatC < 25 && tileSatC > 40) {
+            dist += (tileSatC - 40) / 100 * 2 * 100; // ×2 multiplier for non-face
+          }
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
@@ -1803,6 +1860,46 @@ export default function Studio() {
         {error && (
           <div className="max-w-xl mx-auto bg-red-50 border border-red-200 rounded-2xl p-4 text-red-700 text-sm mb-6">
             {error}
+          </div>
+        )}
+
+        {/* AI Detection Banner – shown after upload when image type is detected */}
+        {detectedImageType && (ready || loading) && (
+          <div className={`flex items-center gap-3 rounded-2xl px-4 py-3 mb-4 border shadow-sm ${
+            detectedImageType === 'portrait'
+              ? 'bg-gradient-to-r from-rose-50 to-pink-50 border-rose-200'
+              : detectedImageType === 'landscape'
+              ? 'bg-gradient-to-r from-sky-50 to-blue-50 border-sky-200'
+              : 'bg-gradient-to-r from-violet-50 to-purple-50 border-violet-200'
+          }`}>
+            {/* Icon */}
+            <div className={`flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center text-lg ${
+              detectedImageType === 'portrait' ? 'bg-rose-100' : detectedImageType === 'landscape' ? 'bg-sky-100' : 'bg-violet-100'
+            }`}>
+              {detectedImageType === 'portrait' ? '🧑' : detectedImageType === 'landscape' ? '🏔️' : '🎨'}
+            </div>
+            {/* Text */}
+            <div className="flex-1 min-w-0">
+              <p className={`text-xs font-bold uppercase tracking-wide mb-0.5 ${
+                detectedImageType === 'portrait' ? 'text-rose-500' : detectedImageType === 'landscape' ? 'text-sky-500' : 'text-violet-500'
+              }`}>KI-Erkennung</p>
+              <p className="text-sm font-semibold text-gray-800">
+                {detectedImageType === 'portrait' && 'Portrait erkannt – Optimale Einstellungen für Gesichter aktiv'}
+                {detectedImageType === 'landscape' && 'Landschaft erkannt – Optimale Einstellungen für Natur & Architektur aktiv'}
+                {detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt – Standard-Einstellungen aktiv'}
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {detectedImageType === 'portrait' && 'Feineres Raster · Stärkere Helligkeits- & Sättigungs-Gewichtung · Haut-Ton-Boost'}
+                {detectedImageType === 'landscape' && 'Grössere Kacheln · Mehr Farb-Genauigkeit · Weite Komposition'}
+                {detectedImageType === 'abstract' && 'Ausgewogene Gewichtung für allgemeine Motive'}
+              </p>
+            </div>
+            {/* Badge */}
+            <div className={`flex-shrink-0 text-xs font-bold px-2.5 py-1 rounded-full ${
+              detectedImageType === 'portrait' ? 'bg-rose-100 text-rose-700' : detectedImageType === 'landscape' ? 'bg-sky-100 text-sky-700' : 'bg-violet-100 text-violet-700'
+            }`}>
+              {detectedImageType === 'portrait' ? 'Portrait' : detectedImageType === 'landscape' ? 'Landschaft' : 'Abstrakt'}
+            </div>
           </div>
         )}
 

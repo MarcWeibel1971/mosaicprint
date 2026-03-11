@@ -106,6 +106,35 @@ const SUBJECT_KEYWORDS = [
   "colorful food", "fruit arrangement", "flowers bouquet", "candles warm light", "coffee art",
 ];
 
+// LOW_SAT_KEYWORDS: Neutral/gray/skin-tone tiles – critical for portrait quality
+// These are imported with DOUBLED priority in smartImport because portrait matching
+// suffers most from a lack of neutral/skin-friendly tiles in the pool.
+const LOW_SAT_KEYWORDS = [
+  // Pure neutrals & grays
+  "gray texture abstract", "concrete wall closeup", "beige minimal background",
+  "light gray smooth surface", "dark gray stone texture", "silver metal surface",
+  "white paper texture", "pale linen fabric", "off-white wall texture",
+  // Skin-tone neutrals
+  "skin tone neutral background", "warm beige bokeh", "soft peach background",
+  "nude color minimal", "warm ivory texture", "blush pink neutral",
+  // High-key / low-key
+  "high key portrait background", "pure black background abstract",
+  "bright white overexposed", "deep shadow abstract minimal",
+  // Desaturated nature
+  "black white bokeh", "monochrome fog landscape", "grayscale water reflection",
+];
+
+// EXTREME_BRIGHTNESS_KEYWORDS: Very dark and very bright tiles for eyes, hair, highlights
+const EXTREME_BRIGHTNESS_KEYWORDS = [
+  // Very dark (for dark hair, pupils, deep shadows)
+  "black hair closeup", "dark eye closeup", "black cat fur", "dark night minimal",
+  "deep shadow portrait", "black velvet texture", "dark ink abstract",
+  // Very bright (for highlights, teeth, white backgrounds)
+  "bright white light bokeh", "white snow closeup", "bright highlight abstract",
+  "white foam water", "overexposed sky white", "bright sunlight reflection",
+  "white flower macro", "bright eye highlight",
+];
+
 function getColorCategory(avgL: number, avgA: number, avgB: number): string {
   if (avgL < 25) return "black";
   if (avgL > 80) return "white";
@@ -207,6 +236,42 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
           tasks.push({ query: kw, priority: priority * 0.8, deficit: generalDeficit, label: `${color}/${brightness}/general`, subject: 'general' });
         }
       }
+    }
+  }
+
+  // Add LOW_SAT_KEYWORDS with DOUBLED priority (deficit × 2)
+  // These are critical for portrait quality – always prioritize neutral/skin-tone tiles
+  const lowSatKey = 'neutral|mid|portrait';
+  const lowSatCnt = existing.get(lowSatKey) ?? 0;
+  const lowSatDeficit = Math.max(0, targetPerBucket * 2 - lowSatCnt); // target is 2× normal
+  if (lowSatDeficit > 0) {
+    for (const kw of LOW_SAT_KEYWORDS) {
+      tasks.push({
+        query: kw,
+        priority: 2.0, // DOUBLED priority – always at top of queue
+        deficit: lowSatDeficit,
+        label: 'low-sat/neutral/portrait',
+        subject: 'portrait',
+      });
+    }
+  }
+
+  // Add EXTREME_BRIGHTNESS_KEYWORDS with HIGH priority (deficit × 1.5)
+  // Critical for dark hair, eyes, and bright highlights in portraits
+  const darkKey = 'black|dark|portrait';
+  const brightKey = 'white|bright|portrait';
+  const darkCnt = existing.get(darkKey) ?? 0;
+  const brightCnt = existing.get(brightKey) ?? 0;
+  const extremeDeficit = Math.max(0, targetPerBucket * 1.5 - Math.min(darkCnt, brightCnt));
+  if (extremeDeficit > 0) {
+    for (const kw of EXTREME_BRIGHTNESS_KEYWORDS) {
+      tasks.push({
+        query: kw,
+        priority: 1.5, // 1.5× priority
+        deficit: extremeDeficit,
+        label: 'extreme-brightness/portrait',
+        subject: 'portrait',
+      });
     }
   }
 
