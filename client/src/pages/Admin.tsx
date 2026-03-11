@@ -26,7 +26,7 @@ function getHighResUrl(url: string, size = 600): string {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface DbStats { total: number; labIndexed: number; notIndexed: number }
-interface ApiKeyStatus { stripe: boolean; unsplash: boolean; pexels: boolean }
+interface ApiKeyStatus { stripe: boolean; unsplash: boolean; pexels: boolean; shutterstock: boolean }
 interface ImportJob {
   running: boolean; imported?: number; total?: number
   log: string[]; error?: string | null; finishedAt?: string | null
@@ -428,7 +428,7 @@ export default function Admin() {
                   { key: 'stripe', label: 'Stripe (Checkout)', active: apiKeys?.stripe },
                   { key: 'unsplash', label: 'Unsplash', active: apiKeys?.unsplash },
                   { key: 'pexels', label: 'Pexels', active: apiKeys?.pexels },
-                  { key: 'shutterstock', label: 'Shutterstock', active: (apiKeys as any)?.shutterstock },
+                  { key: 'shutterstock', label: 'Shutterstock', active: apiKeys?.shutterstock },
                 ].map(({ key, label, active }) => (
                   <div key={key} className={`flex items-center gap-3 p-3 rounded-xl border ${active ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     {active ? <CheckCircle className="w-5 h-5 text-green-600 shrink-0" /> : <XCircle className="w-5 h-5 text-red-500 shrink-0" />}
@@ -589,7 +589,7 @@ export default function Admin() {
                 >
                   <option value="pexels" disabled={!apiKeys?.pexels}>Pexels{!apiKeys?.pexels ? ' (kein Key)' : ''}</option>
                   <option value="unsplash" disabled={!apiKeys?.unsplash}>Unsplash{!apiKeys?.unsplash ? ' (kein Key)' : ''}</option>
-                  <option value="shutterstock" disabled={!(apiKeys as any)?.shutterstock}>Shutterstock{!(apiKeys as any)?.shutterstock ? ' (kein Key)' : ''}</option>
+                  <option value="shutterstock" disabled={!apiKeys?.shutterstock}>Shutterstock{!apiKeys?.shutterstock ? ' (kein Key)' : ''}</option>
                 </select>
                 <button
                   onClick={startRecsImport}
@@ -661,7 +661,7 @@ export default function Admin() {
                   />
                   <button
                     onClick={startImportAll}
-                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash && !(apiKeys as any)?.shutterstock)}
+                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash && !apiKeys?.shutterstock)}
                     className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm whitespace-nowrap"
                   >
                     {importAllRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
@@ -674,7 +674,7 @@ export default function Admin() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <ImportCard title="Pexels" description="Bis zu 80 Bilder/Keyword, diverse Suche. Empfohlen für große Batches." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={500} maxBatch={2000} />
                 <ImportCard title="Unsplash" description="Bis zu 30 Bilder/Keyword, hochwertige Fotos. Ergänzt Pexels gut." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={300} maxBatch={1000} />
-                <ImportCard title="Shutterstock" description="Bis zu 50 Bilder/Keyword, professionelle Stockfotos. Ideal für Portraits & Hauttöne." icon={<Camera className="w-5 h-5 text-orange-600" />} color="orange" available={!!(apiKeys as any)?.shutterstock} job={importProgress['shutterstock']} isActive={activeJob === 'shutterstock'} onImport={(n) => startImport('shutterstock', n)} defaultBatch={300} maxBatch={1000} />
+                <ImportCard title="Shutterstock" description="Bis zu 50 Bilder/Keyword, professionelle Stockfotos. Ideal für Portraits & Hauttöne." icon={<Camera className="w-5 h-5 text-orange-600" />} color="orange" available={!!apiKeys?.shutterstock} job={importProgress['shutterstock']} isActive={activeJob === 'shutterstock'} onImport={(n) => startImport('shutterstock', n)} defaultBatch={300} maxBatch={1000} />
               </div>
             </div>
 
