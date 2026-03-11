@@ -316,8 +316,19 @@ export default function Admin() {
           const params = encodeURIComponent(JSON.stringify({ sourceId: src }))
           const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
           const data = await res.json()
+          // Handle tRPC error responses (e.g. validation errors)
+          if (data.error || data[0]?.error) {
+            const errMsg = data.error?.message ?? data[0]?.error?.message ?? 'Server-Fehler'
+            const job: SmartImportJob = { running: false, log: [`❌ ${errMsg}`], imported: 0, total: 0, error: errMsg, finishedAt: new Date().toISOString() }
+            setRecsJobs(prev => ({ ...prev, [src]: job }))
+            return
+          }
           const raw = data.result?.data ?? data
-          const job: SmartImportJob = { log: [], ...raw }
+          const job: SmartImportJob = {
+            log: [],
+            ...raw,
+            error: typeof raw?.error === 'string' ? raw.error : raw?.error ? JSON.stringify(raw.error) : null,
+          }
           setRecsJobs(prev => ({ ...prev, [src]: job }))
           if (!job.running && job.finishedAt) {
             setRecsJobs(prev => {
@@ -644,7 +655,7 @@ export default function Admin() {
                         <div className="flex items-center justify-between mb-1">
                           <span className="font-medium text-gray-700 capitalize">{src}</span>
                           <span className={job.running ? 'text-amber-600' : job.error ? 'text-red-500' : 'text-green-600'}>
-                            {job.running ? `⏳ ${job.imported ?? 0} importiert` : job.error ? `❌ ${job.error}` : `✅ ${job.imported ?? 0} neu`}
+                            {job.running ? `⏳ ${job.imported ?? 0} importiert` : job.error ? `❌ ${typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}` : `✅ ${job.imported ?? 0} neu`}
                           </span>
                         </div>
                         {job.running && (

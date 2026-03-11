@@ -735,7 +735,7 @@ export const appRouter = router({
 
   // Admin: Smart Import status
   getSmartImportStatus: publicProcedure
-    .input(z.object({ sourceId: z.enum(["unsplash", "pexels"]).default("pexels") }))
+    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels") }))
     .query(({ input }) => {
       const jobKey = `smart_${input.sourceId}`;
       return smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
@@ -994,18 +994,20 @@ export const appRouter = router({
   // Targeted import: import images for a specific search query
   targetedImport: publicProcedure
     .input(z.object({
-      sourceId: z.enum(["unsplash", "pexels"]).default("pexels"),
+      sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
       query: z.string().min(1).max(200),
       count: z.number().min(10).max(500).default(100),
     }))
     .mutation(async ({ input }) => {
       const jobKey = `targeted_${input.sourceId}_${Date.now()}`;
-      const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY : process.env.UNSPLASH_ACCESS_KEY;
+      const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY
+        : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
+        : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
       // Run in background
       (async () => {
         try {
-          const perPage = Math.min(input.count, input.sourceId === "pexels" ? 80 : 30);
+          const perPage = Math.min(input.count, input.sourceId === "pexels" ? 80 : input.sourceId === "pixabay" ? 200 : 30);
           let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
           if (input.sourceId === "pexels") {
             const res = await fetch(
@@ -1015,6 +1017,18 @@ export const appRouter = router({
             if (res.ok) {
               const data = await res.json() as any;
               photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+            }
+          } else if (input.sourceId === "pixabay") {
+            const res = await fetch(
+              `https://pixabay.com/api/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(input.query)}&per_page=${perPage}&image_type=photo&safesearch=true&orientation=horizontal`,
+              { headers: { Accept: 'application/json' } }
+            );
+            if (res.ok) {
+              const data = await res.json() as any;
+              photos = (data.hits ?? []).map((p: any) => ({
+                sourceUrl: p.previewURL ?? '',
+                tile128Url: p.previewURL ?? '',
+              })).filter((p: any) => p.sourceUrl);
             }
           } else {
             const res = await fetch(
