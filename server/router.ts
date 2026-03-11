@@ -141,13 +141,72 @@ export const appRouter = router({
     };
   }),
 
-  // Admin: DB stats
+  // Admin: DB stats (detailed)
   getDbStats: publicProcedure.query(async () => {
     try {
-      const count = await db.getMosaicImageCount();
-      return { count, target: TILE_TARGET };
-    } catch {
-      return { count: 0, target: TILE_TARGET };
+      const pool = db.getPool();
+      // Total count
+      const countRes = await pool.query("SELECT COUNT(*) as cnt FROM mosaic_images");
+      const total = Number(countRes.rows[0]?.cnt ?? 0);
+      // LAB indexed (not default 50/0/0)
+      const labRes = await pool.query("SELECT COUNT(*) as cnt FROM mosaic_images WHERE NOT (avg_l = 50 AND avg_a = 0 AND avg_b = 0)");
+      const labIndexed = Number(labRes.rows[0]?.cnt ?? 0);
+      // By source (detect from source_url)
+      const srcRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN source_url LIKE '%picsum%' THEN 'picsum'
+            WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
+            WHEN source_url LIKE '%pexels%' THEN 'pexels'
+            ELSE 'other'
+          END as src,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY src
+      `);
+      const bySource: Record<string, number> = {};
+      for (const row of srcRes.rows) bySource[row.src] = Number(row.cnt);
+      // By color (LAB hue classification)
+      const colorRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN avg_l < 25 THEN 'schwarz'
+            WHEN avg_l > 80 THEN 'weiss'
+            WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'grau'
+            WHEN avg_a > 20 THEN 'rot'
+            WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
+            WHEN avg_b > 20 THEN 'gelb'
+            WHEN avg_a < -10 AND avg_b < -5 THEN 'cyan'
+            WHEN avg_a < -10 THEN 'gruen'
+            WHEN avg_b < -15 THEN 'blau'
+            WHEN avg_a > 10 AND avg_b < 0 THEN 'violett'
+            WHEN avg_a > 10 THEN 'pink'
+            ELSE 'grau'
+          END as color,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY color
+      `);
+      const byColor: Record<string, number> = {};
+      for (const row of colorRes.rows) byColor[row.color] = Number(row.cnt);
+      // By brightness
+      const brightRes = await pool.query(`
+        SELECT
+          CASE
+            WHEN avg_l < 35 THEN 'dunkel'
+            WHEN avg_l > 65 THEN 'hell'
+            ELSE 'mittel'
+          END as brightness,
+          COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY brightness
+      `);
+      const byBrightness: Record<string, number> = {};
+      for (const row of brightRes.rows) byBrightness[row.brightness] = Number(row.cnt);
+      return { total, labIndexed, bySource, byColor, byBrightness, count: total, target: TILE_TARGET };
+    } catch (e) {
+      console.error('[getDbStats error]', e);
+      return { total: 0, labIndexed: 0, bySource: {}, byColor: {}, byBrightness: {}, count: 0, target: TILE_TARGET };
     }
   }),
 
