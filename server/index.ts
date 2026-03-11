@@ -35,50 +35,52 @@ app.use(express.json({ limit: "50mb" }));
 
 // ---- REST endpoints expected by Studio.tsx ----
 
+// GET /api/tile-lab-index
+// Returns ALL tile LAB values as a compact binary Float32Array
+// Format: [id0, L0, a0, b0, id1, L1, a1, b1, ...] (4 floats per tile)
+// ~190 KB for 12,000 tiles - loaded once, used for fast LAB pre-filter
+// This enables 2-stage matching: LAB k-NN over ALL tiles, then SSD on Top-50
+app.get("/api/tile-lab-index", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(
+      `SELECT id, avg_l, avg_a, avg_b FROM mosaic_images
+       WHERE avg_l IS NOT NULL ORDER BY id ASC`
+    );
+    const rows = result.rows;
+    // Pack as Float32Array: [id, L, a, b] per tile = 4 floats = 16 bytes
+    const buf = Buffer.allocUnsafe(rows.length * 4 * 4);
+    let offset = 0;
+    for (const row of rows) {
+      buf.writeFloatLE(Number(row.id), offset);     offset += 4;
+      buf.writeFloatLE(Number(row.avg_l), offset);  offset += 4;
+      buf.writeFloatLE(Number(row.avg_a), offset);  offset += 4;
+      buf.writeFloatLE(Number(row.avg_b), offset);  offset += 4;
+    }
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', buf.length);
+    res.setHeader('Cache-Control', 'public, max-age=60'); // 1 min cache (DB changes)
+    res.setHeader('X-Tile-Count', rows.length.toString());
+    res.send(buf);
+  } catch (e) {
+    console.error('[tile-lab-index] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // GET /api/trpc/getTilePool?limit=2000&labOnly=true
-// Returns a STRATIFIED random sample across all color×brightness buckets
-// Ensures color diversity: not just the oldest/most common images
+// Legacy endpoint kept for backward compatibility
+// For new code, use /api/tile-lab-index instead
 app.get("/api/trpc/getTilePool", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit ?? 5000), 50000);
     const labOnly = req.query.labOnly === "true";
     const pool = db.getPool();
-
-    // Stratified sampling: pick up to perBucket images from each color×brightness bucket
-    // 11 color categories × 3 brightness levels = 33 buckets max
-    // perBucket = ceil(limit / 33) ensures we fill the limit with diverse images
-    const perBucket = Math.ceil(limit / 33);
-    const result = await pool.query(`
-      WITH ranked AS (
-        SELECT id, avg_l, avg_a, avg_b,
-          ROW_NUMBER() OVER (
-            PARTITION BY
-              CASE
-                WHEN avg_l < 25 THEN 'black'
-                WHEN avg_l > 80 THEN 'white'
-                WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'neutral'
-                WHEN avg_a > 20 THEN 'red'
-                WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
-                WHEN avg_b > 20 THEN 'yellow'
-                WHEN avg_a < -10 THEN 'green'
-                WHEN avg_b < -15 THEN 'blue'
-                WHEN avg_a > 10 AND avg_b < 0 THEN 'purple'
-                WHEN avg_a > 10 THEN 'pink'
-                ELSE 'neutral'
-              END,
-              CASE WHEN avg_l < 35 THEN 'dark' WHEN avg_l > 65 THEN 'bright' ELSE 'mid' END
-            ORDER BY RANDOM()
-          ) as rn
-        FROM mosaic_images
-        WHERE avg_l IS NOT NULL
-      )
-      SELECT id, avg_l as "avgL", avg_a as "avgA", avg_b as "avgB"
-      FROM ranked
-      WHERE rn <= $1
-      ORDER BY RANDOM()
-      LIMIT $2
-    `, [perBucket, limit]);
-
+    const result = await pool.query(
+      `SELECT id, avg_l as "avgL", avg_a as "avgA", avg_b as "avgB"
+       FROM mosaic_images WHERE avg_l IS NOT NULL ORDER BY id ASC LIMIT $1`,
+      [limit]
+    );
     const rows = result.rows;
     if (labOnly) {
       res.json(rows.map((t: any) => ({ id: t.id, l: Number(t.avgL), a: Number(t.avgA), b: Number(t.avgB) })));

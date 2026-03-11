@@ -138,22 +138,23 @@ export default function Studio() {
       .catch(() => {});
   }, []);
 
-  // Warm-up: pre-load a small set of tiles from the DB in the background
+  // Preload: Load the full LAB index (all tiles, ~190KB binary) in the background
+  // This enables 2-stage matching: k-NN over ALL tiles, then SSD on Top-30
   useEffect(() => {
-    const isMobileWarmup = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const warmupCount = isMobileWarmup ? 100 : 200;
-    fetch(`/api/trpc/getTilePool?limit=${warmupCount}&labOnly=true`)
-      .then(r => r.json())
-      .then((tiles: Array<{id: number}>) => {
-        const warmupUrls = tiles.map(t => `/api/tile/${t.id}?size=32`);
-        warmUpCache(warmupUrls, 4, (loaded) => {
-          if (loaded % 50 === 0) setCacheSize(getMemoryCacheSize());
-        }).catch(() => {});
+    if (labIndexLoadedRef.current) return;
+    fetch('/api/tile-lab-index')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.arrayBuffer();
       })
-      .catch(() => {
-        // Fallback to legacy pool if DB not available
-        const warmupUrls = getPhotoUrls(warmupCount, 20);
-        warmUpCache(warmupUrls, 4).catch(() => {});
+      .then(buf => {
+        labIndexRef.current = new Float32Array(buf);
+        labIndexLoadedRef.current = true;
+        const count = buf.byteLength / 16; // 4 floats × 4 bytes = 16 bytes per tile
+        console.log(`[Studio] LAB index loaded: ${count} tiles (${(buf.byteLength/1024).toFixed(0)} KB)`);
+      })
+      .catch(e => {
+        console.warn('[Studio] LAB index not available, will use legacy pool:', e);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -171,6 +172,10 @@ export default function Studio() {
   const validImgsRef = useRef<HTMLImageElement[]>([]);
   // DB tile IDs parallel to validImgsRef (for multi-res loading via /api/tile/:id)
   const tileIdsRef = useRef<number[]>([]);
+  // Full LAB index: Float32Array of [id, L, a, b, id, L, a, b, ...] for ALL tiles
+  // Loaded once at startup, used for fast k-NN pre-filter over entire DB
+  const labIndexRef = useRef<Float32Array | null>(null);
+  const labIndexLoadedRef = useRef<boolean>(false);
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
@@ -460,80 +465,165 @@ export default function Studio() {
       saliency[ci] = edgeMap[ci]; // saliency = edge strength
     }
 
-    // Step 2: Load tile photos
-    // Detect mobile/slow connection and adapt pool size
+    // Step 2: 2-STAGE MATCHING
+    // Stage A: LAB k-NN over ALL tiles in DB (no image loading needed)
+    //   → For each mosaic cell, find Top-K candidates by LAB distance
+    // Stage B: Load only the Top-K tile images, compute SSD, pick best
+    //   → Only ~30 images per cell are ever loaded (vs 2000 before)
+    //
+    // This gives: better quality (all 12K tiles searched) + faster loading
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const isSlowConnection = (navigator as any).connection?.effectiveType === "2g" || (navigator as any).connection?.effectiveType === "slow-2g";
-    const isMobileOrSlow = isMobile || isSlowConnection;
+    const isMobileOrSlow = isMobile || (navigator as any).connection?.effectiveType === "2g";
 
-    // Adaptive pool size: larger pool = better matching quality
-    // Server returns STRATIFIED sample (color-diverse), so more = better without redundancy
-    // Desktop: up to 2000 images | Mobile: up to 800 images
-    const MIN_POOL = isMobileOrSlow ? 300 : 600;
-    const MAX_POOL = isMobileOrSlow ? 800 : 2000;
-    const TARGET_POOL = Math.min(MAX_POOL, Math.max(MIN_POOL, Math.ceil(TOTAL_TILES * (isMobileOrSlow ? 2.5 : 5.0))));
-    setProgressMsg("Lade Tile-Fotos aus Datenbank...");
+    // ── Stage A: Load LAB index (if not already loaded) ──────────────────────
+    setProgressMsg("Lade LAB-Index aller Kacheln...");
     setProgress(10);
 
-    // Load tile pool from DB (own domain – no external URLs in render path)
-    // Server returns stratified sample: diverse colors/brightness, not just oldest images
-    let dbTilePool: Array<{id: number; l: number; a: number; b: number}> = [];
-    let allUrls: string[] = [];
-    let dbTileIds: number[] = [];
-    try {
-      const poolRes = await fetch(`/api/trpc/getTilePool?limit=${TARGET_POOL}&labOnly=true`);
-      if (poolRes.ok) {
-        dbTilePool = await poolRes.json();
-        allUrls = dbTilePool.map(t => `/api/tile/${t.id}?size=64`);
-        dbTileIds = dbTilePool.map(t => t.id);
-      }
-    } catch { /* fallback below */ }
-    // Fallback to legacy Picsum pool if DB not available or empty
-    if (allUrls.length === 0) {
-      console.warn('[Studio] DB tile pool empty, falling back to Picsum');
-      allUrls = getPhotoUrls(TARGET_POOL, 64);
-      dbTileIds = [];
+    let labIndex: Float32Array | null = labIndexRef.current;
+    if (!labIndex) {
+      try {
+        const r = await fetch('/api/tile-lab-index');
+        if (r.ok) {
+          const buf = await r.arrayBuffer();
+          labIndex = new Float32Array(buf);
+          labIndexRef.current = labIndex;
+          labIndexLoadedRef.current = true;
+        }
+      } catch { /* fallback to legacy below */ }
     }
 
-    const BATCH = isMobileOrSlow ? 30 : 80;
+    const USE_2STAGE = labIndex !== null && labIndex.length >= 4;
+    const TOTAL_DB_TILES = USE_2STAGE ? labIndex!.length / 4 : 0;
+    console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles in LAB index)` : 'NO (fallback to legacy)'}`);
+
+    // ── Stage A helper: k-NN in LAB space over all DB tiles ──────────────────
+    // Returns array of {tileId, labDist} sorted by distance, length = K
+    const TOP_K = isMobileOrSlow ? 20 : 30; // candidates per cell for SSD stage
+    const knnLAB = (targetL: number, targetA: number, targetB: number): Array<{tileId: number; labDist: number}> => {
+      if (!labIndex) return [];
+      // Use a fixed-size max-heap approach: maintain top-K smallest distances
+      // For 12K tiles, simple linear scan is fast enough (~0.3ms per cell)
+      const heap: Array<{tileId: number; labDist: number}> = [];
+      let maxDist = Infinity;
+      for (let i = 0; i < labIndex.length; i += 4) {
+        const id = labIndex[i];
+        const L = labIndex[i + 1];
+        const a = labIndex[i + 2];
+        const b = labIndex[i + 3];
+        const dL = targetL - L, dA = targetA - a, dB = targetB - b;
+        const dist = dL * dL + dA * dA + dB * dB;
+        if (heap.length < TOP_K) {
+          heap.push({ tileId: id, labDist: dist });
+          if (heap.length === TOP_K) {
+            maxDist = Math.max(...heap.map(h => h.labDist));
+          }
+        } else if (dist < maxDist) {
+          // Replace the worst element
+          let worstIdx = 0;
+          for (let j = 1; j < heap.length; j++) {
+            if (heap[j].labDist > heap[worstIdx].labDist) worstIdx = j;
+          }
+          heap[worstIdx] = { tileId: id, labDist: dist };
+          maxDist = Math.max(...heap.map(h => h.labDist));
+        }
+      }
+      return heap.sort((a, b) => a.labDist - b.labDist);
+    };
+
+    // ── Stage B: Pre-compute per-cell Top-K candidates ───────────────────────
+    // For each cell, find the Top-K tile IDs by LAB distance
+    // Then deduplicate: collect the UNIQUE tile IDs needed across all cells
+    setProgressMsg(`Suche beste Kacheln in ${TOTAL_DB_TILES.toLocaleString()} Bildern...`);
+    setProgress(15);
+
+    // Map: tileId → candidate index (for SSD lookup after loading)
+    const cellCandidates: Array<Array<{tileId: number; labDist: number}>> = [];
+    const neededTileIds = new Set<number>();
+
+    if (USE_2STAGE) {
+      // Anti-repetition: track recently assigned tile IDs per cell position
+      // We do a 2-pass: first collect all candidates, then load images
+      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+        const [tL, tA, tB] = cellLab[ci];
+        const candidates = knnLAB(tL, tA, tB);
+        cellCandidates.push(candidates);
+        candidates.forEach(c => neededTileIds.add(c.tileId));
+        if (ci % 500 === 0) {
+          setProgress(15 + Math.round((ci / TOTAL_TILES) * 10));
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      console.log(`[Studio] k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
+    }
+
+    // ── Stage B: Load only the needed tile images ─────────────────────────────
+    setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder...`);
+    setProgress(25);
+
+    // tileId → HTMLImageElement (loaded at 64px)
+    const tileImgMap = new Map<number, HTMLImageElement>();
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
-    const loadedImgs: (HTMLImageElement | null)[] = [];
 
-    const memoryCached = getMemoryCacheSize();
-    if (memoryCached > 0) {
-      setProgressMsg(`Lade aus Cache (${memoryCached} Bilder)...`);
-    }
-
-    let timeoutFallbackTriggered = false;
-    const firstBatchStart = Date.now();
-
-    for (let i = 0; i < allUrls.length; i += BATCH) {
-      const batch = await Promise.all(
-        allUrls.slice(i, i + BATCH).map(u => loadImageCached(u, IMG_TIMEOUT))
-      );
-      loadedImgs.push(...batch);
-      const pct = 10 + Math.round(((i + BATCH) / allUrls.length) * 35);
-      setProgress(Math.min(pct, 45));
-      const newCacheSize = getMemoryCacheSize();
-      setCacheSize(newCacheSize);
-      await new Promise(r => setTimeout(r, 0));
-
-      // Timeout fallback: if first batch takes >20s, reduce pool
-      if (i === 0 && Date.now() - firstBatchStart > 20000) {
-        timeoutFallbackTriggered = true;
-        setProgressMsg("Langsame Verbindung \u2013 starte mit kleinerem Pool...");
-        break;
+    if (USE_2STAGE && neededTileIds.size > 0) {
+      const tileIdArray = Array.from(neededTileIds);
+      const BATCH = isMobileOrSlow ? 30 : 80;
+      let loaded = 0;
+      for (let i = 0; i < tileIdArray.length; i += BATCH) {
+        const batchIds = tileIdArray.slice(i, i + BATCH);
+        const batchImgs = await Promise.all(
+          batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
+        );
+        for (let j = 0; j < batchIds.length; j++) {
+          if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+        }
+        loaded += batchIds.length;
+        const pct = 25 + Math.round((loaded / tileIdArray.length) * 20);
+        setProgress(Math.min(pct, 45));
+        setCacheSize(getMemoryCacheSize());
+        await new Promise(r => setTimeout(r, 0));
       }
-
-      // Continue loading until we have enough valid images
-      // Don't stop early – more tiles = better matching quality
-      const validSoFar = loadedImgs.filter(Boolean).length;
-      const minRequired = timeoutFallbackTriggered ? 200 : Math.min(600, Math.max(300, TOTAL_TILES * 2));
-      if (validSoFar >= minRequired && i + BATCH >= allUrls.length * 0.5) break;
+      console.log(`[Studio] Loaded ${tileImgMap.size}/${neededTileIds.size} tile images`);
     }
-    const validImgs = loadedImgs.filter(Boolean) as HTMLImageElement[];
-    // Store tile IDs for multi-resolution loading (hi-res zoom, print)
-    const validTileIds = validImgs.map((_, i) => dbTileIds[i] ?? 0);
+
+    // ── Fallback: legacy pool if 2-stage not available ────────────────────────
+    // Build validImgs/validTileIds arrays for the rest of the pipeline
+    let validImgs: HTMLImageElement[];
+    let validTileIds: number[];
+    let dbTilePool: Array<{id: number; l: number; a: number; b: number}> = [];
+
+    if (!USE_2STAGE || tileImgMap.size === 0) {
+      // Legacy: load a fixed pool of images
+      setProgressMsg("Lade Kachel-Pool (Fallback)...");
+      const TARGET_POOL = isMobileOrSlow ? 600 : 1500;
+      let allUrls: string[] = [];
+      let dbTileIds: number[] = [];
+      try {
+        const poolRes = await fetch(`/api/trpc/getTilePool?limit=${TARGET_POOL}&labOnly=true`);
+        if (poolRes.ok) {
+          dbTilePool = await poolRes.json();
+          allUrls = dbTilePool.map(t => `/api/tile/${t.id}?size=64`);
+          dbTileIds = dbTilePool.map(t => t.id);
+        }
+      } catch { /* ignore */ }
+      if (allUrls.length === 0) {
+        allUrls = getPhotoUrls(TARGET_POOL, 64);
+        dbTileIds = [];
+      }
+      const loadedImgs: (HTMLImageElement | null)[] = [];
+      const BATCH = isMobileOrSlow ? 30 : 80;
+      for (let i = 0; i < allUrls.length; i += BATCH) {
+        const batch = await Promise.all(allUrls.slice(i, i + BATCH).map(u => loadImageCached(u, IMG_TIMEOUT)));
+        loadedImgs.push(...batch);
+        setProgress(25 + Math.round(((i + BATCH) / allUrls.length) * 20));
+        await new Promise(r => setTimeout(r, 0));
+      }
+      validImgs = loadedImgs.filter(Boolean) as HTMLImageElement[];
+      validTileIds = validImgs.map((_, i) => dbTileIds[i] ?? 0);
+    } else {
+      // 2-stage: build flat arrays from tileImgMap (for feature extraction + rendering)
+      validImgs = Array.from(tileImgMap.values());
+      validTileIds = Array.from(tileImgMap.keys());
+    }
 
     // Step 3: Extract features
     // Feature vector per tile: [globalLAB(3), quadrant TL(3), TR(3), BL(3), BR(3), brightness(1), textureVariance(1), saturation(1)]
@@ -703,12 +793,23 @@ export default function Studio() {
     } catch { /* FaceDetector not available or failed – continue without */ }
 
     // Step 4: Match tiles
-    // Spec-recommended weights: CIELAB 65%, Brightness 25%, Texture 10%
-    // Frequency-aware extension: colorDist 55%, brightness 20%, texture 15%, edgeSimilarity 10%
+    // 2-STAGE MATCHING:
+    //   Stage A (done above): k-NN over ALL DB tiles in LAB space → cellCandidates[ci]
+    //   Stage B (here): For each cell, get the pre-computed Top-K candidates,
+    //                   look up their loaded images, run SSD + full scoring, pick best
+    //
+    // For legacy fallback (no LAB index): use filteredImgFeatures as before
     setProgressMsg("Matche Fotos...");
     setProgress(50);
+
+    // Build a tileId → index map for the loaded images (for 2-stage lookup)
+    const tileIdToIdx = new Map<number, number>();
+    for (let i = 0; i < filteredTileIds.length; i++) {
+      tileIdToIdx.set(filteredTileIds[i], i);
+    }
+
     const useCount = new Array(filteredValidImgs.length).fill(0);
-    const MAX_REUSE = Math.max(2, Math.ceil((TOTAL_TILES * 1.2) / filteredValidImgs.length));
+    const MAX_REUSE = Math.max(2, Math.ceil((TOTAL_TILES * 1.2) / Math.max(1, filteredValidImgs.length)));
     const assignment: number[] = new Array(TOTAL_TILES).fill(-1);
     // Also store best rotation per tile (0=0°, 1=90°, 2=180°, 3=270°)
     const assignmentRotation: number[] = new Array(TOTAL_TILES).fill(0);
@@ -730,8 +831,7 @@ export default function Studio() {
     const tileOrder = Array.from({ length: TOTAL_TILES }, (_, i) => i)
       .sort((a, b) => saliency[b] - saliency[a]);
 
-    // Pre-sort imgFeatures by LAB for fast candidate pre-filtering
-    // This allows us to quickly find the N closest tiles by color before full scoring
+    // Legacy: Pre-sort imgFeatures by LAB for fast candidate pre-filtering
     const sortedByL = Array.from({ length: filteredValidImgs.length }, (_, i) => i)
       .sort((a, b) => filteredImgFeatures[a].lab[0] - filteredImgFeatures[b].lab[0]);
 
@@ -754,32 +854,41 @@ export default function Studio() {
         }
       }
 
-      // LAB pre-filter: binary search for tiles with similar L value, then take top 80 by full LAB dist
-      // This dramatically reduces the inner loop from N to ~80 candidates
-      const PRE_FILTER_COUNT = Math.min(80, filteredValidImgs.length);
+      // 2-STAGE: Use pre-computed k-NN candidates from LAB index
+      // Map candidate tileIds to their indices in filteredImgFeatures
       let candidateIndices: number[];
-      if (filteredValidImgs.length > PRE_FILTER_COUNT * 2) {
-        // Binary search for insertion point of target L in sortedByL
-        const targetL = tf.lab[0];
-        let lo = 0, hi = sortedByL.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (filteredImgFeatures[sortedByL[mid]].lab[0] < targetL) lo = mid + 1; else hi = mid;
+      if (USE_2STAGE && cellCandidates[ci]?.length > 0) {
+        // Map tileIds to feature indices, skip tiles not loaded (filtered out)
+        candidateIndices = cellCandidates[ci]
+          .map(c => tileIdToIdx.get(c.tileId) ?? -1)
+          .filter(idx => idx >= 0);
+        // If too few candidates loaded (e.g., all filtered), fall back to legacy
+        if (candidateIndices.length < 5) {
+          candidateIndices = Array.from({ length: Math.min(30, filteredValidImgs.length) }, (_, i) => i);
         }
-        // Expand window around lo to collect PRE_FILTER_COUNT candidates
-        const windowStart = Math.max(0, lo - PRE_FILTER_COUNT / 2);
-        const windowEnd = Math.min(sortedByL.length, windowStart + PRE_FILTER_COUNT * 2);
-        // Sort window by full LAB distance, take top PRE_FILTER_COUNT
-        candidateIndices = sortedByL.slice(windowStart, windowEnd)
-          .map(j => {
-            const [dL,dA,dB] = [tf.lab[0]-filteredImgFeatures[j].lab[0], tf.lab[1]-filteredImgFeatures[j].lab[1], tf.lab[2]-filteredImgFeatures[j].lab[2]];
-            return { j, dist: dL*dL + dA*dA + dB*dB };
-          })
-          .sort((a, b) => a.dist - b.dist)
-          .slice(0, PRE_FILTER_COUNT)
-          .map(x => x.j);
       } else {
-        candidateIndices = Array.from({ length: filteredValidImgs.length }, (_, i) => i);
+        // Legacy fallback: binary search in sortedByL
+        const PRE_FILTER_COUNT = Math.min(80, filteredValidImgs.length);
+        if (filteredValidImgs.length > PRE_FILTER_COUNT * 2) {
+          const targetL = tf.lab[0];
+          let lo = 0, hi = sortedByL.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (filteredImgFeatures[sortedByL[mid]].lab[0] < targetL) lo = mid + 1; else hi = mid;
+          }
+          const windowStart = Math.max(0, lo - PRE_FILTER_COUNT / 2);
+          const windowEnd = Math.min(sortedByL.length, windowStart + PRE_FILTER_COUNT * 2);
+          candidateIndices = sortedByL.slice(windowStart, windowEnd)
+            .map(j => {
+              const [dL,dA,dB] = [tf.lab[0]-filteredImgFeatures[j].lab[0], tf.lab[1]-filteredImgFeatures[j].lab[1], tf.lab[2]-filteredImgFeatures[j].lab[2]];
+              return { j, dist: dL*dL + dA*dA + dB*dB };
+            })
+            .sort((a, b) => a.dist - b.dist)
+            .slice(0, PRE_FILTER_COUNT)
+            .map(x => x.j);
+        } else {
+          candidateIndices = Array.from({ length: filteredValidImgs.length }, (_, i) => i);
+        }
       }
 
       let bestIdx = 0, bestDist = Infinity, bestRot = 0;
