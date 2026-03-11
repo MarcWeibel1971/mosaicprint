@@ -522,6 +522,10 @@ export default function Studio() {
       const W_EDGE = IS_7D ? 30.0 : 0;       // shape priority: 30× LAB weight
       const W_BRIGHT = IS_7D ? 20.0 : 0;     // brightness: 20× LAB weight
       const W_SAT = IS_7D ? 10.0 : 0;        // saturation: 10× LAB weight
+      // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
+      // This prevents the 55% gray tiles from dominating colorful cells
+      // Penalty scales with target saturation: more colorful cell = stronger gray penalty
+      const GRAY_PENALTY = IS_7D ? Math.max(0, (targetSat - 0.15) * 200) : 0;
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
@@ -540,6 +544,8 @@ export default function Studio() {
           const dBright = targetBrightness - brightness;
           const dSat = targetSat - sat;
           dist += W_EDGE*dEdge*dEdge + W_BRIGHT*dBright*dBright + W_SAT*dSat*dSat;
+          // Gray-penalty: penalize gray tiles when target is colorful
+          if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
         }
         if (heap.length < TOP_K) {
           heap.push({ tileId: id, labDist: dist });
