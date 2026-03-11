@@ -27,18 +27,28 @@ export async function renderMosaicOnServer(params: {
   // Fetch all tile buffers in parallel (max 30 concurrent)
   const CONCURRENCY = 30;
 
-  // Upgrade Picsum URLs to high-resolution source (400px) for crisp tiles
-  // picsum.photos/id/X/80/80 → picsum.photos/id/X/400/400
+  // Upgrade tile URLs to higher resolution for crisp mosaic output
+  // Picsum: /id/X/80/80 → /id/X/400/400
+  // Pexels: small (320px) → medium (1260px)
+  // Unsplash: thumb (200px) → regular (1080px)
   function upgradeUrl(url: string): string {
-    // Match picsum.photos/id/NUMBER/WIDTH/HEIGHT pattern
+    // Picsum: picsum.photos/id/NUMBER/WIDTH/HEIGHT pattern
     const picsumMatch = url.match(/picsum\.photos\/id\/([0-9]+)\/[0-9]+\/[0-9]+/);
     if (picsumMatch) {
       return `https://picsum.photos/id/${picsumMatch[1]}/400/400`;
     }
-    // Match picsum.photos/NUMBER/WIDTH/HEIGHT pattern
     const picsumMatch2 = url.match(/picsum\.photos\/([0-9]+)\/[0-9]+\/[0-9]+/);
     if (picsumMatch2) {
       return `https://picsum.photos/${picsumMatch2[1]}/400/400`;
+    }
+    // Pexels: upgrade small → medium for better quality
+    if (url.includes('images.pexels.com') && url.includes('auto=compress')) {
+      // Replace w=NNN&h=NNN with w=400&h=400 or remove size constraints
+      return url.replace(/[?&]w=[0-9]+/g, '').replace(/[?&]h=[0-9]+/g, '') + '&w=400&h=400';
+    }
+    // Unsplash: upgrade thumb to regular (1080px wide)
+    if (url.includes('images.unsplash.com') && (url.includes('w=200') || url.includes('q=80&w=200') || url.includes('thumb'))) {
+      return url.replace(/[?&]w=[0-9]+/g, '').replace(/[?&]h=[0-9]+/g, '').replace(/[?&]q=[0-9]+/g, '') + '&w=400&q=85';
     }
     return url;
   }

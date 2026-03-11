@@ -88,20 +88,47 @@ export async function getAdminImages(opts: {
   const pool = getPool();
   const offset = (opts.page - 1) * opts.pageSize;
   const conditions: string[] = [];
-  if (opts.brightnessFilter === "dark") conditions.push("avg_l < 40");
-  else if (opts.brightnessFilter === "mid") conditions.push("avg_l >= 40 AND avg_l <= 70");
-  else if (opts.brightnessFilter === "bright") conditions.push("avg_l > 70");
-  if (opts.colorFilter === "red") conditions.push("avg_a > 15");
-  else if (opts.colorFilter === "green") conditions.push("avg_a < -10");
-  else if (opts.colorFilter === "blue") conditions.push("avg_b < -10");
-  else if (opts.colorFilter === "yellow") conditions.push("avg_b > 15");
-  else if (opts.colorFilter === "neutral") conditions.push("ABS(avg_a) <= 10 AND ABS(avg_b) <= 10");
+  // Brightness filter
+  if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
+  else if (opts.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
+  else if (opts.brightnessFilter === "hell") conditions.push("avg_l > 65");
+  // Color filter (matching LAB color classification used in getDbStats)
+  if (opts.colorFilter === "schwarz") conditions.push("avg_l < 25");
+  else if (opts.colorFilter === "weiss") conditions.push("avg_l > 80");
+  else if (opts.colorFilter === "grau") conditions.push("ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80");
+  else if (opts.colorFilter === "rot") conditions.push("avg_a > 20");
+  else if (opts.colorFilter === "orange") conditions.push("avg_a > 10 AND avg_b > 10 AND avg_a <= 20");
+  else if (opts.colorFilter === "gelb") conditions.push("avg_b > 20 AND avg_a <= 10");
+  else if (opts.colorFilter === "cyan") conditions.push("avg_a < -10 AND avg_b < -5");
+  else if (opts.colorFilter === "gruen") conditions.push("avg_a < -10 AND avg_b >= -5");
+  else if (opts.colorFilter === "blau") conditions.push("avg_b < -15 AND avg_a >= -10");
+  else if (opts.colorFilter === "violett") conditions.push("avg_a > 10 AND avg_b < 0 AND avg_a <= 20");
+  else if (opts.colorFilter === "pink") conditions.push("avg_a > 10 AND avg_b >= 0 AND avg_a <= 20");
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images ${where}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
   const res = await pool.query(
     `SELECT id, source_url as "sourceUrl", tile128_url as "tile128Url",
-      avg_l as "avgL", avg_a as "avgA", avg_b as "avgB", created_at as "createdAt"
+      avg_l as "avgL", avg_a as "avgA", avg_b as "avgB", created_at as "createdAt",
+      CASE
+        WHEN avg_l < 25 THEN 'schwarz'
+        WHEN avg_l > 80 THEN 'weiss'
+        WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'grau'
+        WHEN avg_a > 20 THEN 'rot'
+        WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
+        WHEN avg_b > 20 THEN 'gelb'
+        WHEN avg_a < -10 AND avg_b < -5 THEN 'cyan'
+        WHEN avg_a < -10 THEN 'gruen'
+        WHEN avg_b < -15 THEN 'blau'
+        WHEN avg_a > 10 AND avg_b < 0 THEN 'violett'
+        WHEN avg_a > 10 THEN 'pink'
+        ELSE 'grau'
+      END as "colorCategory",
+      CASE
+        WHEN avg_l < 35 THEN 'Dunkel'
+        WHEN avg_l > 65 THEN 'Hell'
+        ELSE 'Mittel'
+      END as "brightnessCategory"
     FROM mosaic_images ${where} ORDER BY id DESC LIMIT $1 OFFSET $2`,
     [opts.pageSize, offset]
   );
