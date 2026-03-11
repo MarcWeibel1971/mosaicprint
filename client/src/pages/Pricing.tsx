@@ -1,215 +1,329 @@
 import { Link } from "react-router-dom";
-import { Check, Printer, Download, ArrowRight, ExternalLink, Grid3X3 } from "lucide-react";
+import { Check, ArrowRight } from "lucide-react";
 
-const FORMATS = [
+const PACKAGES = [
   {
-    size: "20×20 cm",
-    pixels: "2362×2362 px",
-    price: 29,
-    popular: false,
-    desc: "Ideal für Schreibtisch oder Regal",
-  },
-  {
-    size: "30×30 cm",
-    pixels: "3543×3543 px",
+    name: "Starter",
+    subtitle: "Perfekt für ein erstes Mosaik",
     price: 49,
-    popular: true,
-    desc: "Bestseller – perfekt für Wohnzimmer",
+    color: "#0f172a",
+    highlight: false,
+    features: [
+      "50×50 Tiles",
+      "A3-Format (30×42 cm)",
+      "Fotopapier-Druck",
+      "Lieferung in 5 Werktagen",
+      "Digitale Vorschau",
+    ],
+    cta: "Auswählen",
+    ctaStyle: "outline",
   },
   {
-    size: "40×40 cm",
-    pixels: "4724×4724 px",
-    price: 69,
-    popular: false,
-    desc: "Imposant & detailreich",
+    name: "Premium",
+    subtitle: "Das beliebteste Paket",
+    price: 89,
+    color: "#f97316",
+    highlight: true,
+    badge: "BELIEBTESTE WAHL",
+    features: [
+      "100×100 Tiles",
+      "A2-Format (42×60 cm)",
+      "Leinwand oder Alu-Dibond",
+      "Lieferung in 48h",
+      "Digitale Vorschau",
+      "Unbegrenzte Korrekturen",
+    ],
+    cta: "Jetzt bestellen",
+    ctaStyle: "filled",
   },
   {
-    size: "50×70 cm",
-    pixels: "5906×8268 px",
-    price: 99,
-    popular: false,
-    desc: "Galerie-Format für grosse Wände",
-  },
-  {
-    size: "70×70 cm",
-    pixels: "8268×8268 px",
-    price: 139,
-    popular: false,
-    desc: "Maximale Wirkung",
-  },
-  {
-    size: "100×100 cm",
-    pixels: "11811×11811 px",
-    price: 199,
-    popular: false,
-    desc: "Statement-Piece für besondere Räume",
+    name: "Galerie",
+    subtitle: "Für Kunstliebhaber",
+    price: 149,
+    color: "#6366f1",
+    highlight: false,
+    features: [
+      "200×200 Tiles",
+      "A1-Format (60×84 cm)",
+      "Museum-Leinwand mit Rahmen",
+      "Express-Lieferung in 24h",
+      "Digitale Vorschau",
+      "Unbegrenzte Korrekturen",
+      "Persönliche Beratung",
+    ],
+    cta: "Auswählen",
+    ctaStyle: "outline",
   },
 ];
 
-const MATERIALS = [
+const TESTIMONIALS = [
   {
-    name: "Leinwand",
-    desc: "Klassisch & warm. Gespannt auf Holzrahmen, bereit zum Aufhängen.",
-    surcharge: 0,
-    icon: "🖼️",
+    name: "Sarah M.",
+    location: "Zürich",
+    text: "Das Mosaik aus unseren Urlaubsfotos ist ein absolutes Highlight in unserem Wohnzimmer. Jeder Gast fragt danach!",
+    rating: 5,
   },
   {
-    name: "Acrylglas",
-    desc: "Modern & glänzend. Brillante Farben, tiefe Kontraste, premium Auftritt.",
-    surcharge: 20,
-    icon: "✨",
+    name: "Thomas K.",
+    location: "Bern",
+    text: "Zum Geburtstag meiner Frau bestellt – sie war zu Tränen gerührt. Die Qualität ist aussergewöhnlich.",
+    rating: 5,
   },
   {
-    name: "Alu-Dibond",
-    desc: "Zeitlos & robust. Matte oder glänzende Oberfläche, extrem langlebig.",
-    surcharge: 15,
-    icon: "🔲",
+    name: "Lisa R.",
+    location: "Basel",
+    text: "Schnelle Lieferung, perfekte Qualität. Das Hochzeitsmosaik ist genau so geworden wie ich es mir vorgestellt habe.",
+    rating: 5,
   },
-  {
-    name: "Fotopapier",
-    desc: "Klassischer Fotoabzug. Ideal zum Einrahmen oder als Poster.",
-    surcharge: -10,
-    icon: "📄",
-  },
-];
-
-const INCLUDED = [
-  "Hochauflösende Mosaik-Generierung",
-  "Unbegrenzte Vorschau & Anpassungen",
-  "Digitaler Download (PNG) inklusive",
-  "Professioneller Druck durch Printolino.ch",
-  "Lieferung in die Schweiz, D, A",
-  "30 Tage Zufriedenheitsgarantie",
 ];
 
 export default function Pricing() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-brand-50 py-16">
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="text-center mb-14">
-          <h1 className="text-4xl font-extrabold text-gray-900 mb-4">Preise & Formate</h1>
-          <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-            Transparente Preise, keine versteckten Kosten. Vorschau immer kostenlos.
+    <div style={{ background: "#fff", minHeight: "100vh" }}>
+
+      {/* ── HERO: Preise ── light background */}
+      <section style={{ background: "#f8fafc", padding: "80px 24px 100px", textAlign: "center" }}>
+        <div style={{ maxWidth: 700, margin: "0 auto" }}>
+          <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+            PREISE
+          </p>
+          <h1 style={{ fontSize: "clamp(2rem, 5vw, 3.2rem)", fontWeight: 800, color: "#0f172a", marginBottom: 20, lineHeight: 1.1 }}>
+            Einfache, transparente Preise
+          </h1>
+          <p style={{ color: "#64748b", fontSize: 18, maxWidth: 500, margin: "0 auto" }}>
+            Keine versteckten Kosten. Wähle das Paket, das zu deinem Projekt passt.
           </p>
         </div>
+      </section>
 
-        {/* Format grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-14">
-          {FORMATS.map(({ size, pixels, price, popular, desc }) => (
-            <div
-              key={size}
-              className={`relative bg-white rounded-2xl p-6 border-2 transition-all hover:shadow-lg ${
-                popular ? "border-brand-500 shadow-md" : "border-gray-100 hover:border-brand-200"
-              }`}
-            >
-              {popular && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-brand-600 text-white text-xs font-bold px-3 py-1 rounded-full">
-                  Bestseller
+      {/* ── PRICING CARDS ── */}
+      <section style={{ background: "#f8fafc", padding: "0 24px 80px" }}>
+        <div style={{
+          maxWidth: 1000,
+          margin: "0 auto",
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          gap: 24,
+          alignItems: "start",
+        }}>
+          {PACKAGES.map((pkg) => (
+            <div key={pkg.name} style={{
+              background: "#fff",
+              border: pkg.highlight ? `2px solid ${pkg.color}` : "1px solid #e2e8f0",
+              borderRadius: 20,
+              padding: "32px 28px",
+              position: "relative",
+              boxShadow: pkg.highlight ? "0 8px 32px rgba(249,115,22,0.15)" : "none",
+            }}>
+              {pkg.badge && (
+                <div style={{
+                  position: "absolute",
+                  top: -14,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  background: "linear-gradient(135deg, #f97316, #ec4899)",
+                  color: "#fff",
+                  fontSize: 11,
+                  fontWeight: 800,
+                  padding: "4px 14px",
+                  borderRadius: 20,
+                  letterSpacing: "0.08em",
+                  whiteSpace: "nowrap",
+                }}>
+                  {pkg.badge}
                 </div>
               )}
-              <div className="text-2xl font-extrabold text-gray-900 mb-1">{size}</div>
-              <div className="text-xs text-gray-400 mb-3 font-mono">{pixels}</div>
-              <div className="text-3xl font-extrabold text-brand-700 mb-1">CHF {price}</div>
-              <div className="text-sm text-gray-500 mb-4">{desc}</div>
-              <Link
-                to="/studio"
-                className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm transition-all ${
-                  popular
-                    ? "bg-gradient-to-r from-brand-500 to-brand-700 text-white hover:from-brand-600 hover:to-brand-800 shadow-sm"
-                    : "bg-brand-50 text-brand-700 hover:bg-brand-100"
-                }`}
-              >
-                <Printer className="w-4 h-4" />
-                Dieses Format wählen
+
+              <h2 style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>
+                {pkg.name}
+              </h2>
+              <p style={{ color: "#64748b", fontSize: 14, marginBottom: 24 }}>
+                {pkg.subtitle}
+              </p>
+
+              <div style={{ marginBottom: 28 }}>
+                <span style={{ fontSize: 42, fontWeight: 800, color: pkg.color }}>
+                  CHF {pkg.price}
+                </span>
+                <span style={{ color: "#94a3b8", fontSize: 14, marginLeft: 6 }}>pro Mosaik</span>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 32 }}>
+                {pkg.features.map((f) => (
+                  <div key={f} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{
+                      width: 20, height: 20, borderRadius: "50%",
+                      border: `2px solid ${pkg.color}`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      flexShrink: 0,
+                    }}>
+                      <Check size={11} color={pkg.color} strokeWidth={3} />
+                    </div>
+                    <span style={{ color: "#374151", fontSize: 14 }}>{f}</span>
+                  </div>
+                ))}
+              </div>
+
+              <Link to="/studio" style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+                padding: "14px 24px",
+                borderRadius: 50,
+                fontWeight: 700,
+                fontSize: 15,
+                textDecoration: "none",
+                ...(pkg.ctaStyle === "filled"
+                  ? {
+                      background: "linear-gradient(135deg, #f97316, #ec4899)",
+                      color: "#fff",
+                      border: "none",
+                      boxShadow: "0 4px 16px rgba(249,115,22,0.3)",
+                    }
+                  : {
+                      background: "transparent",
+                      color: "#0f172a",
+                      border: "1.5px solid #e2e8f0",
+                    }),
+              }}>
+                {pkg.cta} <ArrowRight size={15} />
               </Link>
             </div>
           ))}
         </div>
+      </section>
 
-        {/* Materials */}
-        <div className="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 mb-10">
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Materialien</h2>
-          <p className="text-gray-500 mb-6">Wähle das Material, das zu deinem Raum passt.</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {MATERIALS.map(({ name, desc, surcharge, icon }) => (
-              <div key={name} className="flex gap-4 p-4 rounded-xl border border-gray-100 hover:border-brand-200 transition-colors">
-                <div className="text-3xl">{icon}</div>
-                <div className="flex-1">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-bold text-gray-900">{name}</span>
-                    <span className={`text-sm font-semibold ${surcharge > 0 ? "text-orange-600" : surcharge < 0 ? "text-green-600" : "text-gray-500"}`}>
-                      {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `−CHF ${Math.abs(surcharge)}` : "Inklusive"}
-                    </span>
-                  </div>
-                  <p className="text-sm text-gray-500">{desc}</p>
+      {/* ── MATERIALIEN ── dark background */}
+      <section style={{
+        background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+        padding: "80px 24px",
+      }}>
+        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+          <div style={{ textAlign: "center", marginBottom: 48 }}>
+            <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+              MATERIALIEN
+            </p>
+            <h2 style={{ color: "#fff", fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontWeight: 800, marginBottom: 12 }}>
+              Wähle dein Material
+            </h2>
+            <p style={{ color: "#94a3b8", fontSize: 16 }}>
+              Alle Materialien sind UV-beständig und für die Ewigkeit gemacht.
+            </p>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 20 }}>
+            {[
+              { icon: "🖼️", name: "Leinwand", desc: "Klassisch & warm. Gespannt auf Holzrahmen.", price: "Im Preis" },
+              { icon: "✨", name: "Acrylglas", desc: "Modern & glänzend. Brillante Farben.", price: "+CHF 20" },
+              { icon: "🔲", name: "Alu-Dibond", desc: "Zeitlos & robust. Extrem langlebig.", price: "+CHF 15" },
+              { icon: "📄", name: "Fotopapier", desc: "Klassischer Fotoabzug. Ideal zum Einrahmen.", price: "−CHF 10" },
+            ].map((m) => (
+              <div key={m.name} style={{
+                background: "rgba(255,255,255,0.05)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 16,
+                padding: "24px 20px",
+                textAlign: "center",
+              }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>{m.icon}</div>
+                <h3 style={{ color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{m.name}</h3>
+                <p style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.5, marginBottom: 12 }}>{m.desc}</p>
+                <span style={{
+                  color: m.price.startsWith("+") ? "#f97316" : m.price.startsWith("−") ? "#22c55e" : "#94a3b8",
+                  fontSize: 13, fontWeight: 700,
+                }}>
+                  {m.price}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── TESTIMONIALS ── light background */}
+      <section style={{ background: "#f8fafc", padding: "80px 24px" }}>
+        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+          <div style={{ textAlign: "center", marginBottom: 48 }}>
+            <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+              KUNDENSTIMMEN
+            </p>
+            <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontWeight: 800, color: "#0f172a" }}>
+              Was unsere Kunden sagen
+            </h2>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 24 }}>
+            {TESTIMONIALS.map((t) => (
+              <div key={t.name} style={{
+                background: "#fff",
+                border: "1px solid #e2e8f0",
+                borderRadius: 16,
+                padding: "28px 24px",
+              }}>
+                <div style={{ display: "flex", gap: 2, marginBottom: 16 }}>
+                  {Array.from({ length: t.rating }).map((_, i) => (
+                    <span key={i} style={{ color: "#f97316", fontSize: 16 }}>★</span>
+                  ))}
+                </div>
+                <p style={{ color: "#374151", fontSize: 15, lineHeight: 1.7, marginBottom: 20, fontStyle: "italic" }}>
+                  "{t.text}"
+                </p>
+                <div>
+                  <span style={{ fontWeight: 700, color: "#0f172a", fontSize: 14 }}>{t.name}</span>
+                  <span style={{ color: "#94a3b8", fontSize: 13, marginLeft: 6 }}>— {t.location}</span>
                 </div>
               </div>
             ))}
           </div>
         </div>
+      </section>
 
-        {/* What's included */}
-        <div className="bg-gradient-to-br from-brand-50 to-blue-50 rounded-2xl p-8 border border-brand-100 mb-10">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6">Immer inklusive</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {INCLUDED.map((item) => (
-              <div key={item} className="flex items-center gap-3">
-                <div className="w-5 h-5 rounded-full bg-brand-600 flex items-center justify-center flex-shrink-0">
-                  <Check className="w-3 h-3 text-white" />
+      {/* ── INKLUSIVE ── white */}
+      <section style={{ background: "#fff", padding: "60px 24px" }}>
+        <div style={{ maxWidth: 700, margin: "0 auto", textAlign: "center" }}>
+          <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2rem)", fontWeight: 800, color: "#0f172a", marginBottom: 32 }}>
+            Immer inklusive
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 48 }}>
+            {[
+              "Hochauflösende Mosaik-Generierung",
+              "Unbegrenzte Vorschau & Anpassungen",
+              "Digitaler Download (PNG) inklusive",
+              "Professioneller Druck in der Schweiz",
+              "Lieferung in die Schweiz, D, A",
+              "30 Tage Zufriedenheitsgarantie",
+            ].map((item) => (
+              <div key={item} style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left" }}>
+                <div style={{
+                  width: 22, height: 22, borderRadius: "50%",
+                  background: "linear-gradient(135deg, #f97316, #ec4899)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  flexShrink: 0,
+                }}>
+                  <Check size={12} color="#fff" strokeWidth={3} />
                 </div>
-                <span className="text-gray-700 text-sm">{item}</span>
+                <span style={{ color: "#374151", fontSize: 14 }}>{item}</span>
               </div>
             ))}
           </div>
-        </div>
 
-        {/* Digital download option */}
-        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-10 flex items-center gap-5">
-          <div className="w-12 h-12 rounded-xl bg-green-50 flex items-center justify-center flex-shrink-0">
-            <Download className="w-6 h-6 text-green-600" />
-          </div>
-          <div className="flex-1">
-            <h3 className="font-bold text-gray-900 mb-1">Nur digitaler Download</h3>
-            <p className="text-sm text-gray-500">Möchtest du das Mosaik selbst drucken? Lade die hochauflösende PNG-Datei für CHF 9.90 herunter.</p>
-          </div>
-          <Link
-            to="/studio"
-            className="flex-shrink-0 bg-green-50 text-green-700 hover:bg-green-100 font-semibold px-4 py-2 rounded-xl text-sm transition-colors"
-          >
-            CHF 9.90
+          <Link to="/studio" style={{
+            display: "inline-flex", alignItems: "center", gap: 8,
+            background: "linear-gradient(135deg, #f97316, #ec4899)",
+            color: "#fff", fontWeight: 700, fontSize: 17,
+            padding: "16px 36px", borderRadius: 50,
+            textDecoration: "none",
+            boxShadow: "0 8px 24px rgba(249,115,22,0.3)",
+          }}>
+            Kostenlose Vorschau erstellen <ArrowRight size={18} />
           </Link>
+          <p style={{ color: "#94a3b8", fontSize: 13, marginTop: 12 }}>
+            Keine Registrierung · Vorschau kostenlos · Erst beim Bestellen zahlen
+          </p>
         </div>
+      </section>
 
-        {/* Printolino partner */}
-        <div className="bg-gray-900 rounded-2xl p-6 text-white flex items-center gap-5 mb-10">
-          <div className="text-4xl">🇨🇭</div>
-          <div className="flex-1">
-            <h3 className="font-bold mb-1">Druckpartner: Printolino.ch</h3>
-            <p className="text-sm text-gray-300">Schweizer Qualität, produziert in der Schweiz. Printolino.ch ist einer der führenden Fotodruck-Anbieter der Schweiz.</p>
-          </div>
-          <a
-            href="https://www.printolino.ch"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex-shrink-0 flex items-center gap-1.5 bg-white/10 hover:bg-white/20 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors"
-          >
-            <ExternalLink className="w-4 h-4" />
-            printolino.ch
-          </a>
-        </div>
-
-        <div className="text-center">
-          <Link
-            to="/studio"
-            className="inline-flex items-center gap-2 bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-600 hover:to-brand-800 text-white font-bold text-lg px-8 py-4 rounded-2xl shadow-lg hover:shadow-xl transition-all"
-          >
-            <Grid3X3 className="w-5 h-5" />
-            Kostenlose Vorschau erstellen
-            <ArrowRight className="w-5 h-5" />
-          </Link>
-          <p className="text-gray-400 text-sm mt-3">Keine Registrierung · Vorschau kostenlos · Erst beim Bestellen zahlen</p>
-        </div>
-      </div>
     </div>
   );
 }
