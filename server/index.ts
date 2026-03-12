@@ -163,9 +163,15 @@ app.get("/api/tile/:id", async (req, res) => {
       res.set("Cache-Control", "public, max-age=86400");
       return res.send(buf);
     }
-    // Otherwise redirect to the external URL
+    // Proxy the image directly to avoid CORS issues (Pixabay, Pexels, Unsplash)
     res.set("Cache-Control", "public, max-age=86400");
-    res.redirect(302, url);
+    res.set("Access-Control-Allow-Origin", "*");
+    const upstream = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' } });
+    if (!upstream.ok) return res.status(upstream.status).json({ error: "Upstream error" });
+    const contentType = upstream.headers.get("content-type") || "image/jpeg";
+    res.set("Content-Type", contentType);
+    const buf = await upstream.arrayBuffer();
+    return res.send(Buffer.from(buf));
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

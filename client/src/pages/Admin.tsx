@@ -1009,10 +1009,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 
   const handlePdfExport = useCallback(async () => {
     setPdfExporting(true)
-    onMessage({ text: 'PDF wird generiert... (kann 30–60s dauern)', type: 'info' })
+    onMessage({ text: 'PDF wird generiert – Bilder werden geladen...', type: 'info' })
     try {
-      // Fetch all images (up to 2000) for the PDF
-      const params: Record<string, string | number> = { page: 1, limit: 2000 }
+      // Fetch ALL images (no pagination limit – fetch all pages)
+      const params: Record<string, string | number> = { page: 1, limit: 5000 }
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
@@ -1022,14 +1022,43 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const parsed = data.result?.data ?? data
       const allImages: TileImage[] = parsed.images ?? []
 
+      if (allImages.length === 0) {
+        onMessage({ text: 'Keine Tiles gefunden für den Export', type: 'error' })
+        return
+      }
+
+      // Pre-load all images in parallel batches of 30
+      const BATCH = 30
+      const b64Map = new Map<number, string>()
+      for (let i = 0; i < allImages.length; i += BATCH) {
+        const batch = allImages.slice(i, i + BATCH)
+        const pct = Math.round((i / allImages.length) * 80)
+        onMessage({ text: `PDF: Lade Bilder... ${pct}% (${i}/${allImages.length})`, type: 'info' })
+        await Promise.all(batch.map(async (img) => {
+          try {
+            const imgRes = await fetch(`/api/tile/${img.id}?size=64`)
+            if (!imgRes.ok) return
+            const blob = await imgRes.blob()
+            const b64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader()
+              reader.onload = () => resolve(reader.result as string)
+              reader.onerror = reject
+              reader.readAsDataURL(blob)
+            })
+            b64Map.set(img.id, b64)
+          } catch { /* skip failed images */ }
+        }))
+      }
+
+      onMessage({ text: `PDF: Erstelle Dokument (${allImages.length} Tiles)...`, type: 'info' })
       const { jsPDF } = await import('jspdf')
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       const pageW = 210, pageH = 297
       const margin = 10
       const tileSize = 18  // mm per tile
-      const cols = Math.floor((pageW - 2 * margin) / tileSize)
-      const rowH = tileSize + 8  // tile + label area
-      const headerH = 20
+      const gap = 1
+      const rowH = tileSize + 10  // tile + label area
+      const headerH = 14
 
       // Title page
       doc.setFontSize(20)
@@ -1038,11 +1067,13 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       doc.setFontSize(10)
       doc.setTextColor(100, 100, 100)
       const filterDesc = [sourceFilter !== 'alle' ? `Quelle: ${sourceFilter}` : '', colorFilter !== 'alle' ? `Farbe: ${colorFilter}` : '', brightnessFilter !== 'alle' ? `Helligkeit: ${brightnessFilter}` : ''].filter(Boolean).join(' · ') || 'Alle Tiles'
-      doc.text(`${allImages.length.toLocaleString()} Tiles · ${filterDesc}`, pageW / 2, 40, { align: 'center' })
-      doc.text(`Generiert: ${new Date().toLocaleDateString('de-CH')}`, pageW / 2, 47, { align: 'center' })
+      doc.text(`${allImages.length.toLocaleString()} Tiles · ${filterDesc}`, pageW / 2, 42, { align: 'center' })
+      doc.text(`Generiert: ${new Date().toLocaleDateString('de-CH')}`, pageW / 2, 50, { align: 'center' })
+      doc.text(`Geladen: ${b64Map.size} von ${allImages.length} Bildern`, pageW / 2, 58, { align: 'center' })
 
       // Grid pages
-      let x = margin, y = headerH + margin
+      let x = margin
+      let y = headerH + margin
       let pageNum = 1
       doc.addPage()
 
@@ -1057,34 +1088,31 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 
       for (let i = 0; i < allImages.length; i++) {
         const img = allImages[i]
-        // Load image as base64 via /api/tile/:id
-        try {
-          const imgRes = await fetch(`/api/tile/${img.id}?size=64`)
-          const blob = await imgRes.blob()
-          const b64 = await new Promise<string>((resolve) => {
-            const reader = new FileReader()
-            reader.onload = () => resolve(reader.result as string)
-            reader.readAsDataURL(blob)
-          })
-          doc.addImage(b64, 'JPEG', x, y, tileSize, tileSize)
-        } catch {
-          // Draw placeholder if image fails
-          doc.setFillColor(230, 230, 230)
+        const b64 = b64Map.get(img.id)
+        if (b64) {
+          try { doc.addImage(b64, 'JPEG', x, y, tileSize, tileSize) } catch {
+            doc.setFillColor(230, 230, 230); doc.rect(x, y, tileSize, tileSize, 'F')
+          }
+        } else {
+          // Placeholder for failed images
+          doc.setFillColor(220, 220, 220)
           doc.rect(x, y, tileSize, tileSize, 'F')
+          doc.setFontSize(4); doc.setTextColor(150, 150, 150)
+          doc.text('?', x + tileSize / 2, y + tileSize / 2, { align: 'center' })
         }
 
         // Labels below tile
         doc.setFontSize(4.5)
         doc.setTextColor(80, 80, 80)
-        const colorLabel = COLOR_LABELS[img.colorCategory ?? '']?.label ?? ''
+        const colorLabel = COLOR_LABELS[img.colorCategory ?? '']?.label ?? img.colorCategory ?? ''
         const brightLabel = img.brightnessCategory ?? ''
         doc.text(`#${img.id}`, x + tileSize / 2, y + tileSize + 2.5, { align: 'center' })
         doc.setTextColor(120, 120, 120)
-        doc.text(`${colorLabel}`, x + tileSize / 2, y + tileSize + 5, { align: 'center' })
+        doc.text(colorLabel, x + tileSize / 2, y + tileSize + 5, { align: 'center' })
         doc.text(`L:${img.avgL.toFixed(0)} a:${img.avgA.toFixed(0)} b:${img.avgB.toFixed(0)}`, x + tileSize / 2, y + tileSize + 7.5, { align: 'center' })
-        doc.text(`${brightLabel}`, x + tileSize / 2, y + tileSize + 10, { align: 'center' })
+        doc.text(brightLabel, x + tileSize / 2, y + tileSize + 10, { align: 'center' })
 
-        x += tileSize + 1
+        x += tileSize + gap
         if (x + tileSize > pageW - margin) {
           x = margin
           y += rowH
@@ -1100,7 +1128,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 
       const filename = `mosaicprint-tiles-${new Date().toISOString().slice(0, 10)}.pdf`
       doc.save(filename)
-      onMessage({ text: `✅ PDF mit ${allImages.length} Tiles exportiert`, type: 'success' })
+      onMessage({ text: `✅ PDF mit ${allImages.length} Tiles exportiert (${pageNum} Seiten)`, type: 'success' })
     } catch (e) {
       onMessage({ text: `❌ PDF-Fehler: ${String(e)}`, type: 'error' })
     } finally {
