@@ -114,14 +114,23 @@ const LOW_SAT_KEYWORDS = [
   "gray texture abstract", "concrete wall closeup", "beige minimal background",
   "light gray smooth surface", "dark gray stone texture", "silver metal surface",
   "white paper texture", "pale linen fabric", "off-white wall texture",
-  // Skin-tone neutrals
+  // Skin-tone neutrals (FIX C: expanded for better portrait matching)
   "skin tone neutral background", "warm beige bokeh", "soft peach background",
   "nude color minimal", "warm ivory texture", "blush pink neutral",
+  "human skin texture closeup", "skin pore closeup macro", "warm tan skin",
+  "peach cream background soft", "warm caramel texture", "light brown smooth",
+  "sand beach closeup warm", "warm wood grain light", "honey golden texture",
+  "terracotta clay texture", "rose gold minimal", "warm amber bokeh",
+  // Portrait-specific warm tones
+  "portrait studio warm light", "golden hour skin glow", "warm sunset portrait",
+  "soft focus portrait warm", "natural skin glow", "warm candlelight face",
   // High-key / low-key
   "high key portrait background", "pure black background abstract",
   "bright white overexposed", "deep shadow abstract minimal",
+  "soft gray gradient background", "neutral studio backdrop",
   // Desaturated nature
   "black white bokeh", "monochrome fog landscape", "grayscale water reflection",
+  "desaturated autumn leaves", "muted earth tones", "warm sepia texture",
 ];
 
 // HIGH_SAT_KEYWORDS: Vivid, saturated images – critical for colorful mosaics

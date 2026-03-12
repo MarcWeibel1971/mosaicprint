@@ -366,25 +366,37 @@ export default function Studio() {
       hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
       hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
       const hCtx = hc.getContext('2d')!;
-      // Load tiles at the appropriate resolution tier
-      const hiResImgs: (HTMLImageElement | null)[] = [];
-      const urlsToLoad = tileIdsRef.current.length > 0
-        ? tileIdsRef.current.map(id => id > 0 ? `/api/tile/${id}?size=${HIREZ_PX}` : '')
-        : validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
-      const BATCH = 20;
-      for (let i = 0; i < urlsToLoad.length; i += BATCH) {
-        const batch = await Promise.all(
-          urlsToLoad.slice(i, i + BATCH).map(u => u ? loadImageCached(u, 8000) : Promise.resolve(null))
-        );
-        hiResImgs.push(...batch);
-        await new Promise(r => setTimeout(r, 0));
-      }
-      // Draw hi-res tiles
       const assignment = assignmentRef.current;
       const TOTAL = cols * rows;
+
+      // FIX A: Load only UNIQUE tile indices (deduplicate) – massive speedup
+      // A 60×60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
+      const uniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
+      const allUrls = tileIdsRef.current.length > 0
+        ? tileIdsRef.current.map(id => id > 0 ? `/api/tile/${id}?size=${HIREZ_PX}` : '')
+        : validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
+
+      // Map: tile index → loaded hi-res image
+      const hiResImgMap = new Map<number, HTMLImageElement>();
+      const BATCH = 40; // larger batch since we load fewer images
+      for (let i = 0; i < uniqueIndices.length; i += BATCH) {
+        const batchIndices = uniqueIndices.slice(i, i + BATCH);
+        const batchImgs = await Promise.all(
+          batchIndices.map(idx => {
+            const u = allUrls[idx];
+            return u ? loadImageCached(u, 8000) : Promise.resolve(null);
+          })
+        );
+        for (let j = 0; j < batchIndices.length; j++) {
+          if (batchImgs[j]) hiResImgMap.set(batchIndices[j], batchImgs[j]!);
+        }
+        await new Promise(r => setTimeout(r, 0));
+      }
+
+      // Draw hi-res tiles using the deduplicated map
       for (let ci = 0; ci < TOTAL; ci++) {
         const col = ci % cols, row = Math.floor(ci / cols);
-        const img = hiResImgs[assignment[ci]] || validImgsRef.current[assignment[ci]];
+        const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
         if (img && img.complete && img.naturalWidth > 0) {
           try {
             hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
@@ -474,30 +486,34 @@ export default function Studio() {
 
           setDetectedImageType(imageType);
 
-          // Step 4: Auto-apply optimal preset on EVERY upload
-          // The preset is always applied so the algorithm uses the best settings for the detected image type.
-          // Users can still override via Admin > Einstellungen – but each new upload resets to the optimal preset.
-          // This ensures: portrait → portrait-optimized weights, landscape → landscape weights.
+          // Step 4: Auto-apply optimal preset on EVERY upload.
+          // FIX B: Merge preset with existing Admin settings – Admin settings take priority.
+          // This means: if Admin set baseOverlay=0.35, the preset will NOT override it.
+          // Only keys NOT set in Admin (i.e. still at default) will be overridden by the preset.
+          const existingSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+          const mergeWithAdmin = (preset: Record<string, unknown>) => ({ ...preset, ...existingSettings });
+
           if (imageType === 'portrait') {
-            // Portrait preset: fine grid, strong saturation penalty, skin-tone boost
-            // wSat=0.45, wTexture=0.20 as recommended by algorithm review
+            // FIX B+D+E: Portrait preset with stronger L_BLEND (via histogramBlend=0.12)
+            // and smaller tilePx=12 for more detail in face regions
             const portraitPreset = {
               baseTiles: 65,          // Balanced: enough detail without too many repetitions
-              tilePx: 15,             // Slightly larger tiles = more recognizable photos
+              tilePx: 12,             // FIX E: smaller tiles = more cells = sharper face detail
               neighborRadius: 6,      // Wide anti-repetition radius for portrait
               neighborPenalty: 200,   // Strong anti-repetition → no flower-clusters in face
-              contrastBoost: 1.25,    // Stronger contrast for face clarity
-              histogramBlend: 0.09,   // Luminance + color correction for face visibility
-              baseOverlay: 0.35,      // Strong overlay to make face recognizable
-              edgeBoost: 0.15,        // Gentle edge boost
+              contrastBoost: 1.30,    // Stronger contrast for face clarity
+              histogramBlend: 0.12,   // FIX D: stronger L_BLEND (0.12→blendFactor=1.0→L_BLEND=0.70)
+              baseOverlay: 0.35,      // FIX B: Strong overlay – Admin can override this
+              edgeBoost: 0.20,        // Edge boost for eye/nose/mouth contours
               labWeight: 0.12,        // LAB less dominant – brightness + sat drive matching
               brightnessWeight: 0.45, // KEY: brightness drives face structure
               textureWeight: 0.20,    // Higher texture weight for skin/hair detail
               edgeWeight: 0.15,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.45, // NEW: strong saturation matching for portrait
+              saturationWeight: 0.45, // Strong saturation matching for portrait
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
-            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(portraitPreset));
+            // Merge: Admin settings override preset (Admin wins)
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(portraitPreset)));
             // Clear theme filter so ALL tiles are available for skin tone matching
             localStorage.removeItem('mosaicprint_selected_theme');
             setAutoPresetApplied('Portrait');
@@ -505,11 +521,11 @@ export default function Studio() {
             // Landscape preset: wider tiles, more color accuracy
             const landscapePreset = {
               baseTiles: 60,
-              tilePx: 18,             // Larger tiles for landscapes
+              tilePx: 16,             // Medium tiles for landscapes
               neighborRadius: 3,
               neighborPenalty: 120,
               contrastBoost: 1.15,
-              histogramBlend: 0.0,
+              histogramBlend: 0.05,
               baseOverlay: 0.12,
               edgeBoost: 0.18,
               labWeight: 0.20,
@@ -519,7 +535,7 @@ export default function Studio() {
               saturationWeight: 0.25,
               portraitMode: false,
             };
-            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(landscapePreset));
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(landscapePreset)));
             setAutoPresetApplied('Landschaft');
           } else {
             // Abstract/general preset
@@ -529,7 +545,7 @@ export default function Studio() {
               neighborRadius: 4,
               neighborPenalty: 160,
               contrastBoost: 1.20,
-              histogramBlend: 0.0,
+              histogramBlend: 0.05,
               baseOverlay: 0.12,
               edgeBoost: 0.18,
               labWeight: 0.18,
@@ -539,7 +555,7 @@ export default function Studio() {
               saturationWeight: 0.30,
               portraitMode: false,
             };
-            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(abstractPreset));
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(abstractPreset)));
             setAutoPresetApplied(null);
           }
         } catch (e) {
