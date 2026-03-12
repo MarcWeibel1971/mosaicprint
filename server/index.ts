@@ -660,6 +660,93 @@ app.get('/api/tile-atlas', async (req, res) => {
   }
 });
 
+// ── Server-side Print Render ──────────────────────────────────────────────────
+// POST /api/print-render
+// Body: { tileIds: number[], assignment: number[], cols: number, rows: number, tilePx?: number }
+// Returns: JPEG of the full-resolution mosaic (no watermark, 128px tiles)
+// This avoids loading thousands of hi-res images in the browser.
+app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) => {
+  try {
+    const { tileIds, assignment, cols, rows, tilePx = 128 } = req.body as {
+      tileIds: number[];
+      assignment: number[];
+      cols: number;
+      rows: number;
+      tilePx?: number;
+    };
+
+    if (!tileIds?.length || !assignment?.length || !cols || !rows) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const TILE_PX = Math.min(Math.max(tilePx, 64), 256);
+    const outW = cols * TILE_PX;
+    const outH = rows * TILE_PX;
+    const pool = db.getPool();
+
+    // Fetch unique tile IDs needed
+    const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
+    const result = await pool.query(
+      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id = ANY($1)`,
+      [uniqueIds]
+    );
+    const urlMap: Record<number, string> = {};
+    for (const row of result.rows) {
+      urlMap[row.id] = row.tile128_url || row.source_url || '';
+    }
+
+    // Load tile images in parallel batches
+    const tileBuffers: Record<number, Buffer> = {};
+    const CONCURRENCY = 20;
+    for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
+      const batch = uniqueIds.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (id) => {
+        const url = urlMap[id];
+        if (!url) return;
+        try {
+          // Check tile cache first
+          const cacheKey = `${id}-128`;
+          const cached = tileCacheMap.get(cacheKey);
+          if (cached) { tileBuffers[id] = cached.buf; return; }
+          if (url.startsWith('data:')) {
+            tileBuffers[id] = Buffer.from(url.split(',')[1], 'base64');
+          } else {
+            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
+            if (resp.ok) tileBuffers[id] = Buffer.from(await resp.arrayBuffer());
+          }
+        } catch { /* skip */ }
+      }));
+    }
+
+    // Build composite inputs for sharp
+    const compositeInputs: sharp.OverlayOptions[] = [];
+    for (let ci = 0; ci < cols * rows; ci++) {
+      const tileId = tileIds[assignment[ci]];
+      const buf = tileBuffers[tileId];
+      if (!buf) continue;
+      const col = ci % cols;
+      const row = Math.floor(ci / cols);
+      try {
+        const resized = await sharp(buf).resize(TILE_PX, TILE_PX, { fit: 'cover' }).jpeg({ quality: 85 }).toBuffer();
+        compositeInputs.push({ input: resized, top: row * TILE_PX, left: col * TILE_PX });
+      } catch { /* skip */ }
+    }
+
+    // Render final mosaic
+    const mosaicJpeg = await sharp({
+      create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } }
+    }).composite(compositeInputs).jpeg({ quality: 92 }).toBuffer();
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="mosaicprint-${outW}x${outH}-druckbereit.jpg"`);
+    res.setHeader('Content-Length', mosaicJpeg.length);
+    res.send(mosaicJpeg);
+  } catch (e) {
+    console.error('[print-render] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // tRPC API (for Admin panel)
 app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 

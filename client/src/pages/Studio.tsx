@@ -2067,80 +2067,94 @@ export default function Studio() {
     outCanvas.height = outH;
     const outCtx = outCanvas.getContext("2d")!;
 
-    if (paid && assignmentRef.current.length && validImgsRef.current.length && mosaicParamsRef.current) {
-      // PRINT MODE: re-render with high-res tiles (400px per tile)
+    if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
+      // PRINT MODE: server-side rendering via /api/print-render
+      // The server loads tiles from DB and renders the mosaic with sharp (no browser memory issues)
       const { cols, rows } = mosaicParamsRef.current;
       const PRINT_TILE_PX = Math.max(64, Math.floor(Math.min(outW / cols, outH / rows)));
-      const printW = cols * PRINT_TILE_PX;
-      const printH = rows * PRINT_TILE_PX;
-      const printCanvas = document.createElement("canvas");
-      printCanvas.width = printW; printCanvas.height = printH;
-      const pCtx = printCanvas.getContext("2d")!;
 
-      // Load hi-res tiles (400px from DB)
-      const hiResImgs: (HTMLImageElement | null)[] = [];
-      // Use DB tile IDs for print-quality loading if available
-      const urlsToLoad = tileIdsRef.current.length > 0
-        ? tileIdsRef.current.map(id => id > 0 ? `/api/tile/${id}?size=400` : '')
-        : validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, 400));
-      for (let i = 0; i < urlsToLoad.length; i += 20) {
-        const batch = await Promise.all(urlsToLoad.slice(i, i+20).map(u => loadImageCached(u, 10000)));
-        hiResImgs.push(...batch);
+      try {
+        setLoading(true);
+        setProgressMsg('Server rendert Druckqualität...');
+        setProgress(10);
+
+        const resp = await fetch('/api/print-render', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tileIds: tileIdsRef.current,
+            assignment: assignmentRef.current,
+            cols,
+            rows,
+            tilePx: PRINT_TILE_PX,
+          }),
+        });
+
+        if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
+        link.href = url;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } catch (e) {
+        console.error('[Print] Server render failed, falling back to canvas:', e);
+        // Fallback: scale existing canvas
+        outCtx.drawImage(canvas, 0, 0, outW, outH);
+        const jpegCanvas2 = document.createElement('canvas');
+        jpegCanvas2.width = outW; jpegCanvas2.height = outH;
+        const jCtx2 = jpegCanvas2.getContext('2d')!;
+        jCtx2.fillStyle = '#ffffff'; jCtx2.fillRect(0, 0, outW, outH);
+        jCtx2.drawImage(outCanvas, 0, 0);
+        const link2 = document.createElement('a');
+        link2.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
+        link2.href = jpegCanvas2.toDataURL('image/jpeg', 0.92);
+        link2.click();
+      } finally {
+        setLoading(false);
+        setProgressMsg('');
+        setProgress(0);
       }
-      // Render tiles
-      const assignment = assignmentRef.current;
-      for (let ci = 0; ci < cols * rows; ci++) {
-        const col = ci % cols, row = Math.floor(ci / cols);
-        const img = hiResImgs[assignment[ci]] || validImgsRef.current[assignment[ci]];
-        if (img && img.complete && img.naturalWidth > 0) pCtx.drawImage(img, col * PRINT_TILE_PX, row * PRINT_TILE_PX, PRINT_TILE_PX, PRINT_TILE_PX);
-      }
-      // Scale to output dimensions (aspect-correct)
-      outCtx.drawImage(printCanvas, 0, 0, outW, outH);
-    } else {
-      // PREVIEW MODE: scale existing canvas (aspect-correct)
-      outCtx.drawImage(canvas, 0, 0, outW, outH);
+      return; // early return for print mode
     }
 
-    if (!paid) {
-      // Add watermark for preview downloads
-      const wm = "MosaicPrint.ch – Vorschau";
-      const fontSize = Math.max(24, Math.round(outW * 0.025));
-      outCtx.save();
-      outCtx.globalAlpha = 0.28;
-      outCtx.fillStyle = "#ffffff";
-      outCtx.font = `bold ${fontSize}px sans-serif`;
-      outCtx.textAlign = "center";
-      outCtx.textBaseline = "middle";
-      // Draw repeated watermark pattern diagonally
-      const step = Math.round(outW * 0.22);
-      for (let y = -step; y < outH + step; y += step) {
-        for (let x = -step; x < outW + step; x += step) {
-          outCtx.save();
-          outCtx.translate(x, y);
-          outCtx.rotate(-Math.PI / 6);
-          outCtx.fillText(wm, 0, 0);
-          outCtx.restore();
-        }
+    // PREVIEW MODE: scale existing canvas (aspect-correct)
+    outCtx.drawImage(canvas, 0, 0, outW, outH);
+
+    // Add watermark for preview downloads
+    const wm = "MosaicPrint.ch – Vorschau";
+    const fontSize = Math.max(24, Math.round(outW * 0.025));
+    outCtx.save();
+    outCtx.globalAlpha = 0.28;
+    outCtx.fillStyle = "#ffffff";
+    outCtx.font = `bold ${fontSize}px sans-serif`;
+    outCtx.textAlign = "center";
+    outCtx.textBaseline = "middle";
+    const step = Math.round(outW * 0.22);
+    for (let y = -step; y < outH + step; y += step) {
+      for (let x = -step; x < outW + step; x += step) {
+        outCtx.save();
+        outCtx.translate(x, y);
+        outCtx.rotate(-Math.PI / 6);
+        outCtx.fillText(wm, 0, 0);
+        outCtx.restore();
       }
-      outCtx.restore();
     }
+    outCtx.restore();
 
     // Download as JPEG (much smaller files, print-compatible)
-    // JPEG requires opaque background (no transparency) – fill white first
     const jpegCanvas = document.createElement('canvas');
     jpegCanvas.width = outW;
     jpegCanvas.height = outH;
     const jpegCtx = jpegCanvas.getContext('2d')!;
-    jpegCtx.fillStyle = '#ffffff'; // white background for JPEG
+    jpegCtx.fillStyle = '#ffffff';
     jpegCtx.fillRect(0, 0, outW, outH);
     jpegCtx.drawImage(outCanvas, 0, 0);
-
-    // Quality: 85% for preview (smaller file), 95% for print (max quality)
-    const jpegQuality = paid ? 0.95 : 0.85;
-    const suffix = paid ? 'druckbereit' : 'vorschau';
     const link = document.createElement('a');
-    link.download = `mosaicprint-${outW}x${outH}-${suffix}.jpg`;
-    link.href = jpegCanvas.toDataURL('image/jpeg', jpegQuality);
+    link.download = `mosaicprint-${outW}x${outH}-vorschau.jpg`;
+    link.href = jpegCanvas.toDataURL('image/jpeg', 0.85);
     link.click();
   }, [selectedFormat]);
 
