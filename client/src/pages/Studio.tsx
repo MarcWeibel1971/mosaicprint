@@ -1108,29 +1108,57 @@ export default function Studio() {
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
-      // ── Try Texture Atlas first (1 HTTP request instead of thousands) ──
-      setProgressMsg('Lade Kachel-Atlas (1 Request)...');
-      const atlasMaxTiles = Math.min(neededTileIds.size + 500, 10000);
+      // ── Hybrid strategy: Atlas for first 3000 tiles, individual requests for the rest ──
+      // Mobile Safari crashes with atlas > ~3000 tiles (sprite-sheet too large to decode).
+      // Solution: cap atlas at 3000, then load remaining tiles individually in parallel.
+      const ATLAS_MOBILE_CAP = isMobileOrSlow ? 3000 : 8000;
+      const atlasMaxTiles = Math.min(neededTileIds.size + 200, ATLAS_MOBILE_CAP);
+
+      setProgressMsg('Lade Kachel-Atlas...');
       const atlas = await loadTileAtlas(
         selectedTheme === 'all' ? '' : selectedTheme,
         64,
         atlasMaxTiles,
-        (pct) => setProgress(25 + Math.round(pct * 0.20)),
+        (pct) => setProgress(25 + Math.round(pct * 0.15)),
       );
 
       if (atlas && atlas.tileCount > 0) {
-        // Atlas loaded – extract only the needed tiles (memory-efficient, no full pre-decode)
-        setProgressMsg(`Extrahiere ${neededTileIds.size} Kacheln aus Atlas...`);
+        // Extract only the needed tiles that are in the atlas
+        setProgressMsg(`Extrahiere Kacheln aus Atlas...`);
         const extracted = await atlas.preExtract(neededTileIds);
         for (const [id, img] of extracted) tileImgMap.set(id, img);
-        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles extracted from sprite-sheet (${atlas.tileCount} total in atlas)`);
-        setProgress(45);
-      } else {
-        // Fallback: load tiles individually (original behavior)
+        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles from sprite-sheet`);
+        setProgress(40);
+      }
+
+      // Load any tiles not covered by the atlas individually
+      const missingIds = Array.from(neededTileIds).filter(id => !tileImgMap.has(id));
+      if (missingIds.length > 0) {
+        setProgressMsg(`Lade ${missingIds.length} weitere Kacheln...`);
+        const BATCH = isMobileOrSlow ? 40 : 100;
+        let loaded = 0;
+        for (let i = 0; i < missingIds.length; i += BATCH) {
+          const batchIds = missingIds.slice(i, i + BATCH);
+          const batchImgs = await Promise.all(
+            batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
+          );
+          for (let j = 0; j < batchIds.length; j++) {
+            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+          }
+          loaded += batchIds.length;
+          const pct = 40 + Math.round((loaded / missingIds.length) * 5);
+          setProgress(Math.min(pct, 45));
+          await new Promise(r => setTimeout(r, 0));
+        }
+        console.log(`[Studio] +${tileImgMap.size - (neededTileIds.size - missingIds.length)} individual tiles loaded`);
+      }
+
+      if (tileImgMap.size === 0) {
+        // Full fallback: no atlas available, load all individually
         console.log('[Studio] Atlas unavailable, falling back to individual tile requests');
-        setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder (Einzelabruf)...`);
+        setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder...`);
         const tileIdArray = Array.from(neededTileIds);
-        const BATCH = isMobileOrSlow ? 30 : 80;
+        const BATCH = isMobileOrSlow ? 40 : 100;
         let loaded = 0;
         for (let i = 0; i < tileIdArray.length; i += BATCH) {
           const batchIds = tileIdArray.slice(i, i + BATCH);
@@ -1148,6 +1176,8 @@ export default function Studio() {
         }
         console.log(`[Studio] Loaded ${tileImgMap.size}/${neededTileIds.size} tile images`);
       }
+
+      setProgress(45);
     }
 
     // ── Fallback: legacy pool if 2-stage not available ────────────────────────
