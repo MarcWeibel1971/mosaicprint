@@ -7,7 +7,7 @@
     "dev": "concurrently -k \"pnpm dev:server\" \"pnpm dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
-    "build": "pnpm build:client",
+    "build": "pnpm build:client && pnpm build:server",
     "build:client": "vite build --config client/vite.config.ts",
     "start": "node dist/server/index.js",
     "db:migrate": "node scripts/migrate.mjs",
