@@ -793,8 +793,10 @@ export default function Studio() {
     // With baseTiles=40, tilePx=12: 40×50×12px = 480×600px canvas, ~2000 cells
     // TOP_K=15 → ~1200 unique tiles needed (well within 400 LRU cache limit)
     if (isMobile) {
-      const mobileMaxTiles = 40;  // fewer tiles = fewer unique images needed
-      const mobileTilePx = 12;    // larger tiles = fewer cells = less memory
+      // Mobile: 60 tiles × 10px → ~3600 cells, ~1200 unique tiles → ~24 MB RAM (safe under iOS 150MB)
+      // Previously 40×12 was too coarse (2.25× fewer cells than desktop portrait 100×8)
+      const mobileMaxTiles = 60;  // was 40 – more tiles = better detail
+      const mobileTilePx = 10;    // was 12 – smaller tiles = more cells = more detail
       if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
       if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
       console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles ×', savedSettings.tilePx, 'px');
@@ -835,7 +837,7 @@ export default function Studio() {
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
-    const TOP_K = isMobileOrSlow ? 50 : 80; // Mobile: 50 candidates gives good diversity; unique tiles capped at 800 via frequency selection
+    const TOP_K = isMobileOrSlow ? 60 : 80; // Mobile: 60 candidates gives good diversity; unique tiles capped at 1000 via frequency selection
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
@@ -954,7 +956,7 @@ export default function Studio() {
       // Mobile: cap unique tiles at 800 to prevent OOM (iOS Safari kills tab at ~150 MB)
       // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
       // This preserves quality (best matches kept) while reducing memory footprint
-      const MOBILE_MAX_TILES = 800;
+      const MOBILE_MAX_TILES = 1000; // was 800 – more tiles = better quality
       if (isMobileOrSlow && neededTileIds.size > MOBILE_MAX_TILES) {
         // Score each tile: sum of (1/(rank+1)) across all cells where it appears
         // Higher score = appears as top candidate for more cells = more important to keep
