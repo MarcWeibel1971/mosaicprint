@@ -58,6 +58,19 @@ export async function ensureSchema(): Promise<void> {
       END IF;
     END $$
   `).catch(() => { /* ignore if constraint already exists or duplicate data prevents it */ });
+  // Add quadrant LAB columns if missing (migration for existing tables without 15D data)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tl_l REAL DEFAULT 50`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tl_a REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tl_b REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tr_l REAL DEFAULT 50`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tr_a REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tr_b REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS bl_l REAL DEFAULT 50`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS bl_a REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS bl_b REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS br_l REAL DEFAULT 50`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS br_a REAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS br_b REAL DEFAULT 0`);
   // Add url_hash column for fast duplicate lookup (MD5 of normalized URL)
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS url_hash TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_url_hash ON mosaic_images (url_hash)`);
@@ -150,6 +163,10 @@ export async function getAdminImages(opts: {
   const res = await pool.query(
     `SELECT id, source_url as "sourceUrl", tile128_url as "tile128Url",
       avg_l as "avgL", avg_a as "avgA", avg_b as "avgB", created_at as "createdAt",
+      tl_l as "tlL", tl_a as "tlA", tl_b as "tlB",
+      tr_l as "trL", tr_a as "trA", tr_b as "trB",
+      bl_l as "blL", bl_a as "blA", bl_b as "blB",
+      br_l as "brL", br_a as "brA", br_b as "brB",
       COALESCE(subject, 'general') as "subject",
       CASE
         WHEN source_url LIKE '%pexels%' THEN 'pexels'
@@ -192,17 +209,36 @@ export async function deleteMosaicImage(id: number): Promise<boolean> {
 export async function insertMosaicImage(data: {
   sourceUrl: string; tile128Url: string | null;
   avgL: number; avgA: number; avgB: number;
+  // Quadrant LAB values (optional – computed from 4 quadrants of the tile image)
+  tlL?: number; tlA?: number; tlB?: number;
+  trL?: number; trA?: number; trB?: number;
+  blL?: number; blA?: number; blB?: number;
+  brL?: number; brA?: number; brB?: number;
   subject?: string;
 }): Promise<void> {
   const pool = getPool();
   // Normalize URL: strip query params that change between requests (Pexels/Unsplash add w/h/fit params)
-  // Extract the stable photo ID from the URL to detect duplicates even if URL params differ
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
+  // Use provided quadrant values, or fall back to global LAB (will be backfilled later)
+  const tlL = data.tlL ?? data.avgL, tlA = data.tlA ?? data.avgA, tlB = data.tlB ?? data.avgB;
+  const trL = data.trL ?? data.avgL, trA = data.trA ?? data.avgA, trB = data.trB ?? data.avgB;
+  const blL = data.blL ?? data.avgL, blA = data.blA ?? data.avgA, blB = data.blB ?? data.avgB;
+  const brL = data.brL ?? data.avgL, brA = data.brA ?? data.avgA, brB = data.brB ?? data.avgB;
   await pool.query(
-    `INSERT INTO mosaic_images (source_url, tile128_url, avg_l, avg_a, avg_b, subject, url_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, MD5($1))
+    `INSERT INTO mosaic_images
+       (source_url, tile128_url, avg_l, avg_a, avg_b,
+        tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
+        bl_l, bl_a, bl_b, br_l, br_a, br_b,
+        subject, url_hash)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,MD5($1))
      ON CONFLICT (source_url) DO NOTHING`,
-    [normalizedUrl, data.tile128Url, data.avgL, data.avgA, data.avgB, data.subject ?? 'general']
+    [
+      normalizedUrl, data.tile128Url,
+      data.avgL, data.avgA, data.avgB,
+      tlL, tlA, tlB, trL, trA, trB,
+      blL, blA, blB, brL, brA, brB,
+      data.subject ?? 'general'
+    ]
   );
 }
 

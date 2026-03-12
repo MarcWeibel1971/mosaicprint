@@ -34,6 +34,11 @@ interface ImportJob {
 interface TileImage {
   id: number; sourceUrl: string; tile128Url: string
   avgL: number; avgA: number; avgB: number
+  // Quadrant LAB values (15D matching features)
+  tlL?: number; tlA?: number; tlB?: number
+  trL?: number; trA?: number; trB?: number
+  blL?: number; blA?: number; blB?: number
+  brL?: number; brA?: number; brB?: number
   createdAt: string; sourceId: string
   colorCategory: string | null; brightnessCategory: string | null
   subject: string | null
@@ -403,17 +408,21 @@ export default function Admin() {
   const handleIndexLab = async () => {
     if (activeJob) return
     setActiveJob('lab')
-    setMessage({ text: 'LAB-Indexierung gestartet...', type: 'info' })
+    setMessage({ text: '🔄 Quadrant-LAB Backfill gestartet – berechnet 15D-Features für alle Tiles...', type: 'info' })
     try {
       const res = await fetch('/api/trpc/indexLabColors', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
       })
       const data = await res.json()
       const parsed = data.result?.data?.json ?? data.result?.data ?? data
-      setMessage({ text: `LAB-Indexierung abgeschlossen: ${parsed?.indexed ?? 0} Bilder indexiert`, type: 'success' })
+      if (parsed?.started) {
+        setMessage({ text: '⏳ Backfill läuft im Hintergrund – kann 10-30 Min dauern für 26k Tiles. Seite neu laden für Fortschritt.', type: 'info' })
+      } else {
+        setMessage({ text: parsed?.message ?? 'Backfill gestartet', type: 'info' })
+      }
       fetchStats()
     } catch {
-      setMessage({ text: 'Fehler bei der LAB-Indexierung', type: 'error' })
+      setMessage({ text: 'Fehler beim Quadrant-LAB Backfill', type: 'error' })
     } finally { setActiveJob(null) }
   }
 
@@ -780,29 +789,37 @@ export default function Admin() {
 
             {/* LAB + Seed */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white rounded-2xl p-6 border border-gray-200">
+              <div className="bg-white rounded-2xl p-6 border border-green-300">
                 <h3 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
                   <Database className="w-5 h-5 text-green-600" />
-                  LAB-Farben indexieren
+                  15D Quadrant-LAB Backfill
                 </h3>
-                <p className="text-gray-600 text-sm mb-4">
-                  Berechnet LAB-Farbwerte für alle nicht-indexierten Bilder. Verbessert die Mosaic-Qualität erheblich.
-                  Aktuell <strong>{((stats?.total ?? 0) - (stats?.labIndexed ?? 0)).toLocaleString()}</strong> Bilder ohne Index.
+                <p className="text-gray-600 text-sm mb-2">
+                  Berechnet <strong>Quadrant-LAB-Werte</strong> (TL/TR/BL/BR) für alle Tiles.
+                  Ohne diese Daten nutzt der Algorithmus nur 3D statt 15D – Mosaic-Qualität ist stark eingeschränkt!
                 </p>
                 {stats && stats.total > 0 && (
-                  <div className="mb-4">
-                    <div className="flex justify-between text-xs text-gray-500 mb-1">
-                      <span>Fortschritt</span>
-                      <span>{Math.round((stats.labIndexed / stats.total) * 100)}%</span>
+                  <>
+                    <div className="mb-1">
+                      <div className="flex justify-between text-xs text-gray-500 mb-1">
+                        <span>Quadrant-LAB indexiert</span>
+                        <span className="font-semibold">{(stats as any).quadrantIndexed?.toLocaleString() ?? '?'} / {stats.total.toLocaleString()}</span>
+                      </div>
+                      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-green-500 rounded-full transition-all"
+                          style={{ width: `${Math.round(((stats as any).quadrantIndexed ?? 0) / stats.total * 100)}%` }} />
+                      </div>
                     </div>
-                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-green-400 rounded-full transition-all" style={{ width: `${Math.round((stats.labIndexed / stats.total) * 100)}%` }} />
-                    </div>
-                  </div>
+                    {((stats as any).quadrantMissing ?? stats.total) > 0 && (
+                      <p className="text-xs text-red-600 font-semibold mb-2">
+                        ⚠️ {((stats as any).quadrantMissing ?? stats.total).toLocaleString()} Tiles fehlen noch Quadrant-Daten!
+                      </p>
+                    )}
+                  </>
                 )}
-                <button onClick={handleIndexLab} disabled={!!activeJob || ((stats?.total ?? 0) - (stats?.labIndexed ?? 0)) === 0} className="flex items-center gap-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm">
+                <button onClick={handleIndexLab} disabled={!!activeJob} className="flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm">
                   {activeJob === 'lab' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
-                  {activeJob === 'lab' ? 'Indexierung läuft...' : `${((stats?.total ?? 0) - (stats?.labIndexed ?? 0)).toLocaleString()} Bilder indexieren`}
+                  {activeJob === 'lab' ? 'Backfill läuft...' : `Quadrant-LAB berechnen (${((stats as any).quadrantMissing ?? stats?.total ?? 0).toLocaleString()} Tiles)`}
                 </button>
               </div>
 
@@ -1011,13 +1028,13 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     setPdfExporting(true)
     onMessage({ text: 'PDF wird generiert – Bilder werden geladen...', type: 'info' })
     try {
-      // Fetch ALL images (no pagination limit – fetch all pages)
-      const params: Record<string, string | number> = { page: 1, limit: 5000 }
+      // Fetch ALL images via dedicated PDF endpoint (no pagination limit)
+      const params: Record<string, string> = {}
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
-      const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
+      const res = await fetch(`/api/trpc/getAllTilesForPdf?input=${encoded}`)
       const data = await res.json()
       const parsed = data.result?.data ?? data
       const allImages: TileImage[] = parsed.images ?? []
@@ -1574,7 +1591,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               className="w-full aspect-square object-cover rounded-xl mb-4"
               onError={(e) => { (e.target as HTMLImageElement).src = selectedImage.sourceUrl }}
             />
-            <div className="space-y-2 text-sm text-gray-600">
+            <div className="space-y-1.5 text-sm text-gray-600">
               <div className="flex justify-between"><span>Quelle:</span><span className="font-medium">{selectedImage.sourceId}</span></div>
               <div className="flex justify-between"><span>Farbe:</span>
                 <span className="font-medium flex items-center gap-1">
@@ -1584,8 +1601,39 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                 </span>
               </div>
               <div className="flex justify-between"><span>Helligkeit:</span><span className="font-medium">{selectedImage.brightnessCategory ?? 'Nicht indexiert'}</span></div>
-              <div className="flex justify-between"><span>LAB:</span><span className="font-mono text-xs">{selectedImage.avgL.toFixed(1)}, {selectedImage.avgA.toFixed(1)}, {selectedImage.avgB.toFixed(1)}</span></div>
               <div className="flex justify-between"><span>Thema:</span><span className="font-medium">{selectedImage.subject ?? 'general'}</span></div>
+              {/* 15D LAB Feature Vectors */}
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <p className="text-xs font-semibold text-gray-500 mb-1">15D Matching-Features</p>
+                <div className="grid grid-cols-1 gap-0.5 font-mono text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Global L,a,b:</span>
+                    <span>{selectedImage.avgL.toFixed(1)}, {selectedImage.avgA.toFixed(1)}, {selectedImage.avgB.toFixed(1)}</span>
+                  </div>
+                  {(selectedImage.tlA !== undefined && selectedImage.tlA !== 0) || (selectedImage.tlB !== undefined && selectedImage.tlB !== 0) ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">TL L,a,b:</span>
+                        <span>{(selectedImage.tlL ?? 0).toFixed(1)}, {(selectedImage.tlA ?? 0).toFixed(1)}, {(selectedImage.tlB ?? 0).toFixed(1)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">TR L,a,b:</span>
+                        <span>{(selectedImage.trL ?? 0).toFixed(1)}, {(selectedImage.trA ?? 0).toFixed(1)}, {(selectedImage.trB ?? 0).toFixed(1)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">BL L,a,b:</span>
+                        <span>{(selectedImage.blL ?? 0).toFixed(1)}, {(selectedImage.blA ?? 0).toFixed(1)}, {(selectedImage.blB ?? 0).toFixed(1)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">BR L,a,b:</span>
+                        <span>{(selectedImage.brL ?? 0).toFixed(1)}, {(selectedImage.brA ?? 0).toFixed(1)}, {(selectedImage.brB ?? 0).toFixed(1)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-red-500 text-xs">⚠️ Quadrant-LAB fehlt – Backfill nötig!</p>
+                  )}
+                </div>
+              </div>
             </div>
             <div className="flex gap-3 mt-5">
               <a href={selectedImage.sourceUrl} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl transition-colors">Öffnen</a>

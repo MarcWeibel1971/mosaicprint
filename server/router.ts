@@ -346,29 +346,82 @@ function getImportStatus(sourceId: string): JobStatus {
   return importJobStatuses[sourceId];
 }
 
-async function computeLabForUrl(url: string): Promise<{ L: number; a: number; b: number } | null> {
+// Compute LAB from raw RGB pixels (3 bytes per pixel)
+function rgbPixelsToLab(px: Buffer, pixelCount: number): { L: number; a: number; b: number } {
+  let rSum = 0, gSum = 0, bSum = 0;
+  for (let j = 0; j < px.length; j += 3) { rSum += px[j]; gSum += px[j + 1]; bSum += px[j + 2]; }
+  const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const rl = toLinear(rSum / pixelCount), gl = toLinear(gSum / pixelCount), bl2 = toLinear(bSum / pixelCount);
+  const X = rl * 0.4124564 + gl * 0.3575761 + bl2 * 0.1804375;
+  const Y = rl * 0.2126729 + gl * 0.7151522 + bl2 * 0.0721750;
+  const Z = rl * 0.0193339 + gl * 0.1191920 + bl2 * 0.9503041;
+  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+  return {
+    L: 116 * f(Y / 1.0) - 16,
+    a: 500 * (f(X / 0.95047) - f(Y / 1.0)),
+    b: 200 * (f(Y / 1.0) - f(Z / 1.08883)),
+  };
+}
+
+// Compute global LAB + 4-quadrant LAB from a URL (fetches image once, resizes to 8x8)
+// Returns global + TL/TR/BL/BR quadrant LAB values
+async function computeLabFull(url: string): Promise<{
+  L: number; a: number; b: number;
+  tlL: number; tlA: number; tlB: number;
+  trL: number; trA: number; trB: number;
+  blL: number; blA: number; blB: number;
+  brL: number; brA: number; brB: number;
+} | null> {
   try {
     const sharp = (await import("sharp")).default;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!resp.ok) return null;
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const { data: px, info } = await sharp(buf).resize(8, 8, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-    const pixels = info.width * info.height;
-    let rSum = 0, gSum = 0, bSum = 0;
-    for (let j = 0; j < px.length; j += 3) { rSum += px[j]; gSum += px[j + 1]; bSum += px[j + 2]; }
-    const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
-    const rl = toLinear(rSum / pixels), gl = toLinear(gSum / pixels), bl2 = toLinear(bSum / pixels);
-    const X = rl * 0.4124564 + gl * 0.3575761 + bl2 * 0.1804375;
-    const Y = rl * 0.2126729 + gl * 0.7151522 + bl2 * 0.0721750;
-    const Z = rl * 0.0193339 + gl * 0.1191920 + bl2 * 0.9503041;
-    const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
-    const L = 116 * f(Y / 1.0) - 16;
-    const a = 500 * (f(X / 0.95047) - f(Y / 1.0));
-    const b = 200 * (f(Y / 1.0) - f(Z / 1.08883));
-    return { L, a, b };
+    let buf: Buffer;
+    if (url.startsWith("data:")) {
+      // data URL: decode base64 directly
+      const b64 = url.split(",")[1];
+      buf = Buffer.from(b64, "base64");
+    } else {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!resp.ok) return null;
+      buf = Buffer.from(await resp.arrayBuffer());
+    }
+    // Resize to 8x8 for global + quadrant extraction
+    // 8x8 = 64 pixels, quadrants = 4x4 each (TL, TR, BL, BR)
+    const { data: px } = await sharp(buf).resize(8, 8, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    // Global LAB (all 64 pixels)
+    const global = rgbPixelsToLab(px, 64);
+    // Extract quadrant pixels: 8x8 image, each quadrant is 4x4 = 16 pixels
+    // Row-major: pixel(x,y) = px[(y*8 + x) * 3]
+    const extractQuadrant = (startX: number, startY: number): Buffer => {
+      const qpx = Buffer.allocUnsafe(16 * 3);
+      let qi = 0;
+      for (let y = startY; y < startY + 4; y++) {
+        for (let x = startX; x < startX + 4; x++) {
+          const src = (y * 8 + x) * 3;
+          qpx[qi++] = px[src]; qpx[qi++] = px[src + 1]; qpx[qi++] = px[src + 2];
+        }
+      }
+      return qpx;
+    };
+    const tl = rgbPixelsToLab(extractQuadrant(0, 0), 16); // top-left
+    const tr = rgbPixelsToLab(extractQuadrant(4, 0), 16); // top-right
+    const bl = rgbPixelsToLab(extractQuadrant(0, 4), 16); // bottom-left
+    const br = rgbPixelsToLab(extractQuadrant(4, 4), 16); // bottom-right
+    return {
+      L: global.L, a: global.a, b: global.b,
+      tlL: tl.L, tlA: tl.a, tlB: tl.b,
+      trL: tr.L, trA: tr.a, trB: tr.b,
+      blL: bl.L, blA: bl.a, blB: bl.b,
+      brL: br.L, brA: br.a, brB: br.b,
+    };
   } catch {
     return null;
   }
+}
+
+// Legacy: compute only global LAB (used where quadrant data is not needed)
+async function computeLabForUrl(url: string): Promise<{ L: number; a: number; b: number } | null> {
+  const full = await computeLabFull(url);
+  return full ? { L: full.L, a: full.a, b: full.b } : null;
 }
 
 // ---- Router ----
@@ -378,17 +431,22 @@ export const appRouter = router({
     return db.getMosaicImagesForMatching();
   }),
 
-  // Admin: Tile stats (total + labIndexed)
+  // Admin: Tile stats (total + labIndexed + quadrantIndexed)
   getTileStats: publicProcedure.query(async () => {
     try {
       const pool = db.getPool();
       const totalRes = await pool.query("SELECT COUNT(*) FROM mosaic_images");
       const labRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE avg_l IS NOT NULL");
+      // Count tiles with real quadrant data (not just default zeros)
+      const quadRes = await pool.query(
+        "SELECT COUNT(*) FROM mosaic_images WHERE NOT (tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)"
+      );
       const total = Number(totalRes.rows[0].count);
       const labIndexed = Number(labRes.rows[0].count);
-      return { total, labIndexed, notIndexed: total - labIndexed };
+      const quadrantIndexed = Number(quadRes.rows[0].count);
+      return { total, labIndexed, notIndexed: total - labIndexed, quadrantIndexed, quadrantMissing: total - quadrantIndexed };
     } catch {
-      return { total: 0, labIndexed: 0, notIndexed: 0 };
+      return { total: 0, labIndexed: 0, notIndexed: 0, quadrantIndexed: 0, quadrantMissing: 0 };
     }
   }),
 
@@ -617,8 +675,14 @@ export const appRouter = router({
                 const batch = photos.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (photo) => {
                   try {
-                    const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                    const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                    await db.insertMosaicImage({ ...photo,
+                      avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+                      tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
+                      trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
+                      blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
+                      brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                    });
                     imported++; batchNew++;
                     status.imported = imported;
                   } catch { /* duplicate or error – skip */ }
@@ -718,8 +782,15 @@ export const appRouter = router({
                 const batch = photos.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (photo) => {
                   try {
-                    const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                    await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0, subject: task.subject ?? 'general' });
+                    const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                    await db.insertMosaicImage({ ...photo,
+                      avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+                      tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
+                      trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
+                      blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
+                      brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                      subject: task.subject ?? 'general',
+                    });
                     imported++;
                     batchImported++;
                     smartImportJobs[jobKey].imported = imported;
@@ -869,7 +940,7 @@ export const appRouter = router({
       return { started: true, sources, results };
     }),
 
-  // Admin: Rebuild tile index (LAB reindex)
+  // Admin: Rebuild tile index (LAB reindex) – now also computes quadrant LAB
   rebuildTileIndex: publicProcedure.mutation(async () => {
     if (rebuildJobStatus.running) return { started: false, message: "Rebuild läuft bereits" };
     rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
@@ -878,21 +949,35 @@ export const appRouter = router({
       try {
         const pool = db.getPool();
         const res = await pool.query("SELECT id, tile128_url FROM mosaic_images WHERE tile128_url IS NOT NULL");
-        log(`Indexiere ${res.rows.length} Bilder...`);
+        log(`Indexiere ${res.rows.length} Bilder (global + Quadrant-LAB)...`);
         let indexed = 0;
-        const CONCURRENCY = 8;
+        const CONCURRENCY = 6;
         for (let i = 0; i < res.rows.length; i += CONCURRENCY) {
           const batch = res.rows.slice(i, i + CONCURRENCY);
           await Promise.all(batch.map(async (row: any) => {
-            const lab = await computeLabForUrl(row.tile128_url);
+            const lab = await computeLabFull(row.tile128_url);
             if (lab) {
-              await pool.query("UPDATE mosaic_images SET avg_l=$1, avg_a=$2, avg_b=$3 WHERE id=$4", [lab.L, lab.a, lab.b, row.id]);
+              await pool.query(
+                `UPDATE mosaic_images SET
+                  avg_l=$1, avg_a=$2, avg_b=$3,
+                  tl_l=$4, tl_a=$5, tl_b=$6,
+                  tr_l=$7, tr_a=$8, tr_b=$9,
+                  bl_l=$10, bl_a=$11, bl_b=$12,
+                  br_l=$13, br_a=$14, br_b=$15
+                WHERE id=$16`,
+                [lab.L, lab.a, lab.b,
+                 lab.tlL, lab.tlA, lab.tlB,
+                 lab.trL, lab.trA, lab.trB,
+                 lab.blL, lab.blA, lab.blB,
+                 lab.brL, lab.brA, lab.brB,
+                 row.id]
+              );
               indexed++;
             }
           }));
-          if (i % 100 === 0) log(`${indexed}/${res.rows.length} indexiert...`);
+          if (i % 200 === 0) log(`${indexed}/${res.rows.length} indexiert...`);
         }
-        log(`✅ Fertig: ${indexed} Bilder reindexiert`);
+        log(`✅ Fertig: ${indexed} Bilder reindexiert (inkl. Quadrant-LAB)`);
         rebuildJobStatus.finishedAt = new Date().toISOString();
       } catch (e: unknown) {
         rebuildJobStatus.error = e instanceof Error ? e.message : String(e);
@@ -906,6 +991,62 @@ export const appRouter = router({
 
   // Admin: Rebuild status
   getRebuildStatus: publicProcedure.query(() => rebuildJobStatus),
+
+  // Admin: indexLabColors – alias for rebuildTileIndex (called by Admin panel "LAB indexieren" button)
+  // Backfills quadrant LAB for ALL tiles (critical for 15D matching quality)
+  indexLabColors: publicProcedure.mutation(async () => {
+    if (rebuildJobStatus.running) return { started: false, indexed: 0, message: "Backfill läuft bereits" };
+    rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
+    const log = (msg: string) => { rebuildJobStatus.log.push(msg); if (rebuildJobStatus.log.length > 300) rebuildJobStatus.log = rebuildJobStatus.log.slice(-300); };
+    let totalIndexed = 0;
+    (async () => {
+      try {
+        const pool = db.getPool();
+        // Backfill only tiles where quadrant values are still at default (tl_a=0 AND tl_b=0)
+        // This avoids re-processing tiles that already have real quadrant data
+        const res = await pool.query(
+          `SELECT id, tile128_url FROM mosaic_images
+           WHERE tile128_url IS NOT NULL
+           AND (tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)`
+        );
+        log(`Backfill Quadrant-LAB: ${res.rows.length} Tiles ohne Quadrant-Daten gefunden`);
+        const CONCURRENCY = 8;
+        for (let i = 0; i < res.rows.length; i += CONCURRENCY) {
+          const batch = res.rows.slice(i, i + CONCURRENCY);
+          await Promise.all(batch.map(async (row: any) => {
+            const lab = await computeLabFull(row.tile128_url);
+            if (lab) {
+              await pool.query(
+                `UPDATE mosaic_images SET
+                  avg_l=$1, avg_a=$2, avg_b=$3,
+                  tl_l=$4, tl_a=$5, tl_b=$6,
+                  tr_l=$7, tr_a=$8, tr_b=$9,
+                  bl_l=$10, bl_a=$11, bl_b=$12,
+                  br_l=$13, br_a=$14, br_b=$15
+                WHERE id=$16`,
+                [lab.L, lab.a, lab.b,
+                 lab.tlL, lab.tlA, lab.tlB,
+                 lab.trL, lab.trA, lab.trB,
+                 lab.blL, lab.blA, lab.blB,
+                 lab.brL, lab.brA, lab.brB,
+                 row.id]
+              );
+              totalIndexed++;
+            }
+          }));
+          if (i % 500 === 0) log(`${totalIndexed}/${res.rows.length} Quadrant-LAB berechnet...`);
+        }
+        log(`✅ Backfill fertig: ${totalIndexed} Tiles mit Quadrant-LAB aktualisiert`);
+        rebuildJobStatus.finishedAt = new Date().toISOString();
+      } catch (e: unknown) {
+        rebuildJobStatus.error = e instanceof Error ? e.message : String(e);
+        rebuildJobStatus.finishedAt = new Date().toISOString();
+      } finally {
+        rebuildJobStatus.running = false;
+      }
+    })();
+    return { started: true, indexed: totalIndexed };
+  }),
 
   // Admin: Get images with filters
   getAdminImages: publicProcedure
@@ -922,6 +1063,47 @@ export const appRouter = router({
       const result = await db.getAdminImages(input);
       console.log('[getAdminImages] returning total:', result.total);
       return result;
+    }),
+
+  // Admin: Get ALL tiles for PDF export (no pagination limit)
+  // Returns only id + sourceUrl + colorCategory + brightnessCategory + LAB for PDF rendering
+  getAllTilesForPdf: publicProcedure
+    .input(z.object({
+      brightnessFilter: z.string().optional(),
+      colorFilter: z.string().optional(),
+      sourceId: z.string().optional(),
+    }))
+    .query(async ({ input }) => {
+      const pool = db.getPool();
+      const conditions: string[] = [];
+      if (input.sourceId === 'pexels') conditions.push("source_url LIKE '%pexels%'");
+      else if (input.sourceId === 'unsplash') conditions.push("source_url LIKE '%unsplash%'");
+      else if (input.sourceId === 'picsum') conditions.push("(source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%')");
+      else if (input.sourceId === 'pixabay') conditions.push("source_url LIKE '%pixabay%'");
+      if (input.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
+      else if (input.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
+      else if (input.brightnessFilter === "hell") conditions.push("avg_l > 65");
+      if (input.colorFilter === "schwarz") conditions.push("avg_l < 25");
+      else if (input.colorFilter === "weiss") conditions.push("avg_l > 80");
+      else if (input.colorFilter === "grau") conditions.push("ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80");
+      else if (input.colorFilter === "rot") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 20");
+      else if (input.colorFilter === "orange") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a > 10 AND avg_b > 10 AND avg_a <= 20");
+      else if (input.colorFilter === "gelb") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_b > 20 AND avg_a <= 10");
+      else if (input.colorFilter === "gruen") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_a < -10 AND avg_b >= -5");
+      else if (input.colorFilter === "blau") conditions.push("avg_l >= 25 AND NOT (ABS(avg_a) < 8 AND ABS(avg_b) < 8) AND avg_b < -15 AND avg_a >= -10");
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const res = await pool.query(
+        `SELECT id, source_url as "sourceUrl", tile128_url as "tile128Url",
+           avg_l::float as "avgL", avg_a::float as "avgA", avg_b::float as "avgB",
+           CASE WHEN avg_l < 25 THEN 'schwarz' WHEN avg_l > 80 THEN 'weiss'
+             WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 AND avg_l >= 25 AND avg_l <= 80 THEN 'grau'
+             WHEN avg_a > 20 THEN 'rot' WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
+             WHEN avg_b > 20 THEN 'gelb' WHEN avg_a < -10 THEN 'gruen'
+             WHEN avg_b < -15 THEN 'blau' ELSE 'grau' END as "colorCategory",
+           CASE WHEN avg_l < 35 THEN 'Dunkel' WHEN avg_l > 65 THEN 'Hell' ELSE 'Mittel' END as "brightnessCategory"
+         FROM mosaic_images ${where} ORDER BY id`
+      );
+      return { images: res.rows, total: res.rows.length };
     }),
 
   // Admin: Delete image
@@ -1057,8 +1239,14 @@ export const appRouter = router({
             const batch = photos.slice(i, i + CONCURRENCY);
             await Promise.all(batch.map(async (photo) => {
               try {
-                const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                await db.insertMosaicImage({ ...photo,
+                  avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+                  tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
+                  trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
+                  blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
+                  brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                });
               } catch { /* skip duplicates / errors */ }
             }));
           }
@@ -1076,10 +1264,15 @@ export const appRouter = router({
       const sharp = (await import("sharp")).default;
       const buf = Buffer.from(input.base64, "base64");
       const thumb = await sharp(buf).resize(128, 128, { fit: "cover" }).jpeg({ quality: 85 }).toBuffer();
-      const lab = await computeLabForUrl("data:" + input.mimeType + ";base64," + thumb.toString("base64")).catch(() => null);
-      // Store as data URL (no S3 in standalone mode unless configured)
       const tile128Url = "data:image/jpeg;base64," + thumb.toString("base64");
-      await db.insertMosaicImage({ sourceUrl: tile128Url, tile128Url, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+      const lab = await computeLabFull(tile128Url).catch(() => null);
+      await db.insertMosaicImage({ sourceUrl: tile128Url, tile128Url,
+        avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+        tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
+        trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
+        blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
+        brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+      });
       return { ok: true };
     }),
 });
