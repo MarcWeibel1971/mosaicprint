@@ -855,7 +855,8 @@ export default function Studio() {
       const W_EDGE = IS_7D ? 25.0 : 0;        // shape priority
       const W_BRIGHT = IS_7D ? 15.0 : 0;      // brightness matching
       // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
-      const GRAY_PENALTY = IS_7D ? Math.max(0, (targetSat - 0.15) * 200) : 0;
+      // FIX: also apply to IS_14D/IS_15D (was only IS_7D before – caused gray patches!)
+      const GRAY_PENALTY = Math.max(0, (targetSat - 0.15) * 200);
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
@@ -881,6 +882,11 @@ export default function Studio() {
           // Gray-penalty: penalize gray tiles when target is colorful
           const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+          // Extra: penalize low-sat tiles in warm/skin-toned target areas (fixes gray patches in faces)
+          // targetSat > 0.10 = target has some color (not pure gray); sat < 0.15 = tile is nearly gray
+          if (targetSat > 0.10 && sat < 0.15 && targetA > 2) {
+            dist += (0.15 - sat) * 300; // up to +45 penalty for very gray tiles in colored areas
+          }
           // isSkinFriendly (15D): in portrait mode, boost skin-friendly tiles for face regions
           // This ensures the Stage A pre-filter already favors neutral/warm tiles for skin areas
           if (IS_15D && savedSettings.portraitMode) {
@@ -1459,9 +1465,9 @@ export default function Studio() {
               // Gray/neutral target area: strongly penalize colorful tiles
               dist += (tileSatC - 40) / 100 * 4 * 100; // ×4 multiplier
             }
-            if (isTargetSkin && tileSatC < 8) {
-              // Skin area: penalize washed-out gray tiles
-              dist += (8 - tileSatC) / 8 * 4 * 100; // ×4 multiplier
+            if (isTargetSkin && tileSatC < 12) {
+              // Skin area: penalize washed-out gray tiles (was < 8, now < 12 = broader fix)
+              dist += (12 - tileSatC) / 12 * 5 * 100; // ×5 multiplier (stronger than before)
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
