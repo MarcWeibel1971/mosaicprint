@@ -2114,6 +2114,23 @@ export default function Studio() {
               )}
             </div>
 
+            {/* Unsplash Attribution Badge */}
+            {ready && (
+              <div className="flex items-center justify-center mb-4">
+                <a
+                  href="https://unsplash.com/?utm_source=mosaicprint&utm_medium=referral"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 bg-black text-white text-xs font-semibold px-3 py-1.5 rounded-full hover:bg-gray-800 transition-colors"
+                >
+                  <svg width="16" height="16" viewBox="0 0 32 32" fill="white" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M10 9V0h12v9H10zm12 5h10v18H0V14h10v9h12v-9z"/>
+                  </svg>
+                  Photos powered by Unsplash
+                </a>
+              </div>
+            )}
+
             {/* Sharpness slider */}
             {ready && (
               <div className="mb-4 bg-white rounded-2xl border border-coral-100 shadow-sm p-4">
