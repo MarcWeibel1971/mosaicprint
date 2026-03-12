@@ -95,7 +95,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       res.setHeader('X-Cache', 'HIT');
       return res.send(cached.buf);
     }
-    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general'];
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
     const themeFilter = (theme && VALID_THEMES.includes(theme))
       ? `AND subject = $1`
       : ``;

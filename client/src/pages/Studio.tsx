@@ -652,6 +652,9 @@ export default function Studio() {
               portrait: (imageType === 'portrait') ? 2.0 : 0.5,    // boost if face detected
               food: warmRatio * 1.5 + brightRatio * 1.0,           // warm + bright
               travel: (warmRatio + greenRatio) * 1.2,              // warm or green
+              animals: greenRatio * 1.0 + warmRatio * 0.8,         // varied (nature + warm)
+              flowers: (warmRatio + purpleRatio) * 1.5 + brightRatio * 0.8, // colorful + bright
+              space: darkRatio * 2.0 + purpleRatio * 1.5 + coolRatio * 0.5, // dark + purple/blue
             };
 
             // Top 3 Themen nach Score, Mindest-Score 0.3
@@ -665,6 +668,9 @@ export default function Studio() {
               portrait: { label: 'Portrait', emoji: '👤' },
               food: { label: 'Food', emoji: '🍕' },
               travel: { label: 'Reise', emoji: '✈️' },
+              animals: { label: 'Tiere', emoji: '🐾' },
+              flowers: { label: 'Blumen', emoji: '🌸' },
+              space: { label: 'Space', emoji: '🌌' },
             };
             const sorted = Object.entries(themeScores)
               .filter(([, s]) => s > 0.3)
@@ -2154,6 +2160,9 @@ export default function Studio() {
                 { key: 'travel', label: 'Reise', emoji: '✈️' },
                 { key: 'ocean', label: 'Ozean', emoji: '🌊' },
                 { key: 'winter', label: 'Winter', emoji: '❄️' },
+                { key: 'animals', label: 'Tiere', emoji: '🐾' },
+                { key: 'flowers', label: 'Blumen', emoji: '🌸' },
+                { key: 'space', label: 'Space', emoji: '🌌' },
               ].map(({ key, label, emoji }) => (
                 <button
                   key={key}

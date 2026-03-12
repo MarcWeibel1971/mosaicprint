@@ -366,6 +366,57 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
+  // ── Step 2b: New theme gaps (animals, flowers, space) ──
+  // Target: at least 1000 tiles per new theme (min 3.5% of DB)
+  const NEW_THEME_TARGETS: Array<{subject: string; label: string; emoji: string; queries: string[]}> = [
+    {
+      subject: 'animals',
+      label: '🐾 Tiere/Pets',
+      emoji: '🐾',
+      queries: [
+        'cute dog portrait', 'cat closeup face', 'wild lion portrait', 'bird colorful feathers',
+        'horse running field', 'fox wildlife', 'elephant wildlife', 'deer forest',
+        'owl closeup', 'butterfly macro', 'tiger portrait', 'wolf wildlife',
+        'puppy cute', 'kitten closeup', 'bear wildlife', 'eagle flying',
+      ],
+    },
+    {
+      subject: 'flowers',
+      label: '🌸 Blumen/Flowers',
+      emoji: '🌸',
+      queries: [
+        'rose closeup macro', 'sunflower bright', 'tulip field colorful', 'cherry blossom pink',
+        'lavender purple field', 'daisy white flower', 'orchid exotic', 'poppy red field',
+        'wildflowers meadow', 'flower bouquet colorful', 'lotus flower water', 'magnolia blossom',
+        'peony pink flower', 'iris purple flower', 'cosmos flower pink', 'dahlia colorful',
+      ],
+    },
+    {
+      subject: 'space',
+      label: '🌌 Space/Galaxy',
+      emoji: '🌌',
+      queries: [
+        'milky way galaxy night', 'nebula colorful space', 'stars night sky dark', 'aurora borealis night',
+        'galaxy deep space', 'moon closeup night', 'comet night sky', 'space abstract dark',
+        'starry night sky', 'cosmic dust nebula', 'dark sky stars', 'purple blue nebula',
+        'night sky long exposure', 'space galaxy colorful', 'astronomy night', 'dark cosmos abstract',
+      ],
+    },
+  ];
+  for (const themeTarget of NEW_THEME_TARGETS) {
+    const themeCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = $1`, [themeTarget.subject]
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const targetCnt = Math.max(1000, Math.round(total * 0.04)); // min 1000 or 4% of DB
+    const deficit = Math.max(0, targetCnt - themeCnt);
+    if (deficit > 0) {
+      const priority = Math.min(1.5, (deficit / targetCnt) * 1.5); // max 1.5
+      for (const kw of themeTarget.queries) {
+        tasks.push({ query: kw, priority, deficit, label: `${themeTarget.emoji} ${themeTarget.label} (${themeCnt} → Ziel ${targetCnt})`, subject: themeTarget.subject });
+      }
+    }
+  }
+
   // ── Step 3: Color bucket gaps (lower priority, fills color diversity) ──
   const res = await pool.query(`
     SELECT
