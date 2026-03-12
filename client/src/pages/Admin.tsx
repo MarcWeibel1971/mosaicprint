@@ -940,6 +940,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [dedupProgress, setDedupProgress] = useState<{ before: number; deleted: number; after: number } | null>(null)
   const [constraintLoading, setConstraintLoading] = useState(false)
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
+  const [shutterstockLoading, setShutterstockLoading] = useState(false)
+  const [shutterstockResult, setShutterstockResult] = useState<string | null>(null)
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const [pdfExporting, setPdfExporting] = useState(false)
@@ -1011,6 +1013,27 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setConstraintLoading(false)
     }
   }, [])
+
+  const runRemoveShutterstock = useCallback(async () => {
+    if (!confirm('Alle Shutterstock-Bilder (mit Wasserzeichen) aus der Datenbank entfernen? Dieser Vorgang kann nicht rükgängig gemacht werden.')) return
+    setShutterstockLoading(true)
+    setShutterstockResult(null)
+    try {
+      const res = await fetch('/api/admin/remove-shutterstock', { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        setShutterstockResult(`✅ ${data.message}`)
+        fetchDbStats()
+        fetchImages(1)
+      } else {
+        setShutterstockResult(`❌ Fehler: ${data.error}`)
+      }
+    } catch (e) {
+      setShutterstockResult(`❌ Netzwerkfehler: ${String(e)}`)
+    } finally {
+      setShutterstockLoading(false)
+    }
+  }, [fetchDbStats, fetchImages])
 
   const runQuickImport = useCallback(async (query: string, label: string) => {
     setQuickImportLoading(query)
@@ -1479,6 +1502,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           )}
           {!dedupProgress && dedupResult && <p className="text-xs mt-1 font-medium text-red-600">{dedupResult}</p>}
           {constraintResult && <p className="text-xs mt-1 font-medium text-gray-700">{constraintResult}</p>}
+          {shutterstockResult && <p className="text-xs mt-1 font-medium text-red-700">{shutterstockResult}</p>}
         </div>
         <div className="flex flex-col gap-2">
           <button
@@ -1504,6 +1528,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           >
             {constraintLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🔒</span>}
             {constraintLoading ? 'Setze Constraint...' : 'UNIQUE-Constraint setzen'}
+          </button>
+          <button
+            onClick={runRemoveShutterstock}
+            disabled={shutterstockLoading}
+            className="flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+          >
+            {shutterstockLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>❌</span>}
+            {shutterstockLoading ? 'Entferne...' : 'Shutterstock entfernen'}
           </button>
         </div>
       </div>

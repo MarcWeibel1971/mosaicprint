@@ -734,10 +734,11 @@ export default function Studio() {
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const i = (row * COLS + col) * 4;
-        // Mix: 70% blurred (structure) + 30% original (color accuracy)
-        const r = blurredData[i] * 0.7 + targetData[i] * 0.3;
-        const g = blurredData[i+1] * 0.7 + targetData[i+1] * 0.3;
-        const b = blurredData[i+2] * 0.7 + targetData[i+2] * 0.3;
+        // Mix: 50% blurred (structure) + 50% original (color accuracy)
+        // Reduced blur weight for sharper contour matching (was 70/30)
+        const r = blurredData[i] * 0.5 + targetData[i] * 0.5;
+        const g = blurredData[i+1] * 0.5 + targetData[i+1] * 0.5;
+        const b = blurredData[i+2] * 0.5 + targetData[i+2] * 0.5;
         cellLab.push(rgbToLab(r, g, b));
       }
     }
@@ -852,7 +853,9 @@ export default function Studio() {
       // Brightness: prevents dark tiles in bright areas
       const W_L = 1.0, W_A = 1.5, W_B = 1.5; // slightly higher weight on a/b for color accuracy
       const W_QUAD = IS_14D ? 0.4 : 0;        // quadrant color weight (per quadrant a/b pair)
-      const W_EDGE = IS_7D ? 25.0 : 0;        // shape priority
+      // W_EDGE: active for all index types – edge energy drives contour sharpness
+      // IS_15D: 18.0 (slightly less than IS_7D=25 since 15D already encodes spatial structure)
+      const W_EDGE = IS_7D ? 25.0 : 18.0;     // shape priority – now active for 14D/15D too!
       // FIX: W_BRIGHT was IS_7D-only (=0 for 14D/15D) – that caused dark tiles in bright areas!
       // Now always active: 8.0 for 14D/15D (lower than 7D=15 since LAB-L already captures brightness)
       const W_BRIGHT = IS_7D ? 15.0 : 8.0;    // brightness matching – prevents dark tiles in bright areas

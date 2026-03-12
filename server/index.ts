@@ -464,6 +464,35 @@ app.post("/api/admin/add-unique-constraint", async (_req, res) => {
   }
 });
 
+// POST /api/admin/remove-shutterstock  →  removes all Shutterstock watermarked images
+app.post("/api/admin/remove-shutterstock", async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const beforeRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
+    const before = parseInt(beforeRes.rows[0].total);
+    // Delete all images with shutterstock in source_url or tile128_url
+    const result = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE LOWER(source_url) LIKE '%shutterstock%'
+         OR LOWER(COALESCE(tile128_url, '')) LIKE '%shutterstock%'
+    `);
+    const deleted = result.rowCount ?? 0;
+    const afterRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
+    const after = parseInt(afterRes.rows[0].total);
+    // Invalidate index cache since DB changed
+    invalidateIndexCache();
+    res.json({
+      ok: true,
+      before,
+      deleted,
+      after,
+      message: `${deleted} Shutterstock-Bilder entfernt. DB hat jetzt ${after} Bilder.`,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // tRPC API (for Admin panel)
 app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
