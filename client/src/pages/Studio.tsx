@@ -1904,10 +1904,12 @@ export default function Studio() {
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.restore();
     // ── Blur-Overlay: soften harsh tile grid edges for smoother mosaic look ──
-    // Draw a 1px-blurred copy of the mosaic at 8% opacity on top.
+    // Draw a 1px-blurred copy of the mosaic at configurable opacity on top.
     // This blends hard pixel-grid lines without making tiles themselves blurry.
     // Only in pure tile mode (overlayMode='none') to avoid double-blending.
-    if ((savedSettings.overlayMode ?? 'none') === 'none') {
+    // blurOpacity: 0 = off, 0.08 = 8% (default, subtle), 0.20-0.30 = visibly softer
+    const BLUR_OPACITY = savedSettings.blurOpacity ?? 0.08;
+    if ((savedSettings.overlayMode ?? 'none') === 'none' && BLUR_OPACITY > 0) {
       try {
         const blurCanvas = document.createElement('canvas');
         blurCanvas.width = CANVAS_W; blurCanvas.height = CANVAS_H;
@@ -1915,7 +1917,7 @@ export default function Studio() {
         blurCtx.filter = 'blur(1px)';
         blurCtx.drawImage(canvas, 0, 0);
         blurCtx.filter = 'none';
-        ctx.globalAlpha = 0.08;
+        ctx.globalAlpha = BLUR_OPACITY;
         ctx.drawImage(blurCanvas, 0, 0);
         ctx.globalAlpha = 1.0;
       } catch { /* ignore if canvas is tainted */ }

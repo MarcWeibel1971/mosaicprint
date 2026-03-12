@@ -96,6 +96,7 @@ interface AlgoSettings {
   contrastBoost: number    // 1.0-1.5: contrast boost on target before matching
   overlayMode: 'none' | 'softlight' | 'alpha'  // overlay blending mode
   mobileMaxTiles: number  // max unique tiles loaded on mobile (default 1500)
+  blurOpacity: number      // blur-overlay opacity 0–0.30 (default 0.08 = 8%)
 }
 const DEFAULT_SETTINGS: AlgoSettings = {
   baseTiles: 100,     // 100 columns = fine detail (matches reference quality)
@@ -115,6 +116,7 @@ const DEFAULT_SETTINGS: AlgoSettings = {
   contrastBoost: 1.20,     // Mild contrast boost for matching
   overlayMode: 'none' as const,  // Pure tile rendering
   mobileMaxTiles: 1500,  // max unique tiles on mobile (higher = better quality, more RAM)
+  blurOpacity: 0.08,      // blur-overlay opacity (8% = subtle edge softening)
 }
 
 function loadSettings(): AlgoSettings {
@@ -1774,6 +1776,7 @@ function AlgorithmSettings() {
           <SliderRow label="Nachbar-Penalty" desc="Stärke der Bestrafung für wiederholte Kacheln in der Nähe. Höher = mehr Vielfalt." settingKey="neighborPenalty" min={0} max={500} step={10} />
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 mt-6">Mobile-Optimierung</h3>
           <SliderRow label="Mobile Max Tiles" desc="Maximale Anzahl einzigartiger Kacheln auf Mobilgeräten. Höher = bessere Qualität, mehr RAM-Verbrauch. Empfohlen: 1500–5000. Bis 10000 für Tests möglich." settingKey="mobileMaxTiles" min={500} max={10000} step={500} />
+          <SliderRow label="Blur-Overlay Opacity" desc="Stärke des 1px-Blur-Überlagerungseffekts auf Kachel-Rändern. 0% = aus, 8% = subtil (Standard), 20-30% = sichtbar weicher. Nur im Modus 'none' aktiv." settingKey="blurOpacity" min={0} max={0.30} step={0.01} format={v => Math.round(v * 100) + '%'} />
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 mt-6">Hi-Res Zoom</h3>
           <SliderRow label="Hi-Res Kachel-Grösse (px)" desc="Auflösung der Kacheln beim Zoom. Höher = schärfer, aber langsamer zu laden." settingKey="hiResPx" min={80} max={400} step={20} />
           <SliderRow label="Hi-Res Schwellwert" desc="Ab welchem Zoom-Level die Hi-Res-Kacheln eingeblendet werden." settingKey="hiResThreshold" min={0.5} max={3} step={0.1} format={v => v.toFixed(1) + '×'} />
