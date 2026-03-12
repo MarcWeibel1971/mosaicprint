@@ -25,6 +25,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
 import { createContext } from "./context.js";
 import * as db from "./db.js";
+import sharp from "sharp";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -490,6 +491,154 @@ app.post("/api/admin/remove-shutterstock", async (_req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Texture Atlas ──────────────────────────────────────────────────────────────
+// GET /api/tile-atlas?theme=&tileSize=64&maxTiles=3000
+// Returns a single sprite-sheet JPEG containing all tiles (or a subset).
+// Also returns X-Atlas-Map header with JSON: {id: [col, row], ...}
+// This replaces thousands of individual /api/tile/:id requests with ONE request.
+//
+// Cache: in-memory per (theme, tileSize, maxTiles), TTL 30 minutes
+// First build: ~10-30s (downloads all tiles), subsequent: instant
+
+interface AtlasCache {
+  jpeg: Buffer;
+  map: Record<number, [number, number]>; // tileId → [col, row]
+  tileSize: number;
+  cols: number;
+  rows: number;
+  builtAt: number;
+}
+const atlasCacheMap = new Map<string, AtlasCache>();
+const ATLAS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+let atlasBuildInProgress = new Set<string>();
+
+app.get('/api/tile-atlas', async (req, res) => {
+  try {
+    const theme = ((req.query.theme as string) ?? '').toLowerCase().trim();
+    const tileSize = Math.min(Math.max(Number(req.query.tileSize ?? 64), 32), 128);
+    const maxTiles = Math.min(Number(req.query.maxTiles ?? 5000), 30000);
+    const cacheKey = `${theme}|${tileSize}|${maxTiles}`;
+
+    // Serve from cache if fresh
+    const cached = atlasCacheMap.get(cacheKey);
+    if (cached && (Date.now() - cached.builtAt) < ATLAS_CACHE_TTL_MS) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Content-Length', cached.jpeg.length);
+      res.setHeader('Cache-Control', 'public, max-age=1800');
+      res.setHeader('X-Atlas-Cols', cached.cols.toString());
+      res.setHeader('X-Atlas-Rows', cached.rows.toString());
+      res.setHeader('X-Atlas-TileSize', cached.tileSize.toString());
+      res.setHeader('X-Atlas-Map', JSON.stringify(cached.map));
+      res.setHeader('X-Cache', 'HIT');
+      return res.send(cached.jpeg);
+    }
+
+    // If build already in progress, return 202 Accepted
+    if (atlasBuildInProgress.has(cacheKey)) {
+      return res.status(202).json({ building: true, message: 'Atlas is being built, retry in a few seconds' });
+    }
+
+    atlasBuildInProgress.add(cacheKey);
+    console.log(`[atlas] Building atlas: theme=${theme || 'all'}, tileSize=${tileSize}, maxTiles=${maxTiles}`);
+
+    const pool = db.getPool();
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
+    const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `WHERE subject = $1` : ``;
+    const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
+
+    // Fetch tile IDs and URLs
+    const result = await pool.query(
+      `SELECT id, tile128_url, source_url FROM mosaic_images
+       ${themeFilter} ORDER BY id ASC LIMIT $${queryParams.length + 1}`,
+      [...queryParams, maxTiles]
+    );
+    const rows = result.rows;
+    const n = rows.length;
+    if (n === 0) {
+      atlasBuildInProgress.delete(cacheKey);
+      return res.status(404).json({ error: 'No tiles found' });
+    }
+
+    // Layout: square-ish grid
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows2 = Math.ceil(n / cols);
+    const atlasW = cols * tileSize;
+    const atlasH = rows2 * tileSize;
+
+    // Build atlas using sharp composite
+    const CONCURRENCY = 20;
+    const compositeInputs: sharp.OverlayOptions[] = [];
+    const tileMap: Record<number, [number, number]> = {};
+
+    for (let i = 0; i < n; i += CONCURRENCY) {
+      const batch = rows.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (row: any, bi: number) => {
+        const idx = i + bi;
+        const col = idx % cols;
+        const rowIdx = Math.floor(idx / cols);
+        const url = row.tile128_url || row.source_url || '';
+        if (!url) return;
+
+        try {
+          // Check in-memory tile cache first
+          const cacheKeyTile = `${row.id}-128`;
+          let imgBuf: Buffer | null = null;
+          const tileCached = tileCacheMap.get(cacheKeyTile);
+          if (tileCached) {
+            imgBuf = tileCached.buf;
+          } else if (url.startsWith('data:')) {
+            imgBuf = Buffer.from(url.split(',')[1], 'base64');
+          } else {
+            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
+            if (resp.ok) imgBuf = Buffer.from(await resp.arrayBuffer());
+          }
+          if (!imgBuf) return;
+
+          // Resize to tileSize×tileSize
+          const resized = await sharp(imgBuf).resize(tileSize, tileSize, { fit: 'cover' }).jpeg({ quality: 80 }).toBuffer();
+          compositeInputs[idx] = { input: resized, top: rowIdx * tileSize, left: col * tileSize };
+          tileMap[Number(row.id)] = [col, rowIdx];
+        } catch {
+          // Skip failed tiles
+        }
+      }));
+      if (i % 500 === 0) console.log(`[atlas] Processing tiles ${i}/${n}...`);
+    }
+
+    // Create blank canvas and composite all tiles
+    const validInputs = compositeInputs.filter(Boolean);
+    const atlasJpeg = await sharp({
+      create: { width: atlasW, height: atlasH, channels: 3, background: { r: 128, g: 128, b: 128 } }
+    }).composite(validInputs).jpeg({ quality: 82 }).toBuffer();
+
+    const atlasData: AtlasCache = {
+      jpeg: atlasJpeg,
+      map: tileMap,
+      tileSize,
+      cols,
+      rows: rows2,
+      builtAt: Date.now(),
+    };
+    atlasCacheMap.set(cacheKey, atlasData);
+    atlasBuildInProgress.delete(cacheKey);
+    console.log(`[atlas] Built: ${n} tiles, ${cols}×${rows2} grid, ${(atlasJpeg.length/1024/1024).toFixed(1)} MB JPEG`);
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Length', atlasJpeg.length);
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    res.setHeader('X-Atlas-Cols', cols.toString());
+    res.setHeader('X-Atlas-Rows', rows2.toString());
+    res.setHeader('X-Atlas-TileSize', tileSize.toString());
+    res.setHeader('X-Atlas-Map', JSON.stringify(tileMap));
+    res.setHeader('X-Cache', 'MISS');
+    res.send(atlasJpeg);
+  } catch (e) {
+    atlasBuildInProgress.clear();
+    console.error('[atlas] Error:', e);
+    res.status(500).json({ error: String(e) });
   }
 });
 

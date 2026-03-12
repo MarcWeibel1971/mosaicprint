@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
 import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
+import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
 
 // ── Picsum fallback pool ──────────────────────────────────────────────────────
 const PICSUM_IDS: number[] = (() => {
@@ -1103,24 +1104,47 @@ export default function Studio() {
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
-      const tileIdArray = Array.from(neededTileIds);
-      const BATCH = isMobileOrSlow ? 30 : 80;
-      let loaded = 0;
-      for (let i = 0; i < tileIdArray.length; i += BATCH) {
-        const batchIds = tileIdArray.slice(i, i + BATCH);
-        const batchImgs = await Promise.all(
-          batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
-        );
-        for (let j = 0; j < batchIds.length; j++) {
-          if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+      // ── Try Texture Atlas first (1 HTTP request instead of thousands) ──
+      setProgressMsg('Lade Kachel-Atlas (1 Request)...');
+      const atlasMaxTiles = Math.min(neededTileIds.size + 500, 10000);
+      const atlas = await loadTileAtlas(
+        selectedTheme === 'all' ? '' : selectedTheme,
+        64,
+        atlasMaxTiles,
+        (pct) => setProgress(25 + Math.round(pct * 0.20)),
+      );
+
+      if (atlas && atlas.tileImgMap.size > 0) {
+        // Atlas loaded successfully – copy only the needed tiles into tileImgMap
+        for (const id of neededTileIds) {
+          const img = atlas.tileImgMap.get(id);
+          if (img) tileImgMap.set(id, img);
         }
-        loaded += batchIds.length;
-        const pct = 25 + Math.round((loaded / tileIdArray.length) * 20);
-        setProgress(Math.min(pct, 45));
-        setCacheSize(getMemoryCacheSize());
-        await new Promise(r => setTimeout(r, 0));
+        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles from sprite-sheet (${atlas.tileCount} total in atlas)`);
+        setProgress(45);
+      } else {
+        // Fallback: load tiles individually (original behavior)
+        console.log('[Studio] Atlas unavailable, falling back to individual tile requests');
+        setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder (Einzelabruf)...`);
+        const tileIdArray = Array.from(neededTileIds);
+        const BATCH = isMobileOrSlow ? 30 : 80;
+        let loaded = 0;
+        for (let i = 0; i < tileIdArray.length; i += BATCH) {
+          const batchIds = tileIdArray.slice(i, i + BATCH);
+          const batchImgs = await Promise.all(
+            batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
+          );
+          for (let j = 0; j < batchIds.length; j++) {
+            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+          }
+          loaded += batchIds.length;
+          const pct = 25 + Math.round((loaded / tileIdArray.length) * 20);
+          setProgress(Math.min(pct, 45));
+          setCacheSize(getMemoryCacheSize());
+          await new Promise(r => setTimeout(r, 0));
+        }
+        console.log(`[Studio] Loaded ${tileImgMap.size}/${neededTileIds.size} tile images`);
       }
-      console.log(`[Studio] Loaded ${tileImgMap.size}/${neededTileIds.size} tile images`);
     }
 
     // ── Fallback: legacy pool if 2-stage not available ────────────────────────
@@ -2052,11 +2076,22 @@ export default function Studio() {
       outCtx.restore();
     }
 
-    // Download as PNG (RGB, Printolino-compatible)
-    const suffix = paid ? "druckbereit" : "vorschau";
-    const link = document.createElement("a");
-    link.download = `mosaicprint-${outW}x${outH}-${suffix}.png`;
-    link.href = outCanvas.toDataURL("image/png");
+    // Download as JPEG (much smaller files, print-compatible)
+    // JPEG requires opaque background (no transparency) – fill white first
+    const jpegCanvas = document.createElement('canvas');
+    jpegCanvas.width = outW;
+    jpegCanvas.height = outH;
+    const jpegCtx = jpegCanvas.getContext('2d')!;
+    jpegCtx.fillStyle = '#ffffff'; // white background for JPEG
+    jpegCtx.fillRect(0, 0, outW, outH);
+    jpegCtx.drawImage(outCanvas, 0, 0);
+
+    // Quality: 85% for preview (smaller file), 95% for print (max quality)
+    const jpegQuality = paid ? 0.95 : 0.85;
+    const suffix = paid ? 'druckbereit' : 'vorschau';
+    const link = document.createElement('a');
+    link.download = `mosaicprint-${outW}x${outH}-${suffix}.jpg`;
+    link.href = jpegCanvas.toDataURL('image/jpeg', jpegQuality);
     link.click();
   }, [selectedFormat]);
 
