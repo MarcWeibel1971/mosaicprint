@@ -970,7 +970,8 @@ export default function Studio() {
       // Mobile: cap unique tiles at 800 to prevent OOM (iOS Safari kills tab at ~150 MB)
       // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
       // This preserves quality (best matches kept) while reducing memory footprint
-      const MOBILE_MAX_TILES = 1500; // increased from 1000 – more unique tiles = better matching quality
+      // Read mobileMaxTiles from Admin settings (default 1500 if not configured)
+      const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 1500;
       if (isMobileOrSlow && neededTileIds.size > MOBILE_MAX_TILES) {
         // Score each tile: sum of (1/(rank+1)) across all cells where it appears
         // Higher score = appears as top candidate for more cells = more important to keep
