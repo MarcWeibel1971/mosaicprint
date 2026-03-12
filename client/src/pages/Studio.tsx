@@ -835,7 +835,7 @@ export default function Studio() {
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
-    const TOP_K = isMobileOrSlow ? 15 : 80; // Mobile: 15 candidates × 2000 cells = ~800 unique tiles (fits in 400 LRU cache with eviction)
+    const TOP_K = isMobileOrSlow ? 50 : 80; // Mobile: 50 candidates gives good diversity; unique tiles capped at 800 via frequency selection
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
@@ -951,24 +951,32 @@ export default function Studio() {
         }
       }
       console.log(`[Studio] ${IS_14D ? '14D' : IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
-      // Mobile: hard cap on neededTileIds to prevent OOM (iOS kills tab at ~150 MB)
-      // If too many unique tiles, keep only the most-referenced ones
-      if (isMobileOrSlow && neededTileIds.size > 600) {
-        // Count how many cells reference each tile
-        const tileRefCount = new Map<number, number>();
+      // Mobile: cap unique tiles at 800 to prevent OOM (iOS Safari kills tab at ~150 MB)
+      // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
+      // This preserves quality (best matches kept) while reducing memory footprint
+      const MOBILE_MAX_TILES = 800;
+      if (isMobileOrSlow && neededTileIds.size > MOBILE_MAX_TILES) {
+        // Score each tile: sum of (1/(rank+1)) across all cells where it appears
+        // Higher score = appears as top candidate for more cells = more important to keep
+        const tileScore = new Map<number, number>();
         for (const candidates of cellCandidates) {
-          for (const c of candidates) {
-            tileRefCount.set(c.tileId, (tileRefCount.get(c.tileId) ?? 0) + 1);
+          for (let rank = 0; rank < candidates.length; rank++) {
+            const id = candidates[rank].tileId;
+            tileScore.set(id, (tileScore.get(id) ?? 0) + 1 / (rank + 1));
           }
         }
-        // Keep top 600 most-referenced tiles
-        const sorted = [...tileRefCount.entries()].sort((a, b) => b[1] - a[1]);
-        const keepIds = new Set(sorted.slice(0, 600).map(e => e[0]));
-        // Remove tiles not in keepIds from neededTileIds
-        for (const id of neededTileIds) {
+        // Keep top MOBILE_MAX_TILES tiles by score
+        const sorted = [...tileScore.entries()].sort((a, b) => b[1] - a[1]);
+        const keepIds = new Set(sorted.slice(0, MOBILE_MAX_TILES).map(e => e[0]));
+        // Rebuild neededTileIds with only the kept tiles
+        for (const id of [...neededTileIds]) {
           if (!keepIds.has(id)) neededTileIds.delete(id);
         }
-        console.log(`[Studio] Mobile: capped neededTileIds to ${neededTileIds.size}`);
+        // Also update cellCandidates to only reference kept tiles (for SSD stage)
+        for (let ci = 0; ci < cellCandidates.length; ci++) {
+          cellCandidates[ci] = cellCandidates[ci].filter(c => keepIds.has(c.tileId));
+        }
+        console.log(`[Studio] Mobile: capped neededTileIds to ${neededTileIds.size} (score-based selection)`);
       }
     }
 
