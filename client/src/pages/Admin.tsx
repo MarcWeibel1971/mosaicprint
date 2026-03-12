@@ -59,6 +59,7 @@ interface SmartImportJob {
 
 // ── Algorithm settings stored in localStorage ─────────────────────────────────
 const SETTINGS_KEY = 'mosaicprint_algo_settings'
+const OVERRIDES_KEY = 'mosaicprint_algo_overrides'  // manual Admin overrides, applied on top of presets
 interface AlgoSettings {
   baseTiles: number
   tilePx: number
@@ -78,20 +79,20 @@ interface AlgoSettings {
   overlayMode: 'none' | 'softlight' | 'alpha'  // overlay blending mode
 }
 const DEFAULT_SETTINGS: AlgoSettings = {
-  baseTiles: 80,      // 80 columns = good detail, manageable load
+  baseTiles: 65,      // 65 columns = good detail, manageable load
   tilePx: 12,         // 12px display tiles (loaded at 64px, downscaled)
-  baseOverlay: 0.15,  // 15% overlay – needed for portrait visibility
-  edgeBoost: 0.20,    // extra overlay at edges/contours (max 35% at sharp edges)
-  neighborRadius: 4,
-  neighborPenalty: 160,
+  baseOverlay: 0.35,  // 35% overlay – strong enough for portrait visibility
+  edgeBoost: 0.20,    // extra overlay at edges/contours
+  neighborRadius: 5,
+  neighborPenalty: 180,
   hiResPx: 200,
   hiResThreshold: 1.2,
-  labWeight: 0.40,
-  brightnessWeight: 0.30,
-  textureWeight: 0.10,
-  edgeWeight: 0.20,
+  labWeight: 0.15,
+  brightnessWeight: 0.45,  // brightness drives face structure
+  textureWeight: 0.12,
+  edgeWeight: 0.18,
   enableRotation: true,
-  histogramBlend: 0.10,    // 0.10 = 65% LAB color transfer strength (portrait-optimized default)
+  histogramBlend: 0.12,    // 0.12 = strong LAB color transfer (L_BLEND=0.70)
   contrastBoost: 1.30,     // 30% contrast boost for matching
   overlayMode: 'alpha' as const,  // alpha blending (strongest portrait visibility)
 }
@@ -104,6 +105,8 @@ function loadSettings(): AlgoSettings {
 }
 function saveSettings(s: AlgoSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+  // Also save as overrides so Studio preset-merge respects manual Admin changes
+  localStorage.setItem(OVERRIDES_KEY, JSON.stringify(s))
 }
 
 // ── Color helpers ─────────────────────────────────────────────────────────────

@@ -487,11 +487,12 @@ export default function Studio() {
           setDetectedImageType(imageType);
 
           // Step 4: Auto-apply optimal preset on EVERY upload.
-          // FIX B: Merge preset with existing Admin settings – Admin settings take priority.
-          // This means: if Admin set baseOverlay=0.35, the preset will NOT override it.
-          // Only keys NOT set in Admin (i.e. still at default) will be overridden by the preset.
-          const existingSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-          const mergeWithAdmin = (preset: Record<string, unknown>) => ({ ...preset, ...existingSettings });
+          // Preset always wins on upload. Admin manual overrides are stored separately
+          // in 'mosaicprint_algo_overrides' and applied ON TOP of the preset.
+          // This prevents stale localStorage (e.g. portraitMode:false from last session) from
+          // overriding the freshly detected preset.
+          const adminOverrides = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}'); } catch { return {}; } })();
+          const mergeWithAdmin = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides });
 
           if (imageType === 'portrait') {
             // FIX B+D+E: Portrait preset with stronger L_BLEND (via histogramBlend=0.12)
