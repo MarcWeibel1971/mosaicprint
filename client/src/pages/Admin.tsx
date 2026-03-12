@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Database, RefreshCw, Upload, Image, Save, CheckCircle, XCircle,
-  Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download
+  Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -898,6 +898,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
+  const [pdfExporting, setPdfExporting] = useState(false)
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -993,6 +994,107 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter])
   useEffect(() => { fetchImages(page) }, [page])
+
+  const handlePdfExport = useCallback(async () => {
+    setPdfExporting(true)
+    onMessage({ text: 'PDF wird generiert... (kann 30–60s dauern)', type: 'info' })
+    try {
+      // Fetch all images (up to 2000) for the PDF
+      const params: Record<string, string | number> = { page: 1, limit: 2000 }
+      if (sourceFilter !== 'alle') params.sourceId = sourceFilter
+      if (colorFilter !== 'alle') params.colorFilter = colorFilter
+      if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
+      const encoded = encodeURIComponent(JSON.stringify(params))
+      const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
+      const data = await res.json()
+      const parsed = data.result?.data ?? data
+      const allImages: TileImage[] = parsed.images ?? []
+
+      const { jsPDF } = await import('jspdf')
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+      const pageW = 210, pageH = 297
+      const margin = 10
+      const tileSize = 18  // mm per tile
+      const cols = Math.floor((pageW - 2 * margin) / tileSize)
+      const rowH = tileSize + 8  // tile + label area
+      const headerH = 20
+
+      // Title page
+      doc.setFontSize(20)
+      doc.setTextColor(30, 30, 30)
+      doc.text('MosaicPrint – Tile-Katalog', pageW / 2, 30, { align: 'center' })
+      doc.setFontSize(10)
+      doc.setTextColor(100, 100, 100)
+      const filterDesc = [sourceFilter !== 'alle' ? `Quelle: ${sourceFilter}` : '', colorFilter !== 'alle' ? `Farbe: ${colorFilter}` : '', brightnessFilter !== 'alle' ? `Helligkeit: ${brightnessFilter}` : ''].filter(Boolean).join(' · ') || 'Alle Tiles'
+      doc.text(`${allImages.length.toLocaleString()} Tiles · ${filterDesc}`, pageW / 2, 40, { align: 'center' })
+      doc.text(`Generiert: ${new Date().toLocaleDateString('de-CH')}`, pageW / 2, 47, { align: 'center' })
+
+      // Grid pages
+      let x = margin, y = headerH + margin
+      let pageNum = 1
+      doc.addPage()
+
+      const addPageHeader = () => {
+        doc.setFontSize(7)
+        doc.setTextColor(150, 150, 150)
+        doc.text(`MosaicPrint Tile-Katalog · Seite ${pageNum} · ${allImages.length.toLocaleString()} Tiles`, margin, 7)
+        doc.setDrawColor(220, 220, 220)
+        doc.line(margin, 9, pageW - margin, 9)
+      }
+      addPageHeader()
+
+      for (let i = 0; i < allImages.length; i++) {
+        const img = allImages[i]
+        // Load image as base64 via /api/tile/:id
+        try {
+          const imgRes = await fetch(`/api/tile/${img.id}?size=64`)
+          const blob = await imgRes.blob()
+          const b64 = await new Promise<string>((resolve) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result as string)
+            reader.readAsDataURL(blob)
+          })
+          doc.addImage(b64, 'JPEG', x, y, tileSize, tileSize)
+        } catch {
+          // Draw placeholder if image fails
+          doc.setFillColor(230, 230, 230)
+          doc.rect(x, y, tileSize, tileSize, 'F')
+        }
+
+        // Labels below tile
+        doc.setFontSize(4.5)
+        doc.setTextColor(80, 80, 80)
+        const colorLabel = COLOR_LABELS[img.colorCategory ?? '']?.label ?? ''
+        const brightLabel = img.brightnessCategory ?? ''
+        doc.text(`#${img.id}`, x + tileSize / 2, y + tileSize + 2.5, { align: 'center' })
+        doc.setTextColor(120, 120, 120)
+        doc.text(`${colorLabel}`, x + tileSize / 2, y + tileSize + 5, { align: 'center' })
+        doc.text(`L:${img.avgL.toFixed(0)} a:${img.avgA.toFixed(0)} b:${img.avgB.toFixed(0)}`, x + tileSize / 2, y + tileSize + 7.5, { align: 'center' })
+        doc.text(`${brightLabel}`, x + tileSize / 2, y + tileSize + 10, { align: 'center' })
+
+        x += tileSize + 1
+        if (x + tileSize > pageW - margin) {
+          x = margin
+          y += rowH
+          if (y + rowH > pageH - margin) {
+            doc.addPage()
+            pageNum++
+            addPageHeader()
+            y = headerH
+            x = margin
+          }
+        }
+      }
+
+      const filename = `mosaicprint-tiles-${new Date().toISOString().slice(0, 10)}.pdf`
+      doc.save(filename)
+      onMessage({ text: `✅ PDF mit ${allImages.length} Tiles exportiert`, type: 'success' })
+    } catch (e) {
+      onMessage({ text: `❌ PDF-Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setPdfExporting(false)
+    }
+  }, [sourceFilter, colorFilter, brightnessFilter, onMessage])
 
   const handleDelete = async (id: number) => {
     try {
@@ -1274,7 +1376,52 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         )}
       </div>
 
-      {/* Dedup Button */}
+      {/* Portrait Import Recommendation */}
+      {dbStats && (() => {
+        const skinToneCount = (dbStats.byColor['orange'] ?? 0) + (dbStats.byColor['yellow'] ?? 0)
+        const lowSatCount = dbStats.bySaturation?.['niedrig'] ?? 0
+        const totalLab = dbStats.labIndexed || 1
+        const skinPct = Math.round(skinToneCount / totalLab * 100)
+        const lowSatPct = Math.round(lowSatCount / totalLab * 100)
+        const needsPortraitImport = skinPct < 8 || lowSatPct < 20
+        if (!needsPortraitImport) return null
+        return (
+          <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-bold text-red-800">⚠️ Dringend: Portrait-Qualität leidet – zu wenig Hauttöne & neutrale Tiles!</p>
+                <p className="text-xs text-red-600 mt-1">
+                  Hauttöne (Orange/Gelb): <strong>{skinPct}%</strong> (Ziel: ≥8%) · Niedrig-Sättigung: <strong>{lowSatPct}%</strong> (Ziel: ≥20%)
+                </p>
+                <p className="text-xs text-red-600 mt-1">Ohne genug Hauttöne und neutrale Tiles wirken Gesichter im Mosaik bunt und unscharf.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[
+                    { query: 'human skin texture closeup', label: 'Haut-Textur' },
+                    { query: 'warm portrait face skin', label: 'Portrait Haut' },
+                    { query: 'soft beige background', label: 'Beige Hintergrund' },
+                    { query: 'neutral gray texture', label: 'Grau Textur' },
+                    { query: 'warm sand beach', label: 'Sand/Beige' },
+                  ].map(({ query, label }) => (
+                    <button key={query}
+                      onClick={() => runQuickImport(query, label)}
+                      disabled={quickImportLoading === query}
+                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                      {quickImportLoading === query ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {Object.entries(quickImportResult).filter(([k]) => ['human skin texture closeup','warm portrait face skin','soft beige background','neutral gray texture','warm sand beach'].includes(k)).map(([k, v]) => (
+                  <p key={k} className="text-xs mt-1 text-gray-600">{v}</p>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* PDF Export + Dedup Button */}
       <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-wrap items-center gap-3">
         <div className="flex-1">
           <p className="text-sm font-semibold text-amber-800">🔧 Datenbankwartung</p>
@@ -1307,6 +1454,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           {constraintResult && <p className="text-xs mt-1 font-medium text-gray-700">{constraintResult}</p>}
         </div>
         <div className="flex flex-col gap-2">
+          <button
+            onClick={handlePdfExport}
+            disabled={pdfExporting}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+          >
+            {pdfExporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+            {pdfExporting ? 'PDF wird generiert...' : 'Tile-Katalog als PDF'}
+          </button>
           <button
             onClick={runDedup}
             disabled={dedupLoading}
@@ -1369,11 +1524,23 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button key={img.id} onClick={() => setSelectedImage(img)}
               className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200 hover:border-indigo-400 hover:scale-105 transition-all">
               <img
-                src={getHighResUrl(img.tile128Url || img.sourceUrl, 300)}
+                src={`/api/tile/${img.id}?size=64`}
                 alt=""
                 className="w-full h-full object-cover"
                 loading="lazy"
-                onError={(e) => { (e.target as HTMLImageElement).src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect fill="%23e5e7eb" width="64" height="64"/></svg>' }}
+                onError={(e) => {
+                  // Fallback: try tile128Url directly, then sourceUrl, then placeholder
+                  const t = e.target as HTMLImageElement;
+                  if (!t.dataset.fallback1 && img.tile128Url) {
+                    t.dataset.fallback1 = '1';
+                    t.src = img.tile128Url;
+                  } else if (!t.dataset.fallback2 && img.sourceUrl) {
+                    t.dataset.fallback2 = '1';
+                    t.src = img.sourceUrl;
+                  } else {
+                    t.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect fill="%23e5e7eb" width="64" height="64"/></svg>';
+                  }
+                }}
               />
               {/* Color dot */}
               {img.colorCategory && COLOR_LABELS[img.colorCategory] && (

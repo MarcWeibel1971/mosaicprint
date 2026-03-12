@@ -755,6 +755,18 @@ export default function Studio() {
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const isMobileOrSlow = isMobile || (navigator as any).connection?.effectiveType === "2g";
 
+    // FIX: Mobile gets reduced grid to prevent memory crash (iOS canvas limit ~16MP)
+    // With baseTiles=80, tilePx=8: 80×100×8px = 640×800px canvas = fine, BUT
+    // 8000 cells × 35 candidates = 280K image loads → OOM on mobile
+    // Solution: cap mobile at 50 tiles × 10px = 500×625px canvas, ~3000 cells
+    if (isMobile) {
+      const mobileMaxTiles = 50;
+      const mobileTilePx = 10;
+      if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
+      if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
+      console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles ×', savedSettings.tilePx, 'px');
+    }
+
      // ── Stage A: Load LAB index (if not already loaded) ──────────────────────
     setProgressMsg("Lade LAB-Index aller Kacheln...");
     setProgress(10);
