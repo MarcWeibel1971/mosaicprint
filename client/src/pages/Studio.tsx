@@ -1036,9 +1036,11 @@ export default function Studio() {
       // 2-pass: first collect all candidates (with 14D features), then load images
       for (let ci = 0; ci < TOTAL_TILES; ci++) {
         const [tL, tA, tB] = cellLab[ci];
-        const targetEdge = IS_7D ? edgeMap[ci] : 0;
-        const targetBright = IS_7D ? tL / 100 : 0;
-        const targetSat = IS_7D ? Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60) : 0;
+        // FIX: targetEdge/targetBright/targetSat must be active for ALL index types (7D, 14D, 15D)!
+        // Previously they were 0 for 14D/15D → Gray-Penalty in kNN was completely disabled → gray patches!
+        const targetEdge = edgeMap[ci]; // always active
+        const targetBright = tL / 100;  // always active
+        const targetSat = Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60); // always active
         // For 14D: use cell LAB for all quadrants (cell resolution = 1px, so all quads equal)
         // The quadrant matching happens on the TILE side (DB has per-quadrant data)
         const tQuadA: [number,number,number,number] = [tA, tA, tA, tA];
