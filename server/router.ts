@@ -106,6 +106,56 @@ const SUBJECT_KEYWORDS = [
   "colorful food", "fruit arrangement", "flowers bouquet", "candles warm light", "coffee art",
 ];
 
+// ── Score-based keyword lists ────────────────────────────────────────────────
+// These lists are used when the DB proportion is BELOW the target.
+// Targets (from the Portrait-Quality-Score UI):
+//   low-sat (sqrt(a²+b²) < 20):  target 30% → import MEDIUM-sat images to reduce low-sat share
+//   mid-sat (20–42):             target 40%
+//   high-sat (>42):              target 30%
+//   cool (avg_b < -5):           target 20%
+//   extreme-dark (avg_l < 20):   target 10%
+//   extreme-bright (avg_l > 85): target 10%
+
+// MEDIUM_SAT_KEYWORDS: Images with moderate saturation (sat 20-42) – reduces low-sat share
+// Use these when low-sat > 40% (currently 67%!)
+const MEDIUM_SAT_KEYWORDS = [
+  // Warm mid-sat: skin tones, wood, earth
+  "autumn leaves warm", "wooden texture warm", "terracotta pottery", "warm brick wall",
+  "brown leather texture", "copper metal surface", "warm stone wall", "rustic wood grain",
+  "warm sand dunes", "golden wheat field", "honey jar closeup", "caramel dessert",
+  // Cool mid-sat: sky, water, stone
+  "overcast sky blue", "grey blue ocean", "misty mountain blue", "blue grey stone",
+  "slate texture cool", "blue grey concrete", "cool morning fog", "blue grey abstract",
+  // Neutral mid-sat: portraits, fabric
+  "portrait natural light", "linen fabric texture", "cotton fabric closeup", "denim texture",
+  "muted green plant", "sage green wall", "dusty rose fabric", "muted blue fabric",
+];
+
+// COOL_KEYWORDS: Blue/teal/cool-toned images – currently only 14% (target 20%)
+const COOL_KEYWORDS = [
+  "blue ocean waves", "teal water surface", "cool blue sky", "icy blue abstract",
+  "blue grey pebbles", "cool morning mist", "blue steel texture", "arctic ice blue",
+  "cool blue bokeh", "blue winter landscape", "teal green water", "cool shadow blue",
+  "blue grey fog", "cool blue gradient", "midnight blue texture", "blue stone surface",
+  "cool blue portrait", "blue hour photography", "teal abstract art", "cool cyan water",
+];
+
+// EXTREME_DARK_KEYWORDS: Very dark images (avg_l < 20) – currently only 2% (target 10%)
+const EXTREME_DARK_KEYWORDS = [
+  "pure black background", "black velvet texture", "dark night sky stars", "black coal texture",
+  "black ink abstract", "dark shadow minimal", "black marble texture", "night photography dark",
+  "black fur closeup", "dark forest night", "black metal texture", "very dark abstract",
+  "black leather texture", "dark void abstract", "black stone texture", "deep shadow portrait",
+];
+
+// EXTREME_BRIGHT_KEYWORDS: Very bright images (avg_l > 85) – currently only 1% (target 10%)
+const EXTREME_BRIGHT_KEYWORDS = [
+  "pure white background", "bright white snow", "overexposed white light", "white marble texture",
+  "bright white clouds", "white foam ocean", "white paper texture bright", "white flower macro bright",
+  "bright sunlight reflection", "white sand beach bright", "white fabric bright", "white wall bright",
+  "bright white abstract", "white bokeh bright", "overexposed portrait", "white studio background",
+];
+
 // LOW_SAT_KEYWORDS: Neutral/gray/skin-tone tiles – critical for portrait quality
 // These are imported with DOUBLED priority in smartImport because portrait matching
 // suffers most from a lack of neutral/skin-friendly tiles in the pool.
@@ -182,10 +232,94 @@ function getBrightnessCategory(avgL: number): string {
 }
 
 // Analyse the full database and return prioritized import tasks
-// Uses 3D matrix: Color × Brightness × Subject (Motiv)
+// NEW: Uses REAL DB proportions (score metrics) to set priorities, not just bucket counts
 async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: string; priority: number; deficit: number; label: string; subject: string}>> {
   const pool = db.getPool();
-  // Count by color × brightness × subject bucket
+
+  // ── Step 1: Measure real DB proportions (same metrics as Portrait-Quality-Score) ──
+  const statsRes = await pool.query(`
+    SELECT
+      COUNT(*) as total,
+      COUNT(*) FILTER (WHERE SQRT(avg_a * avg_a + avg_b * avg_b) < 20) as low_sat,
+      COUNT(*) FILTER (WHERE SQRT(avg_a * avg_a + avg_b * avg_b) BETWEEN 20 AND 42) as mid_sat,
+      COUNT(*) FILTER (WHERE SQRT(avg_a * avg_a + avg_b * avg_b) > 42) as high_sat,
+      COUNT(*) FILTER (WHERE avg_b < -5) as cool,
+      COUNT(*) FILTER (WHERE avg_l < 20) as extreme_dark,
+      COUNT(*) FILTER (WHERE avg_l > 85) as extreme_bright
+    FROM mosaic_images
+  `);
+  const s = statsRes.rows[0];
+  const total = Math.max(1, Number(s.total));
+  const lowSatPct  = Number(s.low_sat)  / total;  // target: 0.30
+  const midSatPct  = Number(s.mid_sat)  / total;  // target: 0.40
+  const highSatPct = Number(s.high_sat) / total;  // target: 0.30
+  const coolPct    = Number(s.cool)     / total;  // target: 0.20
+  const exDarkPct  = Number(s.extreme_dark)  / total; // target: 0.10
+  const exBrightPct = Number(s.extreme_bright) / total; // target: 0.10
+
+  // Priority = how far below target we are (0 = at target, 1 = completely missing)
+  // If ABOVE target, priority is 0 (no import needed)
+  const highSatPriority  = Math.max(0, (0.30 - highSatPct)  / 0.30) * 3.0;  // max 3.0
+  const midSatPriority   = Math.max(0, (0.40 - midSatPct)   / 0.40) * 2.5;  // max 2.5
+  const coolPriority     = Math.max(0, (0.20 - coolPct)     / 0.20) * 2.0;  // max 2.0
+  const exDarkPriority   = Math.max(0, (0.10 - exDarkPct)   / 0.10) * 2.5;  // max 2.5
+  const exBrightPriority = Math.max(0, (0.10 - exBrightPct) / 0.10) * 2.5;  // max 2.5
+  // LOW_SAT is penalized if already above target (67% vs 30% target)
+  const lowSatPriority   = Math.max(0, (0.30 - lowSatPct)   / 0.30) * 1.5;  // 0 if >30%
+
+  const tasks: Array<{query: string; priority: number; deficit: number; label: string; subject: string}> = [];
+
+  // ── Step 2: Score-metric based tasks (highest priority) ──
+
+  // HIGH_SAT: currently 6%, target 30% → priority ~2.4
+  if (highSatPriority > 0.1) {
+    const deficit = Math.round((0.30 - highSatPct) * total);
+    for (const kw of HIGH_SAT_KEYWORDS) {
+      tasks.push({ query: kw, priority: highSatPriority, deficit, label: `ἰ8 Hoch-Sättigung (${Math.round(highSatPct*100)}% → Ziel 30%)`, subject: 'general' });
+    }
+  }
+
+  // EXTREME_DARK: currently 2%, target 10% → priority ~2.0
+  if (exDarkPriority > 0.1) {
+    const deficit = Math.round((0.10 - exDarkPct) * total);
+    for (const kw of EXTREME_DARK_KEYWORDS) {
+      tasks.push({ query: kw, priority: exDarkPriority, deficit, label: `⚫ Extrem-Dunkel (${Math.round(exDarkPct*100)}% → Ziel 10%)`, subject: 'general' });
+    }
+  }
+
+  // EXTREME_BRIGHT: currently 1%, target 10% → priority ~2.25
+  if (exBrightPriority > 0.1) {
+    const deficit = Math.round((0.10 - exBrightPct) * total);
+    for (const kw of EXTREME_BRIGHT_KEYWORDS) {
+      tasks.push({ query: kw, priority: exBrightPriority, deficit, label: `⚪ Extrem-Hell (${Math.round(exBrightPct*100)}% → Ziel 10%)`, subject: 'general' });
+    }
+  }
+
+  // COOL: currently 14%, target 20% → priority ~0.6
+  if (coolPriority > 0.1) {
+    const deficit = Math.round((0.20 - coolPct) * total);
+    for (const kw of COOL_KEYWORDS) {
+      tasks.push({ query: kw, priority: coolPriority, deficit, label: `❄️ Kühl-Töne (${Math.round(coolPct*100)}% → Ziel 20%)`, subject: 'general' });
+    }
+  }
+
+  // MID_SAT: currently 27%, target 40% → priority ~0.8
+  if (midSatPriority > 0.1) {
+    const deficit = Math.round((0.40 - midSatPct) * total);
+    for (const kw of MEDIUM_SAT_KEYWORDS) {
+      tasks.push({ query: kw, priority: midSatPriority, deficit, label: `🌈 Mittel-Sättigung (${Math.round(midSatPct*100)}% → Ziel 40%)`, subject: 'general' });
+    }
+  }
+
+  // LOW_SAT: only import if BELOW 30% target (currently 67% → priority = 0, skip!)
+  if (lowSatPriority > 0.1) {
+    const deficit = Math.round((0.30 - lowSatPct) * total);
+    for (const kw of LOW_SAT_KEYWORDS) {
+      tasks.push({ query: kw, priority: lowSatPriority, deficit, label: `🧖 Niedrig-Sättigung (${Math.round(lowSatPct*100)}% → Ziel 30%)`, subject: 'portrait' });
+    }
+  }
+
+  // ── Step 3: Color bucket gaps (lower priority, fills color diversity) ──
   const res = await pool.query(`
     SELECT
       CASE
@@ -213,112 +347,29 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     GROUP BY color_cat, brightness_cat, subject_cat
     ORDER BY cnt ASC
   `);
-
-  // Build a set of existing buckets
   const existing = new Map<string, number>();
   for (const row of res.rows) {
     existing.set(`${row.color_cat}|${row.brightness_cat}|${row.subject_cat}`, Number(row.cnt));
   }
 
-  const tasks: Array<{query: string; priority: number; deficit: number; label: string; subject: string}> = [];
   const colors = Object.keys(COLOR_BRIGHTNESS_KEYWORDS);
   const brightnesses = ['dark', 'mid', 'bright'];
-
   for (const color of colors) {
     for (const brightness of brightnesses) {
       const baseKws = COLOR_BRIGHTNESS_KEYWORDS[color]?.[brightness] ?? [];
       if (baseKws.length === 0) continue;
-
-      for (const subject of SUBJECTS) {
-        const bucketKey = `${color}|${brightness}|${subject}`;
-        const cnt = existing.get(bucketKey) ?? 0;
-        const deficit = Math.max(0, targetPerBucket - cnt);
-        if (deficit <= 0) continue;
-
-        const priority = deficit / targetPerBucket;
-        const subjectMods = SUBJECT_MODIFIERS[subject];
-
-        // Generate combined queries: colorKeyword + subjectModifier
-        for (const baseKw of baseKws.slice(0, 3)) { // top 3 color keywords
-          for (const subMod of subjectMods.slice(0, 2)) { // top 2 subject modifiers
-            tasks.push({
-              query: `${baseKw} ${subMod}`,
-              priority,
-              deficit,
-              label: `${color}/${brightness}/${subject}`,
-              subject,
-            });
-          }
-        }
-      }
-
-      // Also add pure color queries (subject='general') for overall coverage
+      // Skip neutral/mid – already over-represented (low-sat)
+      if (color === 'neutral' && lowSatPct > 0.35) continue;
       const generalKey = `${color}|${brightness}|general`;
       const generalCnt = existing.get(generalKey) ?? 0;
       const generalDeficit = Math.max(0, targetPerBucket - generalCnt);
       if (generalDeficit > 0) {
-        const priority = generalDeficit / targetPerBucket;
-        for (const kw of baseKws) {
-          tasks.push({ query: kw, priority: priority * 0.8, deficit: generalDeficit, label: `${color}/${brightness}/general`, subject: 'general' });
+        // Cap color bucket priority at 0.8 (below score-metric tasks)
+        const priority = Math.min(0.8, generalDeficit / targetPerBucket * 0.8);
+        for (const kw of baseKws.slice(0, 2)) {
+          tasks.push({ query: kw, priority, deficit: generalDeficit, label: `${color}/${brightness}`, subject: 'general' });
         }
       }
-    }
-  }
-
-  // Add LOW_SAT_KEYWORDS with DOUBLED priority (deficit × 2)
-  // These are critical for portrait quality – always prioritize neutral/skin-tone tiles
-  const lowSatKey = 'neutral|mid|portrait';
-  const lowSatCnt = existing.get(lowSatKey) ?? 0;
-  const lowSatDeficit = Math.max(0, targetPerBucket * 2 - lowSatCnt); // target is 2× normal
-  if (lowSatDeficit > 0) {
-    for (const kw of LOW_SAT_KEYWORDS) {
-      tasks.push({
-        query: kw,
-        priority: 2.0, // DOUBLED priority – always at top of queue
-        deficit: lowSatDeficit,
-        label: 'low-sat/neutral/portrait',
-        subject: 'portrait',
-      });
-    }
-  }
-
-  // Add HIGH_SAT_KEYWORDS with HIGH priority (1.8×)
-  // Score shows only 4% high-sat (target 30%) – vivid/saturated tiles are critically missing
-  const highSatRes = await pool.query(`
-    SELECT COUNT(*) as cnt FROM mosaic_images
-    WHERE SQRT(avg_a * avg_a + avg_b * avg_b) >= 42
-  `);
-  const highSatCnt = Number(highSatRes.rows[0]?.cnt ?? 0);
-  const highSatTarget = Math.round(targetPerBucket * 30); // 30% of total target
-  const highSatDeficit = Math.max(0, highSatTarget - highSatCnt);
-  if (highSatDeficit > 0) {
-    for (const kw of HIGH_SAT_KEYWORDS) {
-      tasks.push({
-        query: kw,
-        priority: 1.8,
-        deficit: highSatDeficit,
-        label: 'high-sat/vivid/general',
-        subject: 'general',
-      });
-    }
-  }
-
-  // Add EXTREME_BRIGHTNESS_KEYWORDS with HIGH priority (deficit × 1.5)
-  // Critical for dark hair, eyes, and bright highlights in portraits
-  const darkKey = 'black|dark|portrait';
-  const brightKey = 'white|bright|portrait';
-  const darkCnt = existing.get(darkKey) ?? 0;
-  const brightCnt = existing.get(brightKey) ?? 0;
-  const extremeDeficit = Math.max(0, targetPerBucket * 1.5 - Math.min(darkCnt, brightCnt));
-  if (extremeDeficit > 0) {
-    for (const kw of EXTREME_BRIGHTNESS_KEYWORDS) {
-      tasks.push({
-        query: kw,
-        priority: 1.5, // 1.5× priority
-        deficit: extremeDeficit,
-        label: 'extreme-brightness/portrait',
-        subject: 'portrait',
-      });
     }
   }
 
