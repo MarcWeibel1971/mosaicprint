@@ -6,21 +6,32 @@
  *   3. HTTP cache       – handled by the Service Worker (sw.ts)
  */
 
-// ── Layer 1: In-Memory cache ──────────────────────────────────────────────────
-const memoryCache = new Map<string, HTMLImageElement>();
-
+//// ── Layer 1: In-Memory cache (LRU with mobile-aware size limit) ──────────────
+const isMobileDevice = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
+const MAX_MEMORY_CACHE = isMobileDevice ? 400 : 2000; // Mobile: 400 tiles × ~20KB = ~8 MB
+const memoryCache = new Map<string, HTMLImageElement>(); // insertion order = LRU
 export function getMemoryCached(url: string): HTMLImageElement | undefined {
-  return memoryCache.get(url);
+  const img = memoryCache.get(url);
+  if (img) {
+    // LRU: move to end (most recently used)
+    memoryCache.delete(url);
+    memoryCache.set(url, img);
+  }
+  return img;
 }
-
 export function setMemoryCached(url: string, img: HTMLImageElement): void {
+  if (memoryCache.has(url)) {
+    memoryCache.delete(url); // refresh position
+  } else if (memoryCache.size >= MAX_MEMORY_CACHE) {
+    // Evict oldest (first) entry
+    const oldest = memoryCache.keys().next().value;
+    if (oldest) memoryCache.delete(oldest);
+  }
   memoryCache.set(url, img);
 }
-
 export function getMemoryCacheSize(): number {
   return memoryCache.size;
 }
-
 export function clearMemoryCache(): void {
   memoryCache.clear();
 }

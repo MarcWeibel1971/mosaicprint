@@ -789,12 +789,12 @@ export default function Studio() {
     const isMobileOrSlow = isMobile || (navigator as any).connection?.effectiveType === "2g";
 
     // FIX: Mobile gets reduced grid to prevent memory crash (iOS canvas limit ~16MP)
-    // With baseTiles=80, tilePx=8: 80×100×8px = 640×800px canvas = fine, BUT
-    // 8000 cells × 35 candidates = 280K image loads → OOM on mobile
-    // Solution: cap mobile at 50 tiles × 10px = 500×625px canvas, ~3000 cells
+    // iOS Safari kills tabs at ~150 MB RAM. Each tile image ~20 KB → max ~400 tiles in memory.
+    // With baseTiles=40, tilePx=12: 40×50×12px = 480×600px canvas, ~2000 cells
+    // TOP_K=15 → ~1200 unique tiles needed (well within 400 LRU cache limit)
     if (isMobile) {
-      const mobileMaxTiles = 50;
-      const mobileTilePx = 10;
+      const mobileMaxTiles = 40;  // fewer tiles = fewer unique images needed
+      const mobileTilePx = 12;    // larger tiles = fewer cells = less memory
       if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
       if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
       console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles ×', savedSettings.tilePx, 'px');
@@ -835,7 +835,7 @@ export default function Studio() {
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
-    const TOP_K = isMobileOrSlow ? 35 : 80; // more candidates = better diversity + SSD selection
+    const TOP_K = isMobileOrSlow ? 15 : 80; // Mobile: 15 candidates × 2000 cells = ~800 unique tiles (fits in 400 LRU cache with eviction)
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
@@ -951,6 +951,25 @@ export default function Studio() {
         }
       }
       console.log(`[Studio] ${IS_14D ? '14D' : IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
+      // Mobile: hard cap on neededTileIds to prevent OOM (iOS kills tab at ~150 MB)
+      // If too many unique tiles, keep only the most-referenced ones
+      if (isMobileOrSlow && neededTileIds.size > 600) {
+        // Count how many cells reference each tile
+        const tileRefCount = new Map<number, number>();
+        for (const candidates of cellCandidates) {
+          for (const c of candidates) {
+            tileRefCount.set(c.tileId, (tileRefCount.get(c.tileId) ?? 0) + 1);
+          }
+        }
+        // Keep top 600 most-referenced tiles
+        const sorted = [...tileRefCount.entries()].sort((a, b) => b[1] - a[1]);
+        const keepIds = new Set(sorted.slice(0, 600).map(e => e[0]));
+        // Remove tiles not in keepIds from neededTileIds
+        for (const id of neededTileIds) {
+          if (!keepIds.has(id)) neededTileIds.delete(id);
+        }
+        console.log(`[Studio] Mobile: capped neededTileIds to ${neededTileIds.size}`);
+      }
     }
 
     // ── Stage B: Load only the needed tile images ─────────────────────────────
