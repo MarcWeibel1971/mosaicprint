@@ -6,20 +6,33 @@ import {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /** Upgrade a tile URL to a higher-resolution preview URL */
-function getHighResUrl(url: string, size = 600): string {
+function getHighResUrl(url: string, size = 600, tile128Url?: string): string {
   if (!url) return url
   // Picsum: https://picsum.photos/id/123/128/128 -> /id/123/600/600
   const picsumMatch = url.match(/picsum\.photos\/id\/([^/]+)\/\d+\/\d+/)
   if (picsumMatch) return `https://picsum.photos/id/${picsumMatch[1]}/${size}/${size}`
-  // Unsplash: replace w= and h= params
+  // Unsplash: use tile128Url as base (it has proper query params) and replace w=
   if (url.includes('images.unsplash.com')) {
-    return url.replace(/&?w=\d+/g, `&w=${size}`).replace(/&?h=\d+/g, `&h=${size}`)
+    // sourceUrl often has broken format like 'photo-xxx&q=80' without '?'
+    // Use tile128Url as base if available, otherwise try to fix sourceUrl
+    const base = tile128Url && tile128Url.includes('unsplash.com') ? tile128Url : url
+    if (base.includes('?')) {
+      return base.replace(/[&?]w=\d+/g, '').replace(/[&?]h=\d+/g, '') + `&w=${size}`
+    }
+    // sourceUrl without proper query string - extract photo ID and build clean URL
+    const photoMatch = (url + tile128Url).match(/photo-([a-zA-Z0-9_-]+)/)
+    if (photoMatch) return `https://images.unsplash.com/photo-${photoMatch[1]}?w=${size}&q=80&auto=format&fit=crop`
+    return url
   }
   // Pexels: replace or add w= and h= params for higher resolution
   if (url.includes('images.pexels.com')) {
     const base = url.replace(/[&?]w=\d+/g, '').replace(/[&?]h=\d+/g, '')
     const sep = base.includes('?') ? '&' : '?'
     return `${base}${sep}w=${size}&h=${size}&fit=crop`
+  }
+  // CloudFront / S3 tile URLs: use tile128Url directly (already a working image)
+  if (url.includes('cloudfront.net') || url.includes('amazonaws.com')) {
+    return url
   }
   return url
 }
@@ -1586,10 +1599,18 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <button onClick={() => setSelectedImage(null)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
             </div>
             <img
-              src={getHighResUrl(selectedImage.sourceUrl, 600)}
+              src={getHighResUrl(selectedImage.sourceUrl, 600, selectedImage.tile128Url)}
               alt=""
               className="w-full aspect-square object-cover rounded-xl mb-4"
-              onError={(e) => { (e.target as HTMLImageElement).src = selectedImage.sourceUrl }}
+              onError={(e) => {
+                const t = e.target as HTMLImageElement
+                // Fallback chain: tile128Url -> sourceUrl
+                if (t.src !== selectedImage.tile128Url && selectedImage.tile128Url) {
+                  t.src = selectedImage.tile128Url
+                } else if (t.src !== selectedImage.sourceUrl) {
+                  t.src = selectedImage.sourceUrl
+                }
+              }}
             />
             <div className="space-y-1.5 text-sm text-gray-600">
               <div className="flex justify-between"><span>Quelle:</span><span className="font-medium">{selectedImage.sourceId}</span></div>
