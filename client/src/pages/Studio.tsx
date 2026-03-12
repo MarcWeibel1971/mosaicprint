@@ -495,22 +495,20 @@ export default function Studio() {
           const mergeWithAdmin = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides });
 
           if (imageType === 'portrait') {
-            // FIX B+D+E: Portrait preset with stronger L_BLEND (via histogramBlend=0.12)
-            // and smaller tilePx=12 for more detail in face regions
             const portraitPreset = {
-              baseTiles: 65,          // Balanced: enough detail without too many repetitions
-              tilePx: 12,             // FIX E: smaller tiles = more cells = sharper face detail
-              neighborRadius: 6,      // Wide anti-repetition radius for portrait
-              neighborPenalty: 200,   // Strong anti-repetition → no flower-clusters in face
-              contrastBoost: 1.30,    // Stronger contrast for face clarity
-              histogramBlend: 0.12,   // FIX D: stronger L_BLEND (0.12→blendFactor=1.0→L_BLEND=0.70)
-              baseOverlay: 0.35,      // FIX B: Strong overlay – Admin can override this
-              edgeBoost: 0.20,        // Edge boost for eye/nose/mouth contours
-              labWeight: 0.12,        // LAB less dominant – brightness + sat drive matching
+              baseTiles: 80,          // More tiles = more detail in face
+              tilePx: 8,              // 8px tiles = very fine detail in face regions
+              neighborRadius: 5,      // Anti-repetition radius
+              neighborPenalty: 180,   // Strong anti-repetition
+              contrastBoost: 1.30,    // Contrast for face clarity
+              histogramBlend: 0.12,   // Strong L_BLEND (L_BLEND=0.70)
+              baseOverlay: 0.55,      // 55% overlay = face clearly visible through tiles
+              edgeBoost: 0.25,        // Strong edge boost for eye/nose/mouth contours
+              labWeight: 0.12,        // LAB less dominant
               brightnessWeight: 0.45, // KEY: brightness drives face structure
-              textureWeight: 0.20,    // Higher texture weight for skin/hair detail
+              textureWeight: 0.20,    // Texture weight for skin/hair detail
               edgeWeight: 0.15,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.45, // Strong saturation matching for portrait
+              saturationWeight: 0.45, // Saturation matching for portrait
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             // Merge: Admin settings override preset (Admin wins)

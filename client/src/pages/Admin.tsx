@@ -79,9 +79,9 @@ interface AlgoSettings {
   overlayMode: 'none' | 'softlight' | 'alpha'  // overlay blending mode
 }
 const DEFAULT_SETTINGS: AlgoSettings = {
-  baseTiles: 65,      // 65 columns = good detail, manageable load
-  tilePx: 12,         // 12px display tiles (loaded at 64px, downscaled)
-  baseOverlay: 0.35,  // 35% overlay – strong enough for portrait visibility
+  baseTiles: 80,      // 80 columns = good detail
+  tilePx: 8,          // 8px display tiles = fine detail
+  baseOverlay: 0.55,  // 55% overlay – face clearly visible through tiles
   edgeBoost: 0.20,    // extra overlay at edges/contours
   neighborRadius: 5,
   neighborPenalty: 180,
