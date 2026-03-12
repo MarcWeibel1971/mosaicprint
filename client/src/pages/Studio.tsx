@@ -198,6 +198,7 @@ export default function Studio() {
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
+  const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number}>>([]);
   // Post-generation quality metrics
   const [qualityMetrics, setQualityMetrics] = useState<{
     avgDeltaE: number;
@@ -590,6 +591,87 @@ export default function Studio() {
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(abstractPreset)));
             setAutoPresetApplied(null);
           }
+
+          // ── KI-Themen-Analyse: Farbpalette des Fotos analysieren ──
+          // Analysiert die dominanten Farbtöne und schlägt passende Tile-Themen vor
+          try {
+            const paletteCanvas = document.createElement('canvas');
+            paletteCanvas.width = 64; paletteCanvas.height = 64;
+            const pCtx = paletteCanvas.getContext('2d')!;
+            pCtx.drawImage(img, 0, 0, 64, 64);
+            const pData = pCtx.getImageData(0, 0, 64, 64).data;
+
+            // Analyse: Hue-Histogramm + Helligkeits- und Sättigungsverteilung
+            let warmPixels = 0, coolPixels = 0, darkPixels = 0, brightPixels = 0;
+            let greenPixels = 0, purplePixels = 0, totalPx = 0;
+            let avgR = 0, avgG = 0, avgB = 0;
+
+            for (let pi = 0; pi < pData.length; pi += 4) {
+              const r = pData[pi], g = pData[pi+1], b = pData[pi+2];
+              const l = 0.299*r + 0.587*g + 0.114*b; // luminance
+              const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+              const s = maxC === 0 ? 0 : (maxC - minC) / maxC;
+              // Hue
+              let hue = 0;
+              if (maxC !== minC) {
+                if (maxC === r) hue = ((g - b) / (maxC - minC) + 6) % 6 * 60;
+                else if (maxC === g) hue = ((b - r) / (maxC - minC) + 2) * 60;
+                else hue = ((r - g) / (maxC - minC) + 4) * 60;
+              }
+              if (s > 0.15) { // only saturated pixels count for hue analysis
+                if ((hue >= 0 && hue < 60) || (hue >= 300 && hue <= 360)) warmPixels++; // red/orange
+                else if (hue >= 60 && hue < 150) greenPixels++; // yellow/green
+                else if (hue >= 150 && hue < 260) coolPixels++; // cyan/blue
+                else purplePixels++; // purple/magenta
+              }
+              if (l < 60) darkPixels++;
+              if (l > 180) brightPixels++;
+              avgR += r; avgG += g; avgB += b;
+              totalPx++;
+            }
+            avgR /= totalPx; avgG /= totalPx; avgB /= totalPx;
+            const warmRatio = warmPixels / totalPx;
+            const coolRatio = coolPixels / totalPx;
+            const greenRatio = greenPixels / totalPx;
+            const purpleRatio = purplePixels / totalPx;
+            const darkRatio = darkPixels / totalPx;
+            const brightRatio = brightPixels / totalPx;
+
+            // Theme-Scoring basierend auf Farbpalette
+            const themeScores: Record<string, number> = {
+              sunset: warmRatio * 3.0 + darkRatio * 0.5,           // warm + some dark
+              ocean: coolRatio * 2.5 + brightRatio * 0.5,          // cool + bright
+              nature: greenRatio * 2.5 + brightRatio * 0.3,        // green dominant
+              urban: darkRatio * 1.5 + (1 - warmRatio) * 0.5,     // dark, less warm
+              abstract: purpleRatio * 2.0 + (warmRatio + coolRatio) * 0.5, // mixed/vivid
+              winter: coolRatio * 2.0 + brightRatio * 1.5,         // cool + very bright
+              portrait: (imageType === 'portrait') ? 2.0 : 0.5,    // boost if face detected
+              food: warmRatio * 1.5 + brightRatio * 1.0,           // warm + bright
+              travel: (warmRatio + greenRatio) * 1.2,              // warm or green
+            };
+
+            // Top 3 Themen nach Score, Mindest-Score 0.3
+            const THEME_META: Record<string, {label: string; emoji: string}> = {
+              sunset: { label: 'Sunset', emoji: '🌅' },
+              ocean: { label: 'Ozean', emoji: '🌊' },
+              nature: { label: 'Natur', emoji: '🌿' },
+              urban: { label: 'Urban', emoji: '🏙️' },
+              abstract: { label: 'Abstrakt', emoji: '🎨' },
+              winter: { label: 'Winter', emoji: '❄️' },
+              portrait: { label: 'Portrait', emoji: '👤' },
+              food: { label: 'Food', emoji: '🍕' },
+              travel: { label: 'Reise', emoji: '✈️' },
+            };
+            const sorted = Object.entries(themeScores)
+              .filter(([, s]) => s > 0.3)
+              .sort(([, a], [, b]) => b - a)
+              .slice(0, 3)
+              .map(([key, score]) => ({ key, score, ...THEME_META[key] }));
+            setSuggestedThemes(sorted);
+          } catch (e) {
+            console.warn('[Studio] Theme analysis failed:', e);
+          }
+
         } catch (e) {
           console.warn('[Studio] Auto-detection failed:', e);
         }
@@ -1509,6 +1591,15 @@ export default function Studio() {
             // Softer penalty for slightly gray tiles in warm/colored areas
             dist += (18 - tileSatC) / 18 * 2 * 100; // ×2 soft penalty
           }
+          // YELLOW TILE PENALTY: overly yellow tile (LAB b > 28) in skin/warm area (a > 3, b < 25)
+          // Prevents bright yellow sunset tiles from appearing in skin-tone face areas
+          const tileB = mf.lab[2];    // LAB b channel: positive = yellow
+          const targetA = tf.lab[1];  // LAB a channel: positive = red/warm
+          const targetBLab = tf.lab[2]; // LAB b channel of target
+          if (tileB > 28 && targetA > 3 && targetBLab < 22) {
+            // Tile is very yellow but target is warm/skin (not yellow) → penalize
+            dist += (tileB - 28) * (targetA / 10) * 6; // up to ~120 penalty
+          }
           // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
           // Moderate penalty only – avoid over-correction (white patches)
           const targetBr = tf.brightness; // 0-100
@@ -2153,6 +2244,52 @@ export default function Studio() {
           </div>
         )}
 
+        {/* KI-Themen-Vorschläge: shown after upload, before/during rendering */}
+        {suggestedThemes.length > 0 && (ready || loading) && (
+          <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-sm">✨</span>
+              <span className="text-xs font-semibold text-amber-800">KI-Themen-Vorschläge basierend auf deinem Foto</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {suggestedThemes.map(({ key, label, emoji, score }) => (
+                <button
+                  key={key}
+                  onClick={() => {
+                    setSelectedTheme(key);
+                    selectedThemeRef.current = key;
+                    // Trigger re-render with new theme
+                    setTimeout(() => {
+                      const evt = new CustomEvent('mosaicprint:rerender');
+                      window.dispatchEvent(evt);
+                    }, 100);
+                  }}
+                  style={{ opacity: 1 }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
+                    selectedTheme === key
+                      ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                      : 'bg-white text-amber-700 border-amber-300 hover:border-amber-500 hover:bg-amber-100'
+                  }`}
+                >
+                  <span>{emoji}</span>
+                  <span>{label}</span>
+                  {score > 1.2 && <span className="text-xs opacity-70">★</span>}
+                </button>
+              ))}
+              <button
+                onClick={() => { setSelectedTheme('alle'); selectedThemeRef.current = 'alle'; }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
+                  selectedTheme === 'alle'
+                    ? 'bg-gray-600 text-white border-gray-600'
+                    : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+                }`}
+              >
+                <span>🌈</span>
+                <span>Alle Themen</span>
+              </button>
+            </div>
+          </div>
+        )}
         {/* Canvas container */}
         {(ready || loading) && (
           <>
