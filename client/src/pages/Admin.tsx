@@ -611,8 +611,17 @@ export default function Admin() {
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                     {(recsExpanded ? recommendations : recommendations.slice(0, 12)).map(rec => {
                       const isSelected = selectedRecs.has(rec.query)
-                      const priorityColor = rec.priority >= 1.5 ? 'border-red-300 bg-red-50' : rec.priority >= 1.0 ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50'
-                      const priorityBadge = rec.priority >= 1.5 ? 'bg-red-100 text-red-700' : rec.priority >= 1.0 ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                      const isPortrait = rec.subject === 'portrait'
+                      const priorityColor = isPortrait
+                        ? 'border-rose-400 bg-rose-50'
+                        : rec.priority >= 1.5 ? 'border-red-300 bg-red-50'
+                        : rec.priority >= 1.0 ? 'border-amber-300 bg-amber-50'
+                        : 'border-gray-200 bg-gray-50'
+                      const priorityBadge = isPortrait
+                        ? 'bg-rose-100 text-rose-700'
+                        : rec.priority >= 1.5 ? 'bg-red-100 text-red-700'
+                        : rec.priority >= 1.0 ? 'bg-amber-100 text-amber-700'
+                        : 'bg-gray-100 text-gray-600'
                       return (
                         <button
                           key={rec.query}
@@ -622,17 +631,20 @@ export default function Admin() {
                             setSelectedRecs(next)
                           }}
                           className={`text-left rounded-xl border-2 p-3 transition-all ${
-                            isSelected ? `${priorityColor} ring-2 ring-amber-400` : 'border-gray-200 bg-white opacity-50'
+                            isSelected ? `${priorityColor} ring-2 ${isPortrait ? 'ring-rose-400' : 'ring-amber-400'}` : 'border-gray-200 bg-white opacity-50'
                           }`}
                         >
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-xs font-semibold text-gray-800 truncate">{rec.label}</span>
                             <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ml-1 shrink-0 ${priorityBadge}`}>
-                              {rec.priority >= 1.5 ? '🔥' : rec.priority >= 1.0 ? '⚡' : '↑'}{rec.priority.toFixed(1)}×
+                              {isPortrait ? '🧑' : rec.priority >= 1.5 ? '🔥' : rec.priority >= 1.0 ? '⚡' : '↑'}{rec.priority.toFixed(1)}×
                             </span>
                           </div>
                           <div className="text-xs text-gray-400 truncate">{rec.query}</div>
                           <div className="text-xs text-gray-500 mt-1">Fehlt: {rec.deficit} Bilder</div>
+                          {isPortrait && (
+                            <div className="mt-1.5 text-xs font-medium text-rose-600 bg-rose-100 rounded px-1.5 py-0.5 inline-block">👤 Portrait-Qualität</div>
+                          )}
                         </button>
                       )
                     })}
@@ -1375,51 +1387,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           </div>
         )}
       </div>
-
-      {/* Portrait Import Recommendation */}
-      {dbStats && (() => {
-        const skinToneCount = (dbStats.byColor['orange'] ?? 0) + (dbStats.byColor['yellow'] ?? 0)
-        const lowSatCount = dbStats.bySaturation?.['niedrig'] ?? 0
-        const totalLab = dbStats.labIndexed || 1
-        const skinPct = Math.round(skinToneCount / totalLab * 100)
-        const lowSatPct = Math.round(lowSatCount / totalLab * 100)
-        const needsPortraitImport = skinPct < 8 || lowSatPct < 20
-        if (!needsPortraitImport) return null
-        return (
-          <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-4">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-bold text-red-800">⚠️ Dringend: Portrait-Qualität leidet – zu wenig Hauttöne & neutrale Tiles!</p>
-                <p className="text-xs text-red-600 mt-1">
-                  Hauttöne (Orange/Gelb): <strong>{skinPct}%</strong> (Ziel: ≥8%) · Niedrig-Sättigung: <strong>{lowSatPct}%</strong> (Ziel: ≥20%)
-                </p>
-                <p className="text-xs text-red-600 mt-1">Ohne genug Hauttöne und neutrale Tiles wirken Gesichter im Mosaik bunt und unscharf.</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {[
-                    { query: 'human skin texture closeup', label: 'Haut-Textur' },
-                    { query: 'warm portrait face skin', label: 'Portrait Haut' },
-                    { query: 'soft beige background', label: 'Beige Hintergrund' },
-                    { query: 'neutral gray texture', label: 'Grau Textur' },
-                    { query: 'warm sand beach', label: 'Sand/Beige' },
-                  ].map(({ query, label }) => (
-                    <button key={query}
-                      onClick={() => runQuickImport(query, label)}
-                      disabled={quickImportLoading === query}
-                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
-                      {quickImportLoading === query ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {Object.entries(quickImportResult).filter(([k]) => ['human skin texture closeup','warm portrait face skin','soft beige background','neutral gray texture','warm sand beach'].includes(k)).map(([k, v]) => (
-                  <p key={k} className="text-xs mt-1 text-gray-600">{v}</p>
-                ))}
-              </div>
-            </div>
-          </div>
-        )
-      })()}
 
       {/* PDF Export + Dedup Button */}
       <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-wrap items-center gap-3">

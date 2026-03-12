@@ -763,7 +763,9 @@ export const appRouter = router({
         .slice(0, input.limit)
         .map(t => ({
           query: t.query,
-          label: t.label,
+          label: t.subject === 'portrait'
+            ? (t.label.startsWith('low-sat') ? `🧑 Haut-Ton / Neutral` : t.label.startsWith('extreme') ? `🖤 Extrem-Helligkeit (Haare/Highlights)` : `🧑 Portrait: ${t.label}`)
+            : t.label,
           priority: Math.round(t.priority * 100) / 100,
           deficit: t.deficit,
           subject: t.subject,
