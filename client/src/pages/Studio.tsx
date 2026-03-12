@@ -372,19 +372,51 @@ export default function Studio() {
       // FIX A: Load only UNIQUE tile indices (deduplicate) – massive speedup
       // A 60×60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
       const uniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
-      const allUrls = tileIdsRef.current.length > 0
-        ? tileIdsRef.current.map(id => id > 0 ? `/api/tile/${id}?size=${HIREZ_PX}` : '')
-        : validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
+
+      // PERF: For DB tiles, fetch direct tile128_urls in one batch request
+      // This avoids proxying each tile through the Railway server (saves 300-800ms per tile)
+      let allUrls: string[];
+      if (tileIdsRef.current.length > 0) {
+        // Get unique tile IDs used in this mosaic
+        const uniqueIds = uniqueIndices
+          .map(idx => tileIdsRef.current[idx])
+          .filter(id => id > 0);
+        // Fetch direct URLs in one request (max 2000 IDs)
+        let directUrlMap: Record<number, string> = {};
+        try {
+          const chunkSize = 1500;
+          for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+            const chunk = uniqueIds.slice(i, i + chunkSize);
+            const resp = await fetch(`/api/tile-urls?ids=${chunk.join(',')}`);
+            if (resp.ok) {
+              const partial = await resp.json() as Record<number, string>;
+              Object.assign(directUrlMap, partial);
+            }
+          }
+        } catch (e) {
+          console.warn('[hi-res] tile-urls fetch failed, falling back to proxy', e);
+        }
+        // Build URL array: use direct URL if available, else fall back to proxy
+        allUrls = tileIdsRef.current.map(id => {
+          if (id <= 0) return '';
+          const direct = directUrlMap[id];
+          // Use direct URL only if it's not a data: URL (those need proxy)
+          if (direct && !direct.startsWith('data:')) return direct;
+          return `/api/tile/${id}?size=${HIREZ_PX}`;
+        });
+      } else {
+        allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
+      }
 
       // Map: tile index → loaded hi-res image
       const hiResImgMap = new Map<number, HTMLImageElement>();
-      const BATCH = 40; // larger batch since we load fewer images
+      const BATCH = 60; // larger batch for direct URLs (no proxy bottleneck)
       for (let i = 0; i < uniqueIndices.length; i += BATCH) {
         const batchIndices = uniqueIndices.slice(i, i + BATCH);
         const batchImgs = await Promise.all(
           batchIndices.map(idx => {
             const u = allUrls[idx];
-            return u ? loadImageCached(u, 8000) : Promise.resolve(null);
+            return u ? loadImageCached(u, 10000) : Promise.resolve(null);
           })
         );
         for (let j = 0; j < batchIndices.length; j++) {

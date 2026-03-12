@@ -26,6 +26,41 @@ import { appRouter } from "./router.js";
 import { createContext } from "./context.js";
 import * as db from "./db.js";
 
+// ── Performance: Server-side in-memory caches ─────────────────────────────────
+// 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
+//    Cache is invalidated after 5 minutes or when tiles are imported
+interface IndexCache {
+  buf: Buffer;
+  tileCount: number;
+  builtAt: number;
+  theme: string;
+}
+const indexCacheMap = new Map<string, IndexCache>(); // key = theme ('' = all)
+const INDEX_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+export function invalidateIndexCache() {
+  indexCacheMap.clear();
+  console.log('[cache] Tile-Lab-Index cache invalidated');
+}
+
+// 2. Tile proxy cache: avoids DB query + upstream fetch for repeated tile requests
+//    LRU-style: evict oldest when over limit
+const TILE_CACHE_MAX = 3000; // max tiles in memory (~60 MB at 20 KB/tile)
+const tileCacheMap = new Map<string, { buf: Buffer; contentType: string; ts: number }>();
+
+function evictTileCache() {
+  if (tileCacheMap.size <= TILE_CACHE_MAX) return;
+  // Evict oldest 500 entries
+  const entries = [...tileCacheMap.entries()].sort((a, b) => a[1].ts - b[1].ts);
+  for (let i = 0; i < 500; i++) tileCacheMap.delete(entries[i][0]);
+  console.log(`[cache] Evicted 500 tile cache entries, size now: ${tileCacheMap.size}`);
+}
+
+// 3. Tile URL cache: maps tile id → {tile128_url, source_url} to avoid DB per request
+const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; ts: number }>();
+const TILE_URL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const TILE_URL_CACHE_MAX = 30000;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
 const app = express();
@@ -49,6 +84,17 @@ app.get("/api/tile-lab-index", async (req, res) => {
     const pool = db.getPool();
     // Optional theme filter: filter by subject column
     const theme = (req.query.theme as string ?? '').toLowerCase().trim();
+    // Check server-side cache first
+    const cached = indexCacheMap.get(theme);
+    if (cached && (Date.now() - cached.builtAt) < INDEX_CACHE_TTL_MS) {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', cached.buf.length);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.setHeader('X-Tile-Count', cached.tileCount.toString());
+      res.setHeader('X-Floats-Per-Tile', '15');
+      res.setHeader('X-Cache', 'HIT');
+      return res.send(cached.buf);
+    }
     const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general'];
     const themeFilter = (theme && VALID_THEMES.includes(theme))
       ? `AND subject = $1`
@@ -104,11 +150,15 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
       buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
     }
+    // Cache the result
+    indexCacheMap.set(theme, { buf, tileCount: rows.length, builtAt: Date.now(), theme });
+    console.log(`[cache] Tile-Lab-Index built: ${rows.length} tiles, ${(buf.length/1024).toFixed(0)} KB`);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', buf.length);
-    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour browser cache
     res.setHeader('X-Tile-Count', rows.length.toString());
     res.setHeader('X-Floats-Per-Tile', FLOATS_PER_TILE.toString());
+    res.setHeader('X-Cache', 'MISS');
     res.send(buf);
   } catch (e) {
     console.error('[tile-lab-index] Error:', e);
@@ -141,19 +191,45 @@ app.get("/api/trpc/getTilePool", async (req, res) => {
   }
 });
 
-// GET /api/tile/:id?size=64  – redirect to tile128_url or source_url
+// GET /api/tile/:id?size=64  – proxy tile image with in-memory caching
 app.get("/api/tile/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const size = Number(req.query.size ?? 128);
-    const pool = await db.getPool();
-    const result = await pool.query(
-      "SELECT source_url, tile128_url FROM mosaic_images WHERE id = $1",
-      [id]
-    );
-    if (!result.rows[0]) return res.status(404).json({ error: "Not found" });
-    const row = result.rows[0];
-    const url = size <= 128 && row.tile128_url ? row.tile128_url : row.source_url;
+    const cacheKey = `${id}-${size}`;
+
+    // Check in-memory tile cache first
+    const cached = tileCacheMap.get(cacheKey);
+    if (cached) {
+      res.set("Content-Type", cached.contentType);
+      res.set("Cache-Control", "public, max-age=86400");
+      res.set("Access-Control-Allow-Origin", "*");
+      res.set("X-Cache", "HIT");
+      return res.send(cached.buf);
+    }
+
+    // Check tile URL cache (avoids DB query)
+    let tileUrls = tileUrlCache.get(id);
+    if (!tileUrls || (Date.now() - tileUrls.ts) > TILE_URL_CACHE_TTL_MS) {
+      const pool = db.getPool();
+      const result = await pool.query(
+        "SELECT source_url, tile128_url FROM mosaic_images WHERE id = $1",
+        [id]
+      );
+      if (!result.rows[0]) return res.status(404).json({ error: "Not found" });
+      const row = result.rows[0];
+      tileUrls = { tile128Url: row.tile128_url || '', sourceUrl: row.source_url || '', ts: Date.now() };
+      tileUrlCache.set(id, tileUrls);
+      // Evict if too large
+      if (tileUrlCache.size > TILE_URL_CACHE_MAX) {
+        const oldest = [...tileUrlCache.entries()].sort((a,b) => a[1].ts - b[1].ts)[0];
+        tileUrlCache.delete(oldest[0]);
+      }
+    }
+
+    const url = size <= 128 && tileUrls.tile128Url ? tileUrls.tile128Url : tileUrls.sourceUrl;
+    if (!url) return res.status(404).json({ error: "No URL" });
+
     // If it's a data URL (uploaded tile), serve it directly
     if (url.startsWith("data:")) {
       const [header, b64] = url.split(",");
@@ -169,9 +245,37 @@ app.get("/api/tile/:id", async (req, res) => {
     const upstream = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' } });
     if (!upstream.ok) return res.status(upstream.status).json({ error: "Upstream error" });
     const contentType = upstream.headers.get("content-type") || "image/jpeg";
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    // Store in tile cache
+    tileCacheMap.set(cacheKey, { buf, contentType, ts: Date.now() });
+    evictTileCache();
     res.set("Content-Type", contentType);
-    const buf = await upstream.arrayBuffer();
-    return res.send(Buffer.from(buf));
+    res.set("X-Cache", "MISS");
+    return res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET /api/tile-urls?ids=1,2,3  – returns direct tile128_url for hi-res rendering
+// Client can use these URLs directly (no proxy needed) for faster hi-res zoom
+app.get("/api/tile-urls", async (req, res) => {
+  try {
+    const idsParam = req.query.ids as string;
+    if (!idsParam) return res.status(400).json({ error: "Missing ids" });
+    const ids = idsParam.split(',').map(Number).filter(n => !isNaN(n) && n > 0);
+    if (ids.length === 0 || ids.length > 2000) return res.status(400).json({ error: "Invalid ids" });
+    const pool = db.getPool();
+    const result = await pool.query(
+      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id = ANY($1)`,
+      [ids]
+    );
+    const urlMap: Record<number, string> = {};
+    for (const row of result.rows) {
+      urlMap[row.id] = row.tile128_url || row.source_url || '';
+    }
+    res.set("Cache-Control", "public, max-age=3600");
+    res.json(urlMap);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
