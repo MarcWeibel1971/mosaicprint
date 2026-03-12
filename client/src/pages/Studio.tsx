@@ -853,7 +853,9 @@ export default function Studio() {
       const W_L = 1.0, W_A = 1.5, W_B = 1.5; // slightly higher weight on a/b for color accuracy
       const W_QUAD = IS_14D ? 0.4 : 0;        // quadrant color weight (per quadrant a/b pair)
       const W_EDGE = IS_7D ? 25.0 : 0;        // shape priority
-      const W_BRIGHT = IS_7D ? 15.0 : 0;      // brightness matching
+      // FIX: W_BRIGHT was IS_7D-only (=0 for 14D/15D) – that caused dark tiles in bright areas!
+      // Now always active: 8.0 for 14D/15D (lower than 7D=15 since LAB-L already captures brightness)
+      const W_BRIGHT = IS_7D ? 15.0 : 8.0;    // brightness matching – prevents dark tiles in bright areas
       // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
       // FIX: also apply to IS_14D/IS_15D (was only IS_7D before – caused gray patches!)
       const GRAY_PENALTY = Math.max(0, (targetSat - 0.15) * 200);
@@ -879,6 +881,12 @@ export default function Studio() {
           const edge = labIndex[i + 12];
           const brightness = labIndex[i + 13];
           dist += W_EDGE*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
+          // Extra brightness penalty: dark tile (brightness<0.25) in bright area (targetBrightness>0.55)
+          // This is the main fix for black/dark patches in skin and light background areas
+          if (targetBrightness > 0.55 && brightness < 0.25) {
+            const darkPenalty = (0.55 - brightness) * (targetBrightness - 0.55) * 600;
+            dist += darkPenalty; // up to +165 for very dark tile in very bright area
+          }
           // Gray-penalty: penalize gray tiles when target is colorful
           const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
@@ -1162,11 +1170,20 @@ export default function Studio() {
     const goodImgFeatures: ImgFeature[] = [];
     const goodValidImgs: HTMLImageElement[] = [];
     const goodTileIds: number[] = [];
+    // Compute target image average brightness to calibrate dark-tile filter
+    let targetAvgL = 0;
+    for (let ci2 = 0; ci2 < TOTAL_TILES; ci2++) { targetAvgL += cellLab[ci2][0]; }
+    targetAvgL /= TOTAL_TILES;
+    // For bright target images (avg L > 55), filter out extremely dark tiles
+    // This prevents black/dark patches in skin and light areas on mobile
+    const filterDarkTiles = targetAvgL > 50; // most portraits are bright
     for (let i = 0; i < imgFeatures.length; i++) {
       const f = imgFeatures[i];
       const isWhiteClipart = f.brightness > 92 && f.texture < 3;
       const isWashedOut = f.brightness > 88 && f.saturation < 5 && f.texture < 5;
-      if (!isWhiteClipart && !isWashedOut) {
+      // FIX: filter extremely dark tiles from bright target images (prevents black patches)
+      const isTooDark = filterDarkTiles && f.brightness < 12; // L < 12 = nearly black
+      if (!isWhiteClipart && !isWashedOut && !isTooDark) {
         goodTileIndices.push(i);
         goodImgFeatures.push(f);
         goodValidImgs.push(validImgs[i]);
@@ -1487,6 +1504,15 @@ export default function Studio() {
           } else if (targetSatC > 10 && tileSatC < 18 && tf.lab[1] > 2) {
             // Softer penalty for slightly gray tiles in warm/colored areas
             dist += (18 - tileSatC) / 18 * 2 * 100; // ×2 soft penalty
+          }
+          // DARK TILE PENALTY: dark tile (brightness<30) in bright area (targetBrightness>60)
+          // KEY FIX for black/dark patches in portraits and light backgrounds
+          const targetBr = tf.brightness; // 0-100
+          const tileBr = mf.brightness;   // 0-100
+          if (targetBr > 60 && tileBr < 30) {
+            dist += (30 - tileBr) / 30 * (targetBr - 60) / 40 * 5 * 100; // up to +500 for very dark tile in very bright area
+          } else if (targetBr > 50 && tileBr < 40) {
+            dist += (40 - tileBr) / 40 * (targetBr - 50) / 50 * 2 * 100; // softer penalty
           }
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
