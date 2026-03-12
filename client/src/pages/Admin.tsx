@@ -146,8 +146,12 @@ const COLOR_LABELS: Record<string, { label: string; color: string; emoji: string
   schwarz: { label: 'Schwarz', color: '#1f2937', emoji: '⬛' },
 }
 
-// ── Main Component ────────────────────────────────────────────────────────────
+// ── Main Component ──────────────────────────────────────────────────────────────
 export default function Admin() {
+  // Mark admin as visited in localStorage so Studio shows admin-only buttons
+  useEffect(() => {
+    try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
+  }, []);
   const [activeTab, setActiveTab] = useState<'import' | 'database' | 'settings'>('import')
   const [stats, setStats] = useState<DbStats | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyStatus | null>(null)

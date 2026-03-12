@@ -189,6 +189,7 @@ export default function Studio() {
   const [selectedFormat, setSelectedFormat] = useState(1); // 30×30 default
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
   const [showOrderPanel, setShowOrderPanel] = useState(false);
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
   const [cacheSize, setCacheSize] = useState(0);
   const [dbTileCount, setDbTileCount] = useState<number | null>(null);
   const [showPayModal, setShowPayModal] = useState(false);
@@ -200,9 +201,12 @@ export default function Studio() {
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
   const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number}>>([]);
-  // Admin mode: detected by presence of admin overrides in localStorage (set via Admin panel)
+  // Admin mode: detected by presence of admin_visited flag OR algo overrides in localStorage
   const [isAdminMode] = useState<boolean>(() => {
-    try { return !!localStorage.getItem('mosaicprint_algo_overrides'); } catch { return false; }
+    try {
+      return !!localStorage.getItem('mosaicprint_admin_visited') ||
+             !!localStorage.getItem('mosaicprint_algo_overrides');
+    } catch { return false; }
   });
   // Post-generation quality metrics
   const [qualityMetrics, setQualityMetrics] = useState<{
@@ -1810,8 +1814,15 @@ export default function Studio() {
         // At histogramBlend=0.09 → blendFactor=0.9 → L_BLEND=0.20+0.50*0.9=0.65
         const L_BLEND  = 0.20 + 0.50 * blendFactor;  // 0.20 minimum, up to 0.70 at full blend
         const AB_BLEND = 0.10 + 0.20 * blendFactor;  // 0.10 minimum, up to 0.30 at full blend
-        const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors            // max a/b channel shift
+        const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors
         const [tL, tA, tB] = cellLab[ci];
+        // ── Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility ──
+        // Problem: tiles in shadow zones all look uniformly dark → face structure lost
+        // Solution: in shadow zones, increase L_BLEND and apply local contrast stretch
+        // so that subtle luminance differences between tiles become visible again.
+        const isShadowZone = tL < 35;  // dark area in original image
+        const shadowBoost = isShadowZone ? Math.max(0, (35 - tL) / 35) : 0; // 0–1, strongest at tL=0
+        const effectiveL_BLEND = Math.min(0.95, L_BLEND + shadowBoost * 0.40); // boost L correction in shadows
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
         const td = tilePixels.data;
         // Step 1: Compute tile average L (for luminance scaling)
@@ -1825,13 +1836,22 @@ export default function Studio() {
         // Wide clamp 0.15–4.0 to allow strong darkening/brightening for portrait visibility
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
         const clampedLumScale = Math.max(0.15, Math.min(4.0, rawLumScale));
-        const lumScale = 1 + (clampedLumScale - 1) * L_BLEND;
+        const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
         // Step 2: Apply per-pixel luminance scale + moderate AB transfer
+        // In shadow zones: also apply local contrast stretch to spread the tile's
+        // internal luminance range wider (makes tile texture visible in dark areas)
         const outData = new Uint8ClampedArray(td.length);
         for (let pi = 0; pi < td.length; pi += 4) {
           const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
           // Luminance: scale toward target brightness
-          const newL = Math.max(0, Math.min(100, pl * lumScale));
+          let newL = Math.max(0, Math.min(100, pl * lumScale));
+          // Shadow contrast stretch: expand internal contrast around target L
+          // This makes tile texture (edges, details) visible even in dark zones
+          if (isShadowZone && shadowBoost > 0.1) {
+            const deviation = pl - avgL;  // how much this pixel deviates from tile average
+            const stretchFactor = 1.0 + shadowBoost * 0.8;  // up to 1.8x stretch at deepest shadow
+            newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+          }
           // Color: gentle shift toward target a/b, clamped to MAX_COLOR_SHIFT
           const rawDeltaA = (tA - pa) * AB_BLEND;
           const rawDeltaB = (tB - pb) * AB_BLEND;
@@ -2365,8 +2385,15 @@ export default function Studio() {
               <div className="flex items-center gap-2">
                 {userPhoto && (
                   <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-1.5 shadow-sm">
-                    <img src={userPhoto} alt="Dein Foto" className="w-8 h-8 rounded-lg object-cover" />
-                    <span className="text-xs font-semibold text-gray-700">Dein Foto</span>
+                    <button
+                      onClick={() => setShowPhotoPreview(true)}
+                      className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+                      title="Hochgeladenes Foto vergrössern"
+                    >
+                      <img src={userPhoto} alt="Dein Foto" className="w-8 h-8 rounded-lg object-cover" />
+                      <span className="text-xs font-semibold text-gray-700">Dein Foto</span>
+                      <Eye className="w-3 h-3 text-gray-400" />
+                    </button>
                     <button onClick={() => { setUserPhoto(null); setUserPhotoImg(null); setReady(false); setLoading(false); setShowOrderPanel(false); }} className="text-gray-400 hover:text-gray-700 ml-1">
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -2990,6 +3017,33 @@ export default function Studio() {
       </div>
 
       {/* Stripe Payment Modal */}
+      {/* Photo Preview Modal */}
+      {showPhotoPreview && userPhoto && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.85)" }}
+          onClick={() => setShowPhotoPreview(false)}
+        >
+          <div
+            className="relative max-w-3xl max-h-[90vh] w-full"
+            onClick={e => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setShowPhotoPreview(false)}
+              className="absolute -top-10 right-0 text-white hover:text-gray-300 transition-colors"
+            >
+              <X className="w-7 h-7" />
+            </button>
+            <img
+              src={userPhoto}
+              alt="Dein Foto"
+              className="w-full h-auto max-h-[85vh] object-contain rounded-xl shadow-2xl"
+            />
+            <p className="text-center text-white text-sm mt-3 opacity-70">Klick ausserhalb zum Schliessen</p>
+          </div>
+        </div>
+      )}
+
       {showPayModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }}>
           <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
