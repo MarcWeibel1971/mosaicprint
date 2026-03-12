@@ -200,6 +200,36 @@ const HIGH_SAT_KEYWORDS = [
   "bright indigo purple", "vivid violet abstract", "electric green nature", "bright lime abstract",
 ];
 
+// PORTRAIT_NATURE_KEYWORDS: Natural gradient tiles ideal for portrait mosaics
+// Sunset, desert, beach, autumn, golden hour, night, fog, fire – smooth gradients
+// that map perfectly to skin tones, hair, shadows and highlights in portraits.
+// These are ALWAYS useful for portraits regardless of current DB proportions.
+const PORTRAIT_NATURE_KEYWORDS = [
+  // Warm sunset / golden hour (skin tones, warm cheeks, forehead)
+  "sunset golden hour sky", "orange sunset landscape", "warm sunset reflection water",
+  "golden hour portrait glow", "sunset desert dunes", "warm evening sky orange",
+  "sunrise orange pink sky", "sunset beach silhouette", "golden sunset clouds",
+  // Desert / sand / earth (beige, tan, warm brown – perfect for skin)
+  "sand dunes desert warm", "sandy beach texture closeup", "warm desert landscape",
+  "red rock canyon desert", "dry earth cracked texture", "warm sandstone texture",
+  "golden wheat field harvest", "dry grass warm light", "warm soil texture",
+  // Autumn / fall (orange, brown, red – skin tones and hair)
+  "autumn leaves orange red", "fall foliage warm colors", "autumn forest golden",
+  "red maple leaves closeup", "autumn bokeh warm", "fall harvest orange",
+  // Night / dark sky (deep shadows, hair, pupils)
+  "night sky stars dark", "dark blue night landscape", "milky way night sky",
+  "dark forest night atmosphere", "night city lights bokeh", "deep blue night ocean",
+  // Fog / mist (soft gray-white – pale skin, highlights)
+  "morning fog misty landscape", "foggy forest soft light", "misty mountain soft",
+  "haze soft light bokeh", "foggy morning field", "soft mist water reflection",
+  // Fire / warm light (intense orange-red for lips, warm shadows)
+  "fire flames warm orange", "candle flame closeup", "warm fireplace glow",
+  "burning embers orange", "warm campfire night", "glowing ember red",
+  // Water / ocean (cool blue-gray for cool skin tones, backgrounds)
+  "ocean wave closeup blue", "calm water reflection", "blue sea horizon",
+  "turquoise water tropical", "grey ocean overcast", "deep blue water abstract",
+];
+
 // EXTREME_BRIGHTNESS_KEYWORDS: Very dark and very bright tiles for eyes, hair, highlights
 const EXTREME_BRIGHTNESS_KEYWORDS = [
   // Very dark (for dark hair, pupils, deep shadows)
@@ -316,6 +346,23 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     const deficit = Math.round((0.30 - lowSatPct) * total);
     for (const kw of LOW_SAT_KEYWORDS) {
       tasks.push({ query: kw, priority: lowSatPriority, deficit, label: `🧖 Niedrig-Sättigung (${Math.round(lowSatPct*100)}% → Ziel 30%)`, subject: 'portrait' });
+    }
+  }
+
+  // PORTRAIT_NATURE: Always import – these gradient tiles are universally useful for portraits.
+  // Priority is moderate (1.2) but constant – they never become over-represented.
+  // These are the tiles that make the difference between a "smooth" and "noisy" portrait mosaic.
+  {
+    const portraitNatureDeficit = Math.round(total * 0.15); // target ~15% of DB
+    const portraitNatureCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'portrait_nature'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const portraitNaturePct = portraitNatureCnt / total;
+    const portraitNaturePriority = Math.max(0, (0.15 - portraitNaturePct) / 0.15) * 2.0; // max 2.0
+    if (portraitNaturePriority > 0.05) {
+      for (const kw of PORTRAIT_NATURE_KEYWORDS) {
+        tasks.push({ query: kw, priority: portraitNaturePriority, deficit: portraitNatureDeficit - portraitNatureCnt, label: `🌅 Portrait-Natur (Sunset/Wüste/Herbst)`, subject: 'portrait_nature' });
+      }
     }
   }
 

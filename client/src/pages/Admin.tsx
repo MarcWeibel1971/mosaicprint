@@ -201,8 +201,12 @@ export default function Admin() {
       const data = await res.json()
       const result = data.result?.data ?? data
       setRecommendations(result.tasks ?? [])
-      // Select all by default
-      setSelectedRecs(new Set((result.tasks ?? []).map((t: { query: string }) => t.query)))
+      // Select only Top 5 by deficit (largest gap first) by default
+      const top5 = [...(result.tasks ?? [])]
+        .sort((a: { deficit: number }, b: { deficit: number }) => b.deficit - a.deficit)
+        .slice(0, 5)
+        .map((t: { query: string }) => t.query);
+      setSelectedRecs(new Set(top5))
     } catch { /* ignore */ } finally {
       setRecsLoading(false)
     }
@@ -218,7 +222,7 @@ export default function Admin() {
     setRecsRunning(true)
     const initialJobs: Record<string, SmartImportJob> = {}
     activeSources.forEach(src => {
-      initialJobs[src] = { running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${src}...`], imported: 0, total: queriesToRun.length * 80 }
+      initialJobs[src] = { running: true, log: [`🚀 Starte ${queriesToRun.length} Empfehlungen via ${src}...`], imported: 0, total: queriesToRun.length * 400 }
     })
     setRecsJobs(initialJobs)
     setMessage({ text: `Gezielte Importe gestartet: ${queriesToRun.length} Kategorien via ${activeSources.join(' + ')}`, type: 'info' })
@@ -227,7 +231,7 @@ export default function Admin() {
       fetch('/api/trpc/smartImport', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId: src, count: queriesToRun.length * 80, targetPerBucket: 200 }),
+        body: JSON.stringify({ sourceId: src, count: queriesToRun.length * 400, targetPerBucket: 500 }),
       }).catch(() => {
         setRecsJobs(prev => ({ ...prev, [src]: { ...prev[src], running: false, error: 'Fehler beim Starten' } }))
       })
