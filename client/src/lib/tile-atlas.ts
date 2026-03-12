@@ -1,32 +1,36 @@
 /**
- * Tile Atlas Loader
+ * Tile Atlas Loader – Memory-Efficient Version
  *
- * Loads a single sprite-sheet JPEG from /api/tile-atlas and extracts
- * individual tile images as HTMLImageElement objects via Canvas.
+ * Instead of pre-extracting all tiles as individual HTMLImageElement objects
+ * (which crashes on mobile due to RAM usage), this version stores the atlas
+ * image and map, and provides a drawTile() function for direct rendering.
  *
- * The tile position map is loaded separately from /api/tile-atlas-map
- * (JSON endpoint) because the map can be 100KB+ for 3000+ tiles and
- * HTTP headers have a ~8KB limit which caused the map to be truncated.
- *
- * This replaces thousands of individual /api/tile/:id requests with TWO
- * HTTP requests (image + map), dramatically improving load time.
+ * The tile position map is loaded from /api/tile-atlas-map (separate JSON
+ * endpoint) because HTTP headers have an ~8KB limit which caused truncation.
  */
 
 export interface TileAtlasResult {
-  tileImgMap: Map<number, HTMLImageElement>;
+  /** Draw a tile directly onto a canvas context – no pre-extraction needed */
+  drawTile: (ctx: CanvasRenderingContext2D, tileId: number, dx: number, dy: number, dw: number, dh: number) => boolean;
+  /** Get a tile as HTMLImageElement (lazy, cached per tile) */
+  getTileImg: (tileId: number) => HTMLImageElement | null;
+  /** Pre-extract only the needed tile IDs (small subset) */
+  preExtract: (neededIds: Set<number>) => Promise<Map<number, HTMLImageElement>>;
   atlasImage: HTMLImageElement;
   map: Record<number, [number, number]>; // tileId -> [col, row]
   tileSize: number;
   cols: number;
   rows: number;
   tileCount: number;
+  /** Compatibility: tileImgMap populated after preExtract */
+  tileImgMap: Map<number, HTMLImageElement>;
 }
 
 // In-memory cache: key = `${theme}|${tileSize}|${maxTiles}`
 const atlasCache = new Map<string, TileAtlasResult>();
 
 /**
- * Load the texture atlas from the server and extract individual tile images.
+ * Load the texture atlas from the server.
  * Returns null if the atlas is not available (server building it, retry later).
  */
 export async function loadTileAtlas(
@@ -49,14 +53,13 @@ export async function loadTileAtlas(
 
     onProgress?.(5);
 
-    // Step 1: Fetch atlas JPEG (triggers build if not cached on server)
+    // Fetch atlas JPEG + map JSON in parallel
     const [atlasResp, mapResp] = await Promise.all([
       fetch(`/api/tile-atlas?${params}`, { cache: 'force-cache' }),
       fetch(`/api/tile-atlas-map?${params}`, { cache: 'force-cache' }),
     ]);
 
     if (atlasResp.status === 202 || mapResp.status === 202) {
-      // Atlas is being built on server, retry later
       console.log('[atlas] Server is building atlas, retry later');
       return null;
     }
@@ -77,7 +80,7 @@ export async function loadTileAtlas(
     const atlasRows = Number(atlasResp.headers.get('X-Atlas-Rows') ?? 1);
     const atlasTileSize = Number(atlasResp.headers.get('X-Atlas-TileSize') ?? tileSize);
 
-    // Parse tile position map from separate JSON endpoint (no header size limit)
+    // Parse tile position map from separate JSON endpoint
     const map: Record<number, [number, number]> = await mapResp.json();
 
     if (!map || Object.keys(map).length === 0) {
@@ -87,7 +90,7 @@ export async function loadTileAtlas(
 
     onProgress?.(50);
 
-    // Load atlas image
+    // Load atlas image (one single image, no per-tile extraction)
     const blob = await atlasResp.blob();
     const objectUrl = URL.createObjectURL(blob);
 
@@ -99,60 +102,89 @@ export async function loadTileAtlas(
     });
 
     URL.revokeObjectURL(objectUrl);
-    onProgress?.(70);
+    onProgress?.(80);
 
-    // Extract individual tile images from atlas using Canvas
-    const tileImgMap = new Map<number, HTMLImageElement>();
     const tileIds = Object.keys(map).map(Number);
+    const tileImgMap = new Map<number, HTMLImageElement>();
 
-    // Use a single canvas for fast extraction (reuse across tiles)
-    const offscreen = document.createElement('canvas');
-    offscreen.width = atlasTileSize;
-    offscreen.height = atlasTileSize;
-    const offCtx = offscreen.getContext('2d')!;
+    // Lazy per-tile cache (only extracted when needed)
+    const lazyTileCache = new Map<number, HTMLImageElement>();
+    const extractCanvas = document.createElement('canvas');
+    extractCanvas.width = atlasTileSize;
+    extractCanvas.height = atlasTileSize;
+    const extractCtx = extractCanvas.getContext('2d')!;
 
-    let processed = 0;
-    for (const tileId of tileIds) {
+    /** Draw tile directly onto target canvas – most memory-efficient path */
+    const drawTile = (ctx: CanvasRenderingContext2D, tileId: number, dx: number, dy: number, dw: number, dh: number): boolean => {
       const pos = map[tileId];
-      if (!pos) continue;
+      if (!pos) return false;
       const [col, row] = pos;
-      offCtx.clearRect(0, 0, atlasTileSize, atlasTileSize);
-      offCtx.drawImage(
+      ctx.drawImage(
+        atlasImage,
+        col * atlasTileSize, row * atlasTileSize, atlasTileSize, atlasTileSize,
+        dx, dy, dw, dh,
+      );
+      return true;
+    };
+
+    /** Get tile as HTMLImageElement (lazy, cached) */
+    const getTileImg = (tileId: number): HTMLImageElement | null => {
+      const cached = lazyTileCache.get(tileId);
+      if (cached) return cached;
+      const pos = map[tileId];
+      if (!pos) return null;
+      const [col, row] = pos;
+      extractCtx.clearRect(0, 0, atlasTileSize, atlasTileSize);
+      extractCtx.drawImage(
         atlasImage,
         col * atlasTileSize, row * atlasTileSize, atlasTileSize, atlasTileSize,
         0, 0, atlasTileSize, atlasTileSize,
       );
+      const dataUrl = extractCanvas.toDataURL('image/jpeg', 0.85);
+      const img = new Image(atlasTileSize, atlasTileSize);
+      img.src = dataUrl;
+      img.dataset.originalSrc = `/api/tile/${tileId}?size=64`;
+      lazyTileCache.set(tileId, img);
+      return img;
+    };
 
-      // Convert to HTMLImageElement via data URL
-      const dataUrl = offscreen.toDataURL('image/jpeg', 0.90);
-      const tileImg = new Image(atlasTileSize, atlasTileSize);
-      tileImg.src = dataUrl;
-      tileImg.dataset.originalSrc = `/api/tile/${tileId}?size=64`;
-      tileImgMap.set(tileId, tileImg);
-
-      processed++;
-      if (processed % 500 === 0) {
-        const pct = 70 + Math.round((processed / tileIds.length) * 28);
-        onProgress?.(Math.min(pct, 98));
-        // Yield to browser
-        await new Promise(r => setTimeout(r, 0));
+    /**
+     * Pre-extract only a specific subset of tiles (e.g. the ones actually used
+     * in the current mosaic assignment). Much less RAM than extracting all tiles.
+     */
+    const preExtract = async (neededIds: Set<number>): Promise<Map<number, HTMLImageElement>> => {
+      const result = new Map<number, HTMLImageElement>();
+      let i = 0;
+      for (const tileId of neededIds) {
+        const img = getTileImg(tileId);
+        if (img) {
+          result.set(tileId, img);
+          tileImgMap.set(tileId, img); // also populate the compat map
+        }
+        i++;
+        // Yield every 200 tiles to avoid blocking the main thread
+        if (i % 200 === 0) await new Promise(r => setTimeout(r, 0));
       }
-    }
+      return result;
+    };
 
     onProgress?.(100);
 
     const result: TileAtlasResult = {
-      tileImgMap,
+      drawTile,
+      getTileImg,
+      preExtract,
       atlasImage,
       map,
       tileSize: atlasTileSize,
       cols,
       rows: atlasRows,
       tileCount: tileIds.length,
+      tileImgMap,
     };
 
     atlasCache.set(cacheKey, result);
-    console.log(`[atlas] Loaded: ${tileIds.length} tiles from sprite-sheet (map via separate endpoint)`);
+    console.log(`[atlas] Loaded: ${tileIds.length} tiles (lazy extraction, no pre-decode RAM spike)`);
     return result;
   } catch (e) {
     console.warn('[atlas] Error loading atlas:', e);

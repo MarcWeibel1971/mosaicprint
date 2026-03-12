@@ -1118,13 +1118,12 @@ export default function Studio() {
         (pct) => setProgress(25 + Math.round(pct * 0.20)),
       );
 
-      if (atlas && atlas.tileImgMap.size > 0) {
-        // Atlas loaded successfully – copy only the needed tiles into tileImgMap
-        for (const id of neededTileIds) {
-          const img = atlas.tileImgMap.get(id);
-          if (img) tileImgMap.set(id, img);
-        }
-        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles from sprite-sheet (${atlas.tileCount} total in atlas)`);
+      if (atlas && atlas.tileCount > 0) {
+        // Atlas loaded – extract only the needed tiles (memory-efficient, no full pre-decode)
+        setProgressMsg(`Extrahiere ${neededTileIds.size} Kacheln aus Atlas...`);
+        const extracted = await atlas.preExtract(neededTileIds);
+        for (const [id, img] of extracted) tileImgMap.set(id, img);
+        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles extracted from sprite-sheet (${atlas.tileCount} total in atlas)`);
         setProgress(45);
       } else {
         // Fallback: load tiles individually (original behavior)
