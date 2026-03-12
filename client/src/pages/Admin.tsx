@@ -97,22 +97,22 @@ interface AlgoSettings {
   overlayMode: 'none' | 'softlight' | 'alpha'  // overlay blending mode
 }
 const DEFAULT_SETTINGS: AlgoSettings = {
-  baseTiles: 80,      // 80 columns = good detail
+  baseTiles: 100,     // 100 columns = fine detail (matches reference quality)
   tilePx: 8,          // 8px display tiles = fine detail
-  baseOverlay: 0.55,  // 55% overlay – face clearly visible through tiles
-  edgeBoost: 0.20,    // extra overlay at edges/contours
-  neighborRadius: 5,
-  neighborPenalty: 180,
+  baseOverlay: 0.0,   // NO overlay – pure tile rendering like reference
+  edgeBoost: 0.0,     // No edge overlay
+  neighborRadius: 6,
+  neighborPenalty: 200,
   hiResPx: 200,
   hiResThreshold: 1.2,
   labWeight: 0.15,
-  brightnessWeight: 0.45,  // brightness drives face structure
-  textureWeight: 0.12,
-  edgeWeight: 0.18,
+  brightnessWeight: 0.50,  // brightness drives face structure (luminance = face shape)
+  textureWeight: 0.15,
+  edgeWeight: 0.20,
   enableRotation: true,
-  histogramBlend: 0.12,    // 0.12 = strong LAB color transfer (L_BLEND=0.70)
-  contrastBoost: 1.30,     // 30% contrast boost for matching
-  overlayMode: 'alpha' as const,  // alpha blending (strongest portrait visibility)
+  histogramBlend: 0.0,     // NO color transfer – tiles keep natural colors
+  contrastBoost: 1.20,     // Mild contrast boost for matching
+  overlayMode: 'none' as const,  // Pure tile rendering
 }
 
 function loadSettings(): AlgoSettings {
@@ -1724,8 +1724,8 @@ function AlgorithmSettings() {
 
         <div className="p-6 space-y-1">
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Kachel-Raster</h3>
-          <SliderRow label="Anzahl Kacheln (Basis)" desc="Kacheln entlang der längsten Seite. Weniger = grösser = besser erkennbar." settingKey="baseTiles" min={20} max={100} />
-          <SliderRow label="Kachel-Grösse (px)" desc="Pixel pro Kachel im Vorschau-Canvas. Grösser = schärfer, aber langsamer." settingKey="tilePx" min={16} max={64} />
+          <SliderRow label="Anzahl Kacheln (Basis)" desc="Kacheln entlang der längsten Seite. Mehr = feiner = besser erkennbar. Empfohlen: 100." settingKey="baseTiles" min={20} max={150} />
+          <SliderRow label="Kachel-Grösse (px)" desc="Pixel pro Kachel im Vorschau-Canvas. Kleiner = mehr Kacheln sichtbar, schärferes Mosaik." settingKey="tilePx" min={4} max={32} />
 
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 mt-6">Farb-Overlay</h3>
           <SliderRow label="Basis-Overlay" desc="Grundstärke des Farb-Overlays. Höher = Gesamtbild besser erkennbar." settingKey="baseOverlay" min={0} max={0.5} step={0.01} format={v => (v * 100).toFixed(0) + '%'} />

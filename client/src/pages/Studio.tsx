@@ -496,19 +496,20 @@ export default function Studio() {
 
           if (imageType === 'portrait') {
             const portraitPreset = {
-              baseTiles: 80,          // More tiles = more detail in face
-              tilePx: 8,              // 8px tiles = very fine detail in face regions
-              neighborRadius: 5,      // Anti-repetition radius
-              neighborPenalty: 180,   // Strong anti-repetition
-              contrastBoost: 1.30,    // Contrast for face clarity
-              histogramBlend: 0.12,   // Strong L_BLEND (L_BLEND=0.70)
-              baseOverlay: 0.55,      // 55% overlay = face clearly visible through tiles
-              edgeBoost: 0.25,        // Strong edge boost for eye/nose/mouth contours
-              labWeight: 0.12,        // LAB less dominant
-              brightnessWeight: 0.45, // KEY: brightness drives face structure
-              textureWeight: 0.20,    // Texture weight for skin/hair detail
-              edgeWeight: 0.15,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.45, // Saturation matching for portrait
+              baseTiles: 100,         // More tiles = more detail in face (100 cols)
+              tilePx: 8,              // 8px tiles = fine detail
+              neighborRadius: 6,      // Wider anti-repetition for more variety
+              neighborPenalty: 200,   // Strong anti-repetition
+              contrastBoost: 1.20,    // Mild contrast boost for matching
+              histogramBlend: 0.0,    // NO color transfer – tiles keep natural colors
+              baseOverlay: 0.0,       // NO overlay – pure tile-based rendering like reference
+              edgeBoost: 0.0,         // No edge overlay
+              overlayMode: 'none',    // Pure tile rendering
+              labWeight: 0.15,        // LAB color distance
+              brightnessWeight: 0.50, // KEY: brightness drives face structure (luminance = face shape)
+              textureWeight: 0.15,    // Texture for skin/hair
+              edgeWeight: 0.20,       // Edge energy for eye/mouth definition
+              saturationWeight: 0.40, // Saturation matching for portrait
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             // Merge: Admin settings override preset (Admin wins)
@@ -1340,10 +1341,11 @@ export default function Studio() {
           const cellEdge = edgeMap[ci]; // 0-1
           const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
           const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
-          // Mosaicer-inspired weights: Brightness dominates (35%) for natural luminance matching
-          // Without overlay, brightness matching IS the luminance structure of the mosaic
-          // SSD 30% · LAB 15% · Brightness 40% · Texture 8% · Quad 7% · Saturation 5%
-          const wSsdBase = 0.30;
+          // Without overlay: SSD is the primary signal (pixel-accurate color+brightness match)
+          // SSD 45% · LAB 15% · Brightness 50% · Texture 15% · Quad 10% · Saturation 40%
+          // Higher SSD weight = tiles that look most like the target region (color + luminance)
+          const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
+          const wSsdBase = noOverlay ? 0.45 : 0.30; // 45% SSD when no overlay (pure tile rendering)
           const wLabBase = savedSettings.labWeight ?? 0.15;
           const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
           const wTextureBase = savedSettings.textureWeight ?? 0.08;
@@ -1636,118 +1638,6 @@ export default function Studio() {
         setProgress(62 + Math.round((ci / TOTAL_TILES) * 30));
         await new Promise(r => setTimeout(r, 0));
       }
-    }
-
-    // Step 5b: Face Sub-Tile Pass (variable tile size in face regions)
-    // For portrait images with detected faces: re-render face cells at TILE_PX/2 resolution
-    // Each face cell is split into 2×2 sub-tiles for sharper eye/nose/mouth detail
-    const FACE_SUBTILE = savedSettings.portraitMode && faceMask.some(Boolean) && TILE_PX >= 6;
-    const SUB_PX = Math.max(3, Math.floor(TILE_PX / 2)); // sub-tile pixel size (min 3px)
-    if (FACE_SUBTILE) {
-      setProgressMsg("Gesichts-Detail (Sub-Kacheln)...");
-      setProgress(92);
-      // High-res target for sub-tile sampling (1px per display pixel)
-      const subTargetW = COLS * TILE_PX;
-      const subTargetH = ROWS * TILE_PX;
-      const subTargetCanvas = document.createElement('canvas');
-      subTargetCanvas.width = subTargetW; subTargetCanvas.height = subTargetH;
-      const stCtx = subTargetCanvas.getContext('2d')!;
-      stCtx.drawImage(targetImg, 0, 0, subTargetW, subTargetH);
-      const subTargetPixels = stCtx.getImageData(0, 0, subTargetW, subTargetH).data;
-
-      // Offscreen canvas for sub-tile rendering
-      const subOffscreen = document.createElement('canvas');
-      subOffscreen.width = SUB_PX; subOffscreen.height = SUB_PX;
-      const subCtx = subOffscreen.getContext('2d')!;
-
-      let subCount = 0;
-      for (let ci = 0; ci < TOTAL_TILES; ci++) {
-        if (!faceMask[ci]) continue;
-        const col = ci % COLS;
-        const row = Math.floor(ci / COLS);
-        const baseX = col * TILE_PX;
-        const baseY = row * TILE_PX;
-
-        // Process 2×2 sub-tiles within this face cell
-        for (let sr = 0; sr < 2; sr++) {
-          for (let sc = 0; sc < 2; sc++) {
-            const subX = baseX + sc * SUB_PX;
-            const subY = baseY + sr * SUB_PX;
-            // Compute average LAB for this sub-region from high-res target
-            let rSum = 0, gSum = 0, bSum = 0, count = 0;
-            for (let py = subY; py < subY + SUB_PX && py < subTargetH; py++) {
-              for (let px = subX; px < subX + SUB_PX && px < subTargetW; px++) {
-                const si = (py * subTargetW + px) * 4;
-                rSum += subTargetPixels[si];
-                gSum += subTargetPixels[si+1];
-                bSum += subTargetPixels[si+2];
-                count++;
-              }
-            }
-            if (count === 0) continue;
-            const [subL, subA, subB] = rgbToLab(rSum/count, gSum/count, bSum/count);
-            // Find best matching tile from already-loaded candidates using LAB distance
-            // Use the parent cell's candidates for speed
-            const parentCandidates = USE_2STAGE ? cellCandidates[ci] : [];
-            let bestSubIdx = assignment[ci]; // fallback: same as parent
-            let bestSubDist = Infinity;
-            // Try parent candidates first (already loaded), then all loaded tiles
-            const subCandidates = parentCandidates.length > 0
-              ? parentCandidates.map(c => tileIdToIdx.get(c.tileId) ?? -1).filter(i => i >= 0)
-              : Array.from({ length: Math.min(50, filteredValidImgs.length) }, (_, i) => i);
-            for (const j of subCandidates) {
-              if (j < 0) continue;
-              const mf = filteredImgFeatures[j];
-              const dL = subL - mf.lab[0], dA = subA - mf.lab[1], dB = subB - mf.lab[2];
-              const brightDiff = Math.abs(subL - mf.brightness);
-              const dist = dL*dL*1.0 + dA*dA*1.5 + dB*dB*1.5 + brightDiff * 0.5;
-              if (dist < bestSubDist) { bestSubDist = dist; bestSubIdx = j; }
-            }
-            // Render sub-tile
-            const subImg = bestSubIdx >= 0 ? filteredValidImgs[bestSubIdx] : null;
-            if (subImg && subImg.complete && subImg.naturalWidth > 0) {
-              subCtx.clearRect(0, 0, SUB_PX, SUB_PX);
-              const subRot = assignmentRotation[ci];
-              if (subRot === 0) {
-                subCtx.drawImage(subImg, 0, 0, SUB_PX, SUB_PX);
-              } else {
-                subCtx.save();
-                subCtx.translate(SUB_PX/2, SUB_PX/2);
-                subCtx.rotate(subRot * Math.PI / 2);
-                subCtx.drawImage(subImg, -SUB_PX/2, -SUB_PX/2, SUB_PX, SUB_PX);
-                subCtx.restore();
-              }
-              // Apply color transfer to sub-tile
-              const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
-              const L_BLEND = 0.20 + 0.50 * blendFactor;
-              const AB_BLEND = 0.10 + 0.20 * blendFactor;
-              const subPixels = subCtx.getImageData(0, 0, SUB_PX, SUB_PX);
-              const sd = subPixels.data;
-              let sumLsub = 0;
-              for (let pi = 0; pi < sd.length; pi += 4) sumLsub += rgbToLab(sd[pi], sd[pi+1], sd[pi+2])[0];
-              const avgLsub = sumLsub / (sd.length / 4);
-              const rawLumScale = avgLsub > 1 ? subL / avgLsub : 1;
-              const lumScale = 1 + (Math.max(0.15, Math.min(4.0, rawLumScale)) - 1) * L_BLEND;
-              const outSub = new Uint8ClampedArray(sd.length);
-              for (let pi = 0; pi < sd.length; pi += 4) {
-                const [pl, pa, pb] = rgbToLab(sd[pi], sd[pi+1], sd[pi+2]);
-                const newL = Math.max(0, Math.min(100, pl * lumScale));
-                const newA = Math.max(-128, Math.min(127, pa + Math.max(-12, Math.min(12, (subA - pa) * AB_BLEND))));
-                const newB = Math.max(-128, Math.min(127, pb + Math.max(-12, Math.min(12, (subB - pb) * AB_BLEND))));
-                const [nr, ng, nb] = labToRgb(newL, newA, newB);
-                outSub[pi] = nr; outSub[pi+1] = ng; outSub[pi+2] = nb; outSub[pi+3] = sd[pi+3];
-              }
-              const outImgData = subCtx.createImageData(SUB_PX, SUB_PX);
-              outImgData.data.set(outSub);
-              subCtx.putImageData(outImgData, 0, 0);
-              ctx.drawImage(subOffscreen, subX, subY, SUB_PX, SUB_PX);
-            }
-          }
-        }
-        subCount++;
-        if (subCount % 50 === 0) await new Promise(r => setTimeout(r, 0));
-      }
-      console.log(`[Studio] Face sub-tile pass: ${subCount} cells re-rendered at ${SUB_PX}px`);
     }
 
     // Step 6: Adaptive Edge-based Overlay (configurable mode)
