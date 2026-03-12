@@ -1476,9 +1476,17 @@ export default function Studio() {
           // Non-face: full scoring with saturation term
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
           let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
-          // Low-sat penalty for non-face areas (×2 multiplier, less aggressive than face)
+          // BIDIRECTIONAL saturation penalty (fixes gray patches on mobile):
+          // (1) Colorful tile in gray/neutral target area → penalize
           if (targetSatC < 25 && tileSatC > 40) {
             dist += (tileSatC - 40) / 100 * 2 * 100; // ×2 multiplier for non-face
+          }
+          // (2) Gray tile in colored/warm target area → penalize (KEY FIX for gray patches)
+          if (targetSatC > 15 && tileSatC < 10) {
+            dist += (10 - tileSatC) / 10 * 4 * 100; // ×4: strongly push gray tiles away from colored areas
+          } else if (targetSatC > 10 && tileSatC < 18 && tf.lab[1] > 2) {
+            // Softer penalty for slightly gray tiles in warm/colored areas
+            dist += (18 - tileSatC) / 18 * 2 * 100; // ×2 soft penalty
           }
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
