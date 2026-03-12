@@ -199,6 +199,10 @@ export default function Studio() {
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
   const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number}>>([]);
+  // Admin mode: detected by presence of admin overrides in localStorage (set via Admin panel)
+  const [isAdminMode] = useState<boolean>(() => {
+    try { return !!localStorage.getItem('mosaicprint_algo_overrides'); } catch { return false; }
+  });
   // Post-generation quality metrics
   const [qualityMetrics, setQualityMetrics] = useState<{
     avgDeltaE: number;
@@ -1963,22 +1967,38 @@ export default function Studio() {
     const canvas = canvasRef.current; if (!canvas) return;
     const fmt = PRINT_FORMATS[selectedFormat];
 
+    // FIX: preserve mosaic aspect ratio instead of forcing square format
+    // The mosaic canvas has the correct proportions (cols × tilePx : rows × tilePx)
+    // We scale to fit within fmt dimensions while keeping the aspect ratio.
+    const mosaicAspect = canvas.width / canvas.height;
+    const fmtAspect = fmt.pxW / fmt.pxH;
+    let outW: number, outH: number;
+    if (mosaicAspect > fmtAspect) {
+      // Wider than format: fit width, reduce height
+      outW = fmt.pxW;
+      outH = Math.round(fmt.pxW / mosaicAspect);
+    } else {
+      // Taller than format: fit height, reduce width
+      outH = fmt.pxH;
+      outW = Math.round(fmt.pxH * mosaicAspect);
+    }
+
     const outCanvas = document.createElement("canvas");
-    outCanvas.width = fmt.pxW;
-    outCanvas.height = fmt.pxH;
+    outCanvas.width = outW;
+    outCanvas.height = outH;
     const outCtx = outCanvas.getContext("2d")!;
 
     if (paid && assignmentRef.current.length && validImgsRef.current.length && mosaicParamsRef.current) {
-      // PRINT MODE: re-render with high-res tiles (128px per tile)
+      // PRINT MODE: re-render with high-res tiles (400px per tile)
       const { cols, rows } = mosaicParamsRef.current;
-      const PRINT_TILE_PX = Math.max(64, Math.floor(Math.min(fmt.pxW / cols, fmt.pxH / rows)));
+      const PRINT_TILE_PX = Math.max(64, Math.floor(Math.min(outW / cols, outH / rows)));
       const printW = cols * PRINT_TILE_PX;
       const printH = rows * PRINT_TILE_PX;
       const printCanvas = document.createElement("canvas");
       printCanvas.width = printW; printCanvas.height = printH;
       const pCtx = printCanvas.getContext("2d")!;
 
-      // Load hi-res tiles (400px from Picsum)
+      // Load hi-res tiles (400px from DB)
       const hiResImgs: (HTMLImageElement | null)[] = [];
       // Use DB tile IDs for print-quality loading if available
       const urlsToLoad = tileIdsRef.current.length > 0
@@ -1995,17 +2015,17 @@ export default function Studio() {
         const img = hiResImgs[assignment[ci]] || validImgsRef.current[assignment[ci]];
         if (img && img.complete && img.naturalWidth > 0) pCtx.drawImage(img, col * PRINT_TILE_PX, row * PRINT_TILE_PX, PRINT_TILE_PX, PRINT_TILE_PX);
       }
-      // Scale to target format
-      outCtx.drawImage(printCanvas, 0, 0, fmt.pxW, fmt.pxH);
+      // Scale to output dimensions (aspect-correct)
+      outCtx.drawImage(printCanvas, 0, 0, outW, outH);
     } else {
-      // PREVIEW MODE: scale existing canvas
-      outCtx.drawImage(canvas, 0, 0, fmt.pxW, fmt.pxH);
+      // PREVIEW MODE: scale existing canvas (aspect-correct)
+      outCtx.drawImage(canvas, 0, 0, outW, outH);
     }
 
     if (!paid) {
       // Add watermark for preview downloads
       const wm = "MosaicPrint.ch – Vorschau";
-      const fontSize = Math.max(24, Math.round(fmt.pxW * 0.025));
+      const fontSize = Math.max(24, Math.round(outW * 0.025));
       outCtx.save();
       outCtx.globalAlpha = 0.28;
       outCtx.fillStyle = "#ffffff";
@@ -2013,9 +2033,9 @@ export default function Studio() {
       outCtx.textAlign = "center";
       outCtx.textBaseline = "middle";
       // Draw repeated watermark pattern diagonally
-      const step = Math.round(fmt.pxW * 0.22);
-      for (let y = -step; y < fmt.pxH + step; y += step) {
-        for (let x = -step; x < fmt.pxW + step; x += step) {
+      const step = Math.round(outW * 0.22);
+      for (let y = -step; y < outH + step; y += step) {
+        for (let x = -step; x < outW + step; x += step) {
           outCtx.save();
           outCtx.translate(x, y);
           outCtx.rotate(-Math.PI / 6);
@@ -2027,10 +2047,9 @@ export default function Studio() {
     }
 
     // Download as PNG (RGB, Printolino-compatible)
-    const formatLabel = fmt.label.replace("×", "x").replace(" ", "");
     const suffix = paid ? "druckbereit" : "vorschau";
     const link = document.createElement("a");
-    link.download = `mosaicprint-${formatLabel}-${suffix}.png`;
+    link.download = `mosaicprint-${outW}x${outH}-${suffix}.png`;
     link.href = outCanvas.toDataURL("image/png");
     link.click();
   }, [selectedFormat]);
@@ -2330,9 +2349,18 @@ export default function Studio() {
                 </button>
                 {ready && (
                   <>
-                    <button onClick={() => handleDownload(false)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Vorschau herunterladen">
+                    <button onClick={() => handleDownload(false)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Vorschau herunterladen (mit Wasserzeichen)">
                       <Download className="w-4 h-4" />
                     </button>
+                    {isAdminMode && (
+                      <button
+                        onClick={() => handleDownload(true)}
+                        className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 shadow-sm hover:shadow-md transition-all text-amber-700 hover:text-amber-900"
+                        title="Admin: Druckqualität herunterladen (ohne Wasserzeichen, 400px Tiles)"
+                      >
+                        <Printer className="w-4 h-4" />
+                      </button>
+                    )}
                     <button onClick={() => { if (userPhotoImg) { setReady(false); setLoading(true); setProgress(0); renderMosaic(userPhotoImg); } }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Neu generieren">
                       <RefreshCw className="w-4 h-4" />
                     </button>
