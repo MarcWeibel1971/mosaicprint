@@ -819,7 +819,7 @@ export default function Admin() {
                 )}
                 <button onClick={handleIndexLab} disabled={!!activeJob} className="flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm">
                   {activeJob === 'lab' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
-                  {activeJob === 'lab' ? 'Backfill läuft...' : `Quadrant-LAB berechnen (${((stats as any).quadrantMissing ?? stats?.total ?? 0).toLocaleString()} Tiles)`}
+                  {activeJob === 'lab' ? 'Backfill läuft...' : `Quadrant-LAB berechnen (${(((stats as any)?.quadrantMissing) ?? stats?.total ?? 0).toLocaleString()} Tiles)`}
                 </button>
               </div>
 
