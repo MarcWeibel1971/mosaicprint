@@ -497,11 +497,31 @@ app.post("/api/admin/remove-shutterstock", async (_req, res) => {
 // ── Texture Atlas ──────────────────────────────────────────────────────────────
 // GET /api/tile-atlas?theme=&tileSize=64&maxTiles=3000
 // Returns a single sprite-sheet JPEG containing all tiles (or a subset).
-// Also returns X-Atlas-Map header with JSON: {id: [col, row], ...}
+// X-Atlas-Map header is OMITTED (too large for HTTP headers with 3000+ tiles).
+// Instead, use GET /api/tile-atlas-map?theme=&tileSize=64&maxTiles=3000 for the JSON map.
 // This replaces thousands of individual /api/tile/:id requests with ONE request.
 //
 // Cache: in-memory per (theme, tileSize, maxTiles), TTL 30 minutes
 // First build: ~10-30s (downloads all tiles), subsequent: instant
+
+// GET /api/tile-atlas-map - returns the tile position map as JSON (separate from the JPEG)
+app.get('/api/tile-atlas-map', async (req, res) => {
+  const theme = ((req.query.theme as string) ?? '').toLowerCase().trim();
+  const tileSize = Math.min(Math.max(Number(req.query.tileSize ?? 64), 32), 128);
+  const maxTiles = Math.min(Number(req.query.maxTiles ?? 5000), 30000);
+  const cacheKey = `${theme}|${tileSize}|${maxTiles}`;
+  const cached = atlasCacheMap.get(cacheKey);
+  if (cached && (Date.now() - cached.builtAt) < ATLAS_CACHE_TTL_MS) {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    res.setHeader('X-Atlas-Cols', cached.cols.toString());
+    res.setHeader('X-Atlas-Rows', cached.rows.toString());
+    res.setHeader('X-Atlas-TileSize', cached.tileSize.toString());
+    return res.json(cached.map);
+  }
+  // Atlas not built yet
+  return res.status(202).json({ building: true });
+});
 
 interface AtlasCache {
   jpeg: Buffer;
@@ -531,7 +551,6 @@ app.get('/api/tile-atlas', async (req, res) => {
       res.setHeader('X-Atlas-Cols', cached.cols.toString());
       res.setHeader('X-Atlas-Rows', cached.rows.toString());
       res.setHeader('X-Atlas-TileSize', cached.tileSize.toString());
-      res.setHeader('X-Atlas-Map', JSON.stringify(cached.map));
       res.setHeader('X-Cache', 'HIT');
       return res.send(cached.jpeg);
     }
@@ -632,7 +651,6 @@ app.get('/api/tile-atlas', async (req, res) => {
     res.setHeader('X-Atlas-Cols', cols.toString());
     res.setHeader('X-Atlas-Rows', rows2.toString());
     res.setHeader('X-Atlas-TileSize', tileSize.toString());
-    res.setHeader('X-Atlas-Map', JSON.stringify(tileMap));
     res.setHeader('X-Cache', 'MISS');
     res.send(atlasJpeg);
   } catch (e) {

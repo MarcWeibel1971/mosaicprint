@@ -2,16 +2,14 @@
  * Tile Atlas Loader
  *
  * Loads a single sprite-sheet JPEG from /api/tile-atlas and extracts
- * individual tile images as HTMLImageElement objects via OffscreenCanvas.
+ * individual tile images as HTMLImageElement objects via Canvas.
  *
- * This replaces thousands of individual /api/tile/:id requests with ONE
- * HTTP request, dramatically improving load time.
+ * The tile position map is loaded separately from /api/tile-atlas-map
+ * (JSON endpoint) because the map can be 100KB+ for 3000+ tiles and
+ * HTTP headers have a ~8KB limit which caused the map to be truncated.
  *
- * Usage:
- *   const atlas = await loadTileAtlas('sunset', 64, 3000);
- *   if (atlas) {
- *     const tileImgMap = atlas.tileImgMap; // Map<tileId, HTMLImageElement>
- *   }
+ * This replaces thousands of individual /api/tile/:id requests with TWO
+ * HTTP requests (image + map), dramatically improving load time.
  */
 
 export interface TileAtlasResult {
@@ -51,41 +49,46 @@ export async function loadTileAtlas(
 
     onProgress?.(5);
 
-    // Fetch atlas JPEG + metadata headers
-    const resp = await fetch(`/api/tile-atlas?${params}`, {
-      cache: 'force-cache',
-    });
+    // Step 1: Fetch atlas JPEG (triggers build if not cached on server)
+    const [atlasResp, mapResp] = await Promise.all([
+      fetch(`/api/tile-atlas?${params}`, { cache: 'force-cache' }),
+      fetch(`/api/tile-atlas-map?${params}`, { cache: 'force-cache' }),
+    ]);
 
-    if (resp.status === 202) {
-      // Atlas is being built on server, retry after a few seconds
+    if (atlasResp.status === 202 || mapResp.status === 202) {
+      // Atlas is being built on server, retry later
       console.log('[atlas] Server is building atlas, retry later');
       return null;
     }
 
-    if (!resp.ok) {
-      console.warn('[atlas] Failed to load atlas:', resp.status);
+    if (!atlasResp.ok) {
+      console.warn('[atlas] Failed to load atlas image:', atlasResp.status);
+      return null;
+    }
+    if (!mapResp.ok) {
+      console.warn('[atlas] Failed to load atlas map:', mapResp.status);
       return null;
     }
 
     onProgress?.(30);
 
-    // Parse metadata from headers
-    const mapHeader = resp.headers.get('X-Atlas-Map');
-    const cols = Number(resp.headers.get('X-Atlas-Cols') ?? 1);
-    const atlasRows = Number(resp.headers.get('X-Atlas-Rows') ?? 1);
-    const atlasTileSize = Number(resp.headers.get('X-Atlas-TileSize') ?? tileSize);
+    // Parse grid dimensions from atlas response headers
+    const cols = Number(atlasResp.headers.get('X-Atlas-Cols') ?? 1);
+    const atlasRows = Number(atlasResp.headers.get('X-Atlas-Rows') ?? 1);
+    const atlasTileSize = Number(atlasResp.headers.get('X-Atlas-TileSize') ?? tileSize);
 
-    if (!mapHeader) {
-      console.warn('[atlas] Missing X-Atlas-Map header');
+    // Parse tile position map from separate JSON endpoint (no header size limit)
+    const map: Record<number, [number, number]> = await mapResp.json();
+
+    if (!map || Object.keys(map).length === 0) {
+      console.warn('[atlas] Empty tile map received');
       return null;
     }
-
-    const map: Record<number, [number, number]> = JSON.parse(mapHeader);
 
     onProgress?.(50);
 
     // Load atlas image
-    const blob = await resp.blob();
+    const blob = await atlasResp.blob();
     const objectUrl = URL.createObjectURL(blob);
 
     const atlasImage = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -98,11 +101,11 @@ export async function loadTileAtlas(
     URL.revokeObjectURL(objectUrl);
     onProgress?.(70);
 
-    // Extract individual tile images from atlas using OffscreenCanvas
+    // Extract individual tile images from atlas using Canvas
     const tileImgMap = new Map<number, HTMLImageElement>();
     const tileIds = Object.keys(map).map(Number);
 
-    // Use OffscreenCanvas for fast extraction (no DOM needed)
+    // Use a single canvas for fast extraction (reuse across tiles)
     const offscreen = document.createElement('canvas');
     offscreen.width = atlasTileSize;
     offscreen.height = atlasTileSize;
@@ -110,7 +113,9 @@ export async function loadTileAtlas(
 
     let processed = 0;
     for (const tileId of tileIds) {
-      const [col, row] = map[tileId];
+      const pos = map[tileId];
+      if (!pos) continue;
+      const [col, row] = pos;
       offCtx.clearRect(0, 0, atlasTileSize, atlasTileSize);
       offCtx.drawImage(
         atlasImage,
@@ -147,7 +152,7 @@ export async function loadTileAtlas(
     };
 
     atlasCache.set(cacheKey, result);
-    console.log(`[atlas] Loaded: ${tileIds.length} tiles from sprite-sheet`);
+    console.log(`[atlas] Loaded: ${tileIds.length} tiles from sprite-sheet (map via separate endpoint)`);
     return result;
   } catch (e) {
     console.warn('[atlas] Error loading atlas:', e);
