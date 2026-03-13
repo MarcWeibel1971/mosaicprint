@@ -205,10 +205,13 @@ const HIGH_SAT_KEYWORDS = [
   "bright indigo purple", "vivid violet abstract", "electric green nature", "bright lime abstract",
 ];
 
-// SKIN_TONE_KEYWORDS: NEW category – skin-specific neutral/warm tiles for portrait quality
-// Target: 15-20% of DB. These directly reduce ΔE in face regions.
+// SKIN_TONE_KEYWORDS: skin-specific neutral/warm tiles for portrait quality
+// Target: 25-30% of DB. These directly reduce ΔE in face regions.
 const SKIN_TONE_KEYWORDS = [
-  // Direct skin tones
+  // Direct skin tones (from recommendation)
+  "neutral beige skin tone texture smooth minimalist -vibrant -nature -flower",
+  "flesh tone bokeh neutral minimal -people -face",
+  "taupe off-white paper closeup plain background",
   "beige skin tone gradient smooth", "taupe fabric closeup minimal",
   "warm brown wood texture -dark", "neutral gray pattern low edge",
   "medium saturation abstract texture", "skin tone portrait abstract bokeh",
@@ -221,11 +224,17 @@ const SKIN_TONE_KEYWORDS = [
   // Cool neutrals (shadows, cool skin)
   "cool gray abstract smooth", "blue gray stone texture", "silver gray minimal",
   "cool beige background", "ash gray texture", "cool white abstract",
+  // Additional low-sat warm tones
+  "linen fabric texture neutral", "warm parchment paper texture",
+  "skin tone gradient abstract minimal", "warm cream background soft",
+  "light tan abstract smooth", "warm ivory bokeh background",
 ];
 
-// ABSTRACT_LOW_EDGE_KEYWORDS: NEW category – smooth low-texture abstract tiles
-// Target: 20% of DB. Low edge energy = no noise in portrait regions.
+// ABSTRACT_LOW_EDGE_KEYWORDS: smooth low-texture abstract tiles
+// Target: 25% of DB. Low edge energy = no noise in portrait regions.
 const ABSTRACT_LOW_EDGE_KEYWORDS = [
+  // From recommendation: explicitly low-contrast, low-sat
+  "light gray abstract gradient low contrast -colorful",
   "abstract pattern low saturation smooth", "bokeh blur neutral tones",
   "gradient texture minimalist gray", "smooth color gradient abstract",
   "soft focus background blur", "minimalist abstract smooth",
@@ -234,6 +243,12 @@ const ABSTRACT_LOW_EDGE_KEYWORDS = [
   "low contrast texture minimal", "soft light abstract background",
   "smooth gradient beige", "blurred bokeh neutral warm",
   "minimal texture smooth gray", "soft abstract gradient cool",
+  // Additional smooth/minimal tiles
+  "watercolor wash soft neutral", "smooth ink wash abstract",
+  "minimal paper texture white", "soft diffused light abstract",
+  "gentle gradient neutral tones", "smooth monochrome abstract",
+  "soft cloud texture minimal", "hazy fog abstract neutral",
+  "smooth silk texture neutral", "gentle blur abstract warm",
 ];
 
 // PORTRAIT_NATURE_KEYWORDS: Natural gradient tiles ideal for portrait mosaics
@@ -414,11 +429,11 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'skin_tone'`
     ).then(r => Number(r.rows[0]?.cnt ?? 0));
     const skinPct = skinCnt / total;
-    const skinPriority = Math.max(0, (0.15 - skinPct) / 0.15) * 2.5; // max 2.5 – high priority
+    const skinPriority = Math.max(0, (0.25 - skinPct) / 0.25) * 2.5; // max 2.5 – target 25% (was 15%)
     if (skinPriority > 0.05) {
-      const deficit = Math.round((0.15 - skinPct) * total);
+      const deficit = Math.round((0.25 - skinPct) * total);
       for (const kw of SKIN_TONE_KEYWORDS) {
-        tasks.push({ query: kw, priority: skinPriority, deficit, label: `🧖 Haut-Töne (${Math.round(skinPct*100)}% → Ziel 15%)`, subject: 'skin_tone' });
+        tasks.push({ query: kw, priority: skinPriority, deficit, label: `🧖 Haut-Töne (${Math.round(skinPct*100)}% → Ziel 25%)`, subject: 'skin_tone' });
       }
     }
   }
@@ -430,11 +445,11 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'abstract_smooth'`
     ).then(r => Number(r.rows[0]?.cnt ?? 0));
     const abstractPct = abstractCnt / total;
-    const abstractPriority = Math.max(0, (0.20 - abstractPct) / 0.20) * 2.0; // max 2.0
+    const abstractPriority = Math.max(0, (0.25 - abstractPct) / 0.25) * 2.0; // max 2.0 – target 25% (was 20%)
     if (abstractPriority > 0.05) {
-      const deficit = Math.round((0.20 - abstractPct) * total);
+      const deficit = Math.round((0.25 - abstractPct) * total);
       for (const kw of ABSTRACT_LOW_EDGE_KEYWORDS) {
-        tasks.push({ query: kw, priority: abstractPriority, deficit, label: `🌫️ Abstrakt-Glatt (${Math.round(abstractPct*100)}% → Ziel 20%)`, subject: 'abstract_smooth' });
+        tasks.push({ query: kw, priority: abstractPriority, deficit, label: `🌫️ Abstrakt-Glatt (${Math.round(abstractPct*100)}% → Ziel 25%)`, subject: 'abstract_smooth' });
       }
     }
   }

@@ -1,6 +1,52 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { loadStripe } from "@stripe/stripe-js";
 import { Link } from "react-router-dom";
+// MediaPipe FaceLandmarker – loaded lazily to avoid blocking initial render
+type FaceLandmarkerResult = { faceLandmarks: Array<Array<{x: number; y: number; z: number}>> };
+type FaceLandmarkerInstance = { detect: (image: HTMLCanvasElement) => FaceLandmarkerResult };
+let _faceLandmarker: FaceLandmarkerInstance | null = null;
+let _faceLandmarkerLoading = false;
+async function getFaceLandmarker(): Promise<FaceLandmarkerInstance | null> {
+  if (_faceLandmarker) return _faceLandmarker;
+  if (_faceLandmarkerLoading) return null;
+  _faceLandmarkerLoading = true;
+  try {
+    const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision');
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm'
+    );
+    _faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+        delegate: 'GPU',
+      },
+      runningMode: 'IMAGE',
+      numFaces: 3,
+    });
+    return _faceLandmarker;
+  } catch (e) {
+    console.warn('[MediaPipe] FaceLandmarker load failed:', e);
+    return null;
+  }
+}
+
+// Face subregion types for per-region matching weights
+type FaceSubRegion = 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null;
+
+// MediaPipe Face Mesh landmark index groups (subset of 468 landmarks)
+// Reference: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
+const FACE_LANDMARK_GROUPS = {
+  // Left eye contour: 33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246
+  leftEye:    [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
+  // Right eye contour: 362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398
+  rightEye:   [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398],
+  // Lips: 61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146
+  mouth:      [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146],
+  // Nose tip and bridge: 1, 2, 5, 4, 195, 197, 6, 168, 8, 9, 151
+  nose:       [1, 2, 5, 4, 195, 197, 6, 168, 8, 9, 151, 48, 278, 115, 344],
+  // Eyebrows: 70, 63, 105, 66, 107, 336, 296, 334, 293, 300
+  eyebrow:    [70, 63, 105, 66, 107, 336, 296, 334, 293, 300],
+};
 import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
   Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check
@@ -1399,39 +1445,112 @@ export default function Studio() {
         edgeEnergy: edgeMap[ci], // use Sobel edge strength as target edge energy
         ssdPixels: new Uint8Array(8*8*3), // not used for cell features (targetRegions used instead)
       });
-    }
-
-    // ── Step 3b: Face Detection (browser FaceDetector API) ──────────────────
-    // Creates a face mask: cells inside detected faces get priority boost (score *= 0.7)
-    setProgressMsg("Gesichtserkennung...");
+      // ── Step 3b: Face Detection (MediaPipe FaceLandmarker) ──────────────────────────
+    // Creates a subRegionMask with per-cell face subregion labels:
+    // 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null
+    // Each subregion gets different matching weights for optimal quality.
+    setProgressMsg("Gesichtserkennung (MediaPipe)...");
     setProgress(48);
     const faceMask: boolean[] = new Array(TOTAL_TILES).fill(false);
+    const subRegionMask: FaceSubRegion[] = new Array(TOTAL_TILES).fill(null);
     let _debugFacesDetected = 0;
     try {
-      if ('FaceDetector' in window) {
-        const faceDetector = new (window as any).FaceDetector({ fastMode: false, maxDetectedFaces: 10 });
+      const landmarker = await getFaceLandmarker();
+      if (landmarker) {
         const faceCanvas = document.createElement('canvas');
-        faceCanvas.width = targetImg.naturalWidth; faceCanvas.height = targetImg.naturalHeight;
+        // Use 640px for MediaPipe (optimal resolution for face detection)
+        const mpScale = Math.min(1, 640 / Math.max(targetImg.naturalWidth, targetImg.naturalHeight));
+        faceCanvas.width = Math.round(targetImg.naturalWidth * mpScale);
+        faceCanvas.height = Math.round(targetImg.naturalHeight * mpScale);
         const fCtx = faceCanvas.getContext('2d')!;
-        fCtx.drawImage(targetImg, 0, 0);
-        const faces = await faceDetector.detect(faceCanvas);
-        _debugFacesDetected = faces.length;
-        for (const face of faces) {
-          const { x, y, width, height } = face.boundingBox;
-          // Expand bounding box by 20% for better coverage
-          const ex = x - width * 0.1, ey = y - height * 0.1;
-          const ew = width * 1.2, eh = height * 1.2;
-          // Map to tile grid
-          const c0 = Math.max(0, Math.floor(ex / targetImg.naturalWidth * COLS));
-          const c1 = Math.min(COLS - 1, Math.ceil((ex + ew) / targetImg.naturalWidth * COLS));
-          const r0 = Math.max(0, Math.floor(ey / targetImg.naturalHeight * ROWS));
-          const r1 = Math.min(ROWS - 1, Math.ceil((ey + eh) / targetImg.naturalHeight * ROWS));
-          for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) faceMask[r * COLS + c] = true;
+        fCtx.drawImage(targetImg, 0, 0, faceCanvas.width, faceCanvas.height);
+        const result = landmarker.detect(faceCanvas);
+        _debugFacesDetected = result.faceLandmarks?.length ?? 0;
+        console.log(`[MediaPipe] Detected ${_debugFacesDetected} face(s) with ${result.faceLandmarks?.[0]?.length ?? 0} landmarks`);
+
+        for (const landmarks of (result.faceLandmarks ?? [])) {
+          // Helper: get bounding box of a set of landmark indices
+          const getBBox = (indices: number[]) => {
+            let minX = 1, minY = 1, maxX = 0, maxY = 0;
+            for (const idx of indices) {
+              const lm = landmarks[idx];
+              if (!lm) continue;
+              if (lm.x < minX) minX = lm.x; if (lm.x > maxX) maxX = lm.x;
+              if (lm.y < minY) minY = lm.y; if (lm.y > maxY) maxY = lm.y;
+            }
+            return { minX, minY, maxX, maxY };
+          };
+          // Helper: mark cells in a bounding box with a subregion label
+          const markCells = (bbox: {minX:number;minY:number;maxX:number;maxY:number}, region: FaceSubRegion, expandPx = 0.02) => {
+            const c0 = Math.max(0, Math.floor((bbox.minX - expandPx) * COLS));
+            const c1 = Math.min(COLS - 1, Math.ceil((bbox.maxX + expandPx) * COLS));
+            const r0 = Math.max(0, Math.floor((bbox.minY - expandPx) * ROWS));
+            const r1 = Math.min(ROWS - 1, Math.ceil((bbox.maxY + expandPx) * ROWS));
+            for (let r = r0; r <= r1; r++) {
+              for (let c = c0; c <= c1; c++) {
+                const ci = r * COLS + c;
+                faceMask[ci] = true;
+                // Higher-priority regions override lower-priority ones
+                const priority: Record<string, number> = { eye: 5, mouth: 4, nose: 3, eyebrow: 3, cheek: 2, forehead: 1 };
+                const existing = subRegionMask[ci];
+                if (!existing || (priority[region!] ?? 0) > (priority[existing] ?? 0)) {
+                  subRegionMask[ci] = region;
+                }
+              }
+            }
+          };
+
+          // Mark specific subregions
+          markCells(getBBox(FACE_LANDMARK_GROUPS.leftEye), 'eye', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.rightEye), 'eye', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.eyebrow), 'eye', 0.01); // eyebrows treated as eye region
+          markCells(getBBox(FACE_LANDMARK_GROUPS.mouth), 'mouth', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.nose), 'nose', 0.01);
+
+          // Remaining face area (cheeks, forehead) = full face bbox minus specific regions
+          const allFaceLandmarks = Array.from({ length: Math.min(landmarks.length, 468) }, (_, i) => i);
+          const fullFaceBbox = getBBox(allFaceLandmarks);
+          // Mark entire face first as 'cheek', then specific regions will override
+          markCells(fullFaceBbox, 'cheek', 0.01);
+          // Re-mark specific regions to ensure priority (cheek may have overwritten)
+          markCells(getBBox(FACE_LANDMARK_GROUPS.leftEye), 'eye', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.rightEye), 'eye', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.eyebrow), 'eye', 0.01);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.mouth), 'mouth', 0.015);
+          markCells(getBBox(FACE_LANDMARK_GROUPS.nose), 'nose', 0.01);
+
+          // Forehead: top 25% of face bbox
+          const foreheadBbox = { minX: fullFaceBbox.minX, minY: fullFaceBbox.minY, maxX: fullFaceBbox.maxX, maxY: fullFaceBbox.minY + (fullFaceBbox.maxY - fullFaceBbox.minY) * 0.25 };
+          markCells(foreheadBbox, 'forehead', 0.01);
+        }
+        const faceCount = faceMask.filter(Boolean).length;
+        console.log(`[MediaPipe] Marked ${faceCount} cells with subregions: eye=${subRegionMask.filter(r=>r==='eye').length} mouth=${subRegionMask.filter(r=>r==='mouth').length} nose=${subRegionMask.filter(r=>r==='nose').length} cheek=${subRegionMask.filter(r=>r==='cheek').length} forehead=${subRegionMask.filter(r=>r==='forehead').length}`);
+      } else {
+        // Fallback: legacy FaceDetector API
+        if ('FaceDetector' in window) {
+          const faceDetector = new (window as any).FaceDetector({ fastMode: false, maxDetectedFaces: 10 });
+          const faceCanvas2 = document.createElement('canvas');
+          faceCanvas2.width = targetImg.naturalWidth; faceCanvas2.height = targetImg.naturalHeight;
+          const fCtx2 = faceCanvas2.getContext('2d')!;
+          fCtx2.drawImage(targetImg, 0, 0);
+          const faces = await faceDetector.detect(faceCanvas2);
+          _debugFacesDetected = faces.length;
+          for (const face of faces) {
+            const { x, y, width, height } = face.boundingBox;
+            const ex = x - width * 0.1, ey = y - height * 0.1;
+            const ew = width * 1.2, eh = height * 1.2;
+            const c0 = Math.max(0, Math.floor(ex / targetImg.naturalWidth * COLS));
+            const c1 = Math.min(COLS - 1, Math.ceil((ex + ew) / targetImg.naturalWidth * COLS));
+            const r0 = Math.max(0, Math.floor(ey / targetImg.naturalHeight * ROWS));
+            const r1 = Math.min(ROWS - 1, Math.ceil((ey + eh) / targetImg.naturalHeight * ROWS));
+            for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+              faceMask[r * COLS + c] = true;
+              subRegionMask[r * COLS + c] = 'cheek'; // generic face region
+            }
+          }
         }
       }
-    } catch { /* FaceDetector not available or failed – continue without */ }
-
-    // ── Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
+    } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
     // Before running the expensive SSD matching loop, draw a fast LAB-color preview:
     // each cell gets the average color of its best k-NN candidate (from Stage A).
     // This gives the user immediate visual feedback while the full SSD pass runs.
@@ -1521,6 +1640,7 @@ export default function Studio() {
       const tf = cellFeatures[ci];
       const col = ci % COLS, row = Math.floor(ci / COLS);
       const inFace = faceMask[ci];
+      const subRegion = subRegionMask[ci]; // 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null
 
       // Collect neighbor tile IDs for anti-repetition
       const neighborIds = new Set<number>();
@@ -1632,21 +1752,28 @@ export default function Studio() {
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
           const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
-          // Face region: boost SSD, LAB, brightness, edge and texture weights for sharper eye/nose/mouth
+          // Face region: per-subregion weights for sharper eye/nose/mouth/cheek/forehead
           if (inFace) {
-            const wSsdFace = 0.55;             // INCREASED: SSD is the primary pixel-accurate signal for face sharpness
-            const wLabF = wLabBase * 1.20;     // INCREASED: LAB color accuracy is critical in face regions (was 0.60)
-            const wBrightF = wBrightBase * 1.50; // INCREASED: brightness drives face structure (was 1.30)
-            const faceEdgeWeight = edgeWeight * 2.2; // INCREASED: stronger edge matching for eye/nose/mouth contours
-            const faceTextureWeight = wTextureBase * 1.8; // INCREASED: texture matters for skin/hair/beard
-            // Saturation weight in face regions: boosted to prevent colorful tiles in skin areas
-            const faceSatWeight = wSatBase * 1.5; // INCREASED: stronger saturation matching in face
+            // Per-subregion weight multipliers (MediaPipe Face Mesh)
+            // eye: max edge sharpness, high SSD, moderate sat penalty (eyes have color)
+            // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
+            // nose: high brightness, moderate edge, strong sat penalty (skin area)
+            // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
+            const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
+            const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
+            const wBrightF   = subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.8 : wBrightBase * 1.5;
+            const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
+            const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
+            // Saturation weight: cheek/forehead need very low sat tiles (skin), eye/mouth allow more color
+            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 2.5 : subRegion === 'nose' ? wSatBase * 2.0 : wSatBase * 1.5;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-80, a:5-25, b:10-35
             const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
-            if (isTargetSkin && isTileSkin) dist -= 8; // skin-tone bonus: prefer matching skin tiles
-            if (isTargetSkin && !isTileSkin) dist += 25; // INCREASED: stronger penalty for non-skin tiles in skin areas
+            if (isTargetSkin && isTileSkin) dist -= 12; // skin-tone bonus: prefer matching skin tiles
+            // cheek/forehead: much stronger penalty for non-skin tiles in skin areas
+            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
+            if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
             // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
             // in skin-toned target cells. This prevents colorful landscape/nature tiles from
