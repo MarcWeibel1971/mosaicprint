@@ -1011,14 +1011,18 @@ export default function Studio() {
       // Quadrant a/b: color distribution within tile (catches gradients)
       // Edge: shape similarity
       // Brightness: prevents dark tiles in bright areas
-      const W_L = 1.2, W_A = 2.0, W_B = 2.0; // Increased a/b weight: color accuracy is critical for skin tones
+      // Dynamic AB weights: boost color matching for saturated target areas (red jacket, blue sky, green grass etc.)
+      // targetSat 0-1: at sat=0.3 (moderately colorful), W_A/W_B = 3.2; at sat=0.6+, W_A/W_B = 5.0
+      const satBoost = Math.min(3.0, targetSat * 5.0); // 0 at gray, up to +3.0 at fully saturated
+      const W_L = 1.2, W_A = 2.0 + satBoost, W_B = 2.0 + satBoost; // Dynamic: 2.0 (gray) to 5.0 (saturated)
       const W_QUAD = IS_14D ? 0.6 : 0;        // Increased quadrant weight: spatial color gradients matter more
       // W_EDGE: active for all index types - edge energy drives contour sharpness
       const W_EDGE = IS_7D ? 25.0 : 22.0;     // Slightly increased for 14D/15D for sharper edges
       // W_BRIGHT: brightness matching - prevents dark tiles in bright areas
       const W_BRIGHT = IS_7D ? 15.0 : 10.0;   // Increased from 8.0: brightness drives face structure
-      // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
-      const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 250); // Lower threshold, higher penalty
+      // Gray-penalty: when target cell is colorful (sat > 0.12), penalize gray tiles (sat < 0.08)
+      // Stronger penalty for very saturated areas (red, blue, green objects)
+      const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 400); // Increased from 250 for better color accuracy
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
@@ -1848,13 +1852,34 @@ export default function Studio() {
           // Non-face: full scoring with saturation term
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
           let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
-          // BIDIRECTIONAL saturation penalty (fixes gray patches on mobile):
+          // BIDIRECTIONAL saturation penalty (fixes gray/dark patches in colored areas):
           // (1) Colorful tile in gray/neutral target area -> penalize
           if (targetSatC < 25 && tileSatC > 40) {
             dist += (tileSatC - 40) / 100 * 2 * 100; // x2 multiplier for non-face
           }
-          // (2) Gray tile in colored/warm target area -> penalize (KEY FIX for gray patches)
-          if (targetSatC > 15 && tileSatC < 10) {
+          // (2) Gray/desaturated tile in strongly colored target area -> heavy penalty
+          // This is the KEY FIX for red jacket / blue sky / green grass appearing dark/gray
+          if (targetSatC > 30) {
+            // Strongly saturated target: penalize tiles that are much less saturated
+            const satGap = targetSatC - tileSatC;
+            if (satGap > 20) {
+              dist += (satGap - 20) / 80 * 8 * 100; // up to +800 for very gray tile in very colorful area
+            }
+            // HUE MISMATCH PENALTY: penalize tiles whose hue direction is wrong
+            // In LAB: a=red/green axis, b=yellow/blue axis
+            // If target is strongly red (a>15), penalize tiles with negative a (green)
+            // If target is strongly blue (b<-15), penalize tiles with positive b (yellow)
+            const tA = tf.lab[1], tB = tf.lab[2];
+            const mA = mf.lab[1], mB = mf.lab[2];
+            // Red target (a>15): penalize green tiles (a<0)
+            if (tA > 15 && mA < 0) dist += Math.min(400, (-mA) * (tA / 15) * 8);
+            // Blue target (b<-15): penalize yellow tiles (b>0)
+            if (tB < -15 && mB > 0) dist += Math.min(400, mB * (-tB / 15) * 8);
+            // Green target (a<-15): penalize red tiles (a>0)
+            if (tA < -15 && mA > 0) dist += Math.min(400, mA * (-tA / 15) * 8);
+            // Yellow target (b>15): penalize blue tiles (b<0)
+            if (tB > 15 && mB < 0) dist += Math.min(400, (-mB) * (tB / 15) * 8);
+          } else if (targetSatC > 15 && tileSatC < 10) {
             dist += (10 - tileSatC) / 10 * 4 * 100; // x4: strongly push gray tiles away from colored areas
           } else if (targetSatC > 10 && tileSatC < 18 && tf.lab[1] > 2) {
             // Softer penalty for slightly gray tiles in warm/colored areas
