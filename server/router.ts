@@ -185,19 +185,55 @@ const LOW_SAT_KEYWORDS = [
 
 // HIGH_SAT_KEYWORDS: Vivid, saturated images – critical for colorful mosaics
 // Score shows only 4% high-sat (target 30%) – these fill the gap
+// Updated per smart-import guide: more abstract/non-nature vivid to avoid noisy portrait tiles
 const HIGH_SAT_KEYWORDS = [
-  // Vivid nature
+  // Vivid abstract (preferred – no natural noise for portraits)
+  "vibrant abstract pattern -nature -flower", "high saturation color gradient smooth",
+  "neon lights urban night -people", "colorful bokeh minimal -green",
+  "saturated fabric texture closeup", "vivid paint splatter abstract",
+  "colorful smoke abstract vivid", "rainbow gradient smooth",
+  "neon abstract bright minimal", "vivid color explosion abstract",
+  "saturated color texture smooth", "bright vivid bokeh abstract",
+  // Vivid nature (accent tiles – ok for lips, bright areas)
   "vivid rainbow colors", "colorful tropical fish", "bright coral reef", "vivid butterfly",
-  "colorful parrot", "vivid flowers macro", "bright tropical bird", "rainbow abstract",
+  "colorful parrot", "vivid flowers macro", "bright tropical bird",
   // Vivid food & objects
   "colorful macarons", "vivid fruit market", "bright candy colors", "colorful vegetables",
-  "vivid paint splatter", "bright neon lights", "colorful umbrellas", "vivid balloons",
-  // Vivid abstract
-  "vibrant abstract art", "colorful gradient vivid", "neon abstract bright", "vivid color explosion",
-  "saturated color texture", "bright vivid bokeh", "colorful smoke abstract", "rainbow gradient",
+  "bright neon lights", "colorful umbrellas", "vivid balloons",
   // Cool vivid
   "vivid blue turquoise", "bright teal ocean", "electric blue abstract", "vivid cyan water",
   "bright indigo purple", "vivid violet abstract", "electric green nature", "bright lime abstract",
+];
+
+// SKIN_TONE_KEYWORDS: NEW category – skin-specific neutral/warm tiles for portrait quality
+// Target: 15-20% of DB. These directly reduce ΔE in face regions.
+const SKIN_TONE_KEYWORDS = [
+  // Direct skin tones
+  "beige skin tone gradient smooth", "taupe fabric closeup minimal",
+  "warm brown wood texture -dark", "neutral gray pattern low edge",
+  "medium saturation abstract texture", "skin tone portrait abstract bokeh",
+  "human skin texture neutral -face", "beige flesh tone smooth minimal",
+  "warm neutral portrait background -vibrant",
+  // Warm neutrals (cheeks, forehead, neck)
+  "warm beige abstract smooth", "peach cream texture soft", "ivory white minimal",
+  "warm sand texture closeup", "caramel brown smooth abstract", "rose gold texture minimal",
+  "blush pink neutral background", "warm taupe gradient", "nude beige bokeh soft",
+  // Cool neutrals (shadows, cool skin)
+  "cool gray abstract smooth", "blue gray stone texture", "silver gray minimal",
+  "cool beige background", "ash gray texture", "cool white abstract",
+];
+
+// ABSTRACT_LOW_EDGE_KEYWORDS: NEW category – smooth low-texture abstract tiles
+// Target: 20% of DB. Low edge energy = no noise in portrait regions.
+const ABSTRACT_LOW_EDGE_KEYWORDS = [
+  "abstract pattern low saturation smooth", "bokeh blur neutral tones",
+  "gradient texture minimalist gray", "smooth color gradient abstract",
+  "soft focus background blur", "minimalist abstract smooth",
+  "out of focus bokeh warm", "defocused background neutral",
+  "smooth pastel gradient", "blurred background abstract soft",
+  "low contrast texture minimal", "soft light abstract background",
+  "smooth gradient beige", "blurred bokeh neutral warm",
+  "minimal texture smooth gray", "soft abstract gradient cool",
 ];
 
 // PORTRAIT_NATURE_KEYWORDS: Natural gradient tiles ideal for portrait mosaics
@@ -210,18 +246,23 @@ const PORTRAIT_NATURE_KEYWORDS = [
   "golden hour portrait glow", "sunset desert dunes", "warm evening sky orange",
   "sunrise orange pink sky", "sunset beach silhouette", "golden sunset clouds",
   // Desert / sand / earth (beige, tan, warm brown – perfect for skin)
-  "sand dunes desert warm", "sandy beach texture closeup", "warm desert landscape",
+  // Updated: add -plant -flower -vibrant to reduce noisy hits
+  "sand dunes desert warm -plant", "sandy beach texture closeup", "warm desert landscape -vibrant",
   "red rock canyon desert", "dry earth cracked texture", "warm sandstone texture",
-  "golden wheat field harvest", "dry grass warm light", "warm soil texture",
+  "golden wheat field harvest -flower", "dry grass warm light", "warm soil texture",
   // Autumn / fall (orange, brown, red – skin tones and hair)
   "autumn leaves orange red", "fall foliage warm colors", "autumn forest golden",
   "red maple leaves closeup", "autumn bokeh warm", "fall harvest orange",
   // Night / dark sky (deep shadows, hair, pupils)
-  "night sky stars dark", "dark blue night landscape", "milky way night sky",
-  "dark forest night atmosphere", "night city lights bokeh", "deep blue night ocean",
+  // Updated: low-sat variants for dark areas without color noise
+  "night sky stars dark", "dark blue night landscape", "milky way galaxy minimal abstract -starburst",
+  "space nebula low saturation", "cosmic texture smooth black -vibrant",
+  "night city lights bokeh", "deep blue night ocean",
   // Fog / mist (soft gray-white – pale skin, highlights)
+  // Updated: neutral/smooth variants for clean highlights
   "morning fog misty landscape", "foggy forest soft light", "misty mountain soft",
   "haze soft light bokeh", "foggy morning field", "soft mist water reflection",
+  "neutral sunset bokeh -vibrant", "warm horizon dusk plain -mountain",
   // Fire / warm light (intense orange-red for lips, warm shadows)
   "fire flames warm orange", "candle flame closeup", "warm fireplace glow",
   "burning embers orange", "warm campfire night", "glowing ember red",
@@ -366,7 +407,39 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
-  // ── Step 2b: New theme gaps (animals, flowers, space) ──
+  // ── Step 2b: Skin-Tone tiles (new category) ──
+  // Target: 15% of DB. Skin-tone tiles directly reduce ΔE in face regions.
+  {
+    const skinCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'skin_tone'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const skinPct = skinCnt / total;
+    const skinPriority = Math.max(0, (0.15 - skinPct) / 0.15) * 2.5; // max 2.5 – high priority
+    if (skinPriority > 0.05) {
+      const deficit = Math.round((0.15 - skinPct) * total);
+      for (const kw of SKIN_TONE_KEYWORDS) {
+        tasks.push({ query: kw, priority: skinPriority, deficit, label: `🧖 Haut-Töne (${Math.round(skinPct*100)}% → Ziel 15%)`, subject: 'skin_tone' });
+      }
+    }
+  }
+
+  // ── Step 2c: Abstract Low-Edge tiles (new category) ──
+  // Target: 20% of DB. Low edge energy = no noise in portrait regions.
+  {
+    const abstractCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'abstract_smooth'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const abstractPct = abstractCnt / total;
+    const abstractPriority = Math.max(0, (0.20 - abstractPct) / 0.20) * 2.0; // max 2.0
+    if (abstractPriority > 0.05) {
+      const deficit = Math.round((0.20 - abstractPct) * total);
+      for (const kw of ABSTRACT_LOW_EDGE_KEYWORDS) {
+        tasks.push({ query: kw, priority: abstractPriority, deficit, label: `🌫️ Abstrakt-Glatt (${Math.round(abstractPct*100)}% → Ziel 20%)`, subject: 'abstract_smooth' });
+      }
+    }
+  }
+
+  // ── Step 2d: New theme gaps (animals, flowers, space) ──
   // Target: at least 1000 tiles per new theme (min 3.5% of DB)
   const NEW_THEME_TARGETS: Array<{subject: string; label: string; emoji: string; queries: string[]}> = [
     {
@@ -571,6 +644,116 @@ async function computeLabFull(url: string): Promise<{
 async function computeLabForUrl(url: string): Promise<{ L: number; a: number; b: number } | null> {
   const full = await computeLabFull(url);
   return full ? { L: full.L, a: full.a, b: full.b } : null;
+}
+
+// ── Post-Import Quality Check ──────────────────────────────────────────────
+// Analyses a tile image and returns quality metrics:
+//   saturation: 0-1 (LAB chroma / max chroma). High = very colorful.
+//   edgeEnergy:  0-1 (normalised Sobel edge energy). High = lots of texture/noise.
+//   hasBrightBand: true if a horizontal stripe of very bright pixels is detected
+//                  (typical for Shutterstock watermarks).
+//
+// Thresholds (from smart-import guide):
+//   saturation > 0.55 → discard (too vivid for portrait regions)
+//   edgeEnergy  > 0.45 → discard (too noisy / textured)
+//   hasBrightBand      → discard (watermark)
+//
+// Note: thresholds are intentionally lenient so we don't over-filter.
+// High-sat tiles are still needed for vivid mosaics; we only reject extreme outliers.
+type QualityResult = {
+  saturation: number;
+  edgeEnergy: number;
+  hasBrightBand: boolean;
+  rejected: boolean;
+  reason: string;
+};
+
+async function checkTileQuality(url: string): Promise<QualityResult> {
+  const defaultPass: QualityResult = { saturation: 0, edgeEnergy: 0, hasBrightBand: false, rejected: false, reason: '' };
+  try {
+    const sharp = (await import('sharp')).default;
+    let buf: Buffer;
+    if (url.startsWith('data:')) {
+      buf = Buffer.from(url.split(',')[1], 'base64');
+    } else {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!resp.ok) return defaultPass; // can't fetch → don't reject
+      buf = Buffer.from(await resp.arrayBuffer());
+    }
+
+    // ── 1. Saturation check (16×16 pixels, LAB chroma) ──
+    const SIZE = 16;
+    const { data: px16 } = await sharp(buf)
+      .resize(SIZE, SIZE, { fit: 'fill' })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let chromaSum = 0;
+    const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    for (let i = 0; i < px16.length; i += 3) {
+      const rl = toLinear(px16[i]), gl = toLinear(px16[i + 1]), bl = toLinear(px16[i + 2]);
+      const X = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
+      const Y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750;
+      const Z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041;
+      const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+      const labA = 500 * (f(X / 0.95047) - f(Y));
+      const labB = 200 * (f(Y) - f(Z / 1.08883));
+      chromaSum += Math.sqrt(labA * labA + labB * labB);
+    }
+    const avgChroma = chromaSum / (SIZE * SIZE);
+    // Max LAB chroma ≈ 180 (vivid red/green). Normalise to 0-1.
+    const saturation = Math.min(1, avgChroma / 100);
+
+    // ── 2. Edge energy check (Sobel on grayscale, 32×32 pixels) ──
+    const ESIZE = 32;
+    const { data: gray } = await sharp(buf)
+      .resize(ESIZE, ESIZE, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let edgeSum = 0;
+    for (let y = 1; y < ESIZE - 1; y++) {
+      for (let x = 1; x < ESIZE - 1; x++) {
+        const idx = (r: number, c: number) => gray[r * ESIZE + c];
+        const gx = -idx(y-1,x-1) + idx(y-1,x+1) - 2*idx(y,x-1) + 2*idx(y,x+1) - idx(y+1,x-1) + idx(y+1,x+1);
+        const gy = -idx(y-1,x-1) - 2*idx(y-1,x) - idx(y-1,x+1) + idx(y+1,x-1) + 2*idx(y+1,x) + idx(y+1,x+1);
+        edgeSum += Math.sqrt(gx * gx + gy * gy);
+      }
+    }
+    // Max Sobel per pixel ≈ 1442 (255*4*sqrt(2)). Normalise to 0-1.
+    const edgeEnergy = Math.min(1, edgeSum / ((ESIZE - 2) * (ESIZE - 2) * 400));
+
+    // ── 3. Bright-band watermark detection (Shutterstock-style) ──
+    // Check bottom 15% of image for a horizontal stripe of very bright pixels
+    const WSIZE = 64;
+    const { data: wPx } = await sharp(buf)
+      .resize(WSIZE, WSIZE, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const bandStart = Math.floor(WSIZE * 0.80); // bottom 20%
+    let brightCount = 0, totalBandPx = 0;
+    for (let y = bandStart; y < WSIZE; y++) {
+      for (let x = 0; x < WSIZE; x++) {
+        if (wPx[y * WSIZE + x] > 230) brightCount++;
+        totalBandPx++;
+      }
+    }
+    const hasBrightBand = (brightCount / totalBandPx) > 0.55;
+
+    // ── Decision ──
+    const reasons: string[] = [];
+    if (saturation > 0.55) reasons.push(`sat=${saturation.toFixed(2)}>0.55`);
+    if (edgeEnergy  > 0.45) reasons.push(`edge=${edgeEnergy.toFixed(2)}>0.45`);
+    if (hasBrightBand)       reasons.push('watermark-band');
+    const rejected = reasons.length > 0;
+
+    return { saturation, edgeEnergy, hasBrightBand, rejected, reason: reasons.join(', ') };
+  } catch {
+    return defaultPass; // on error, don't reject
+  }
 }
 
 // ---- Router ----
@@ -927,10 +1110,17 @@ export const appRouter = router({
 
               // Process in parallel batches for speed
               let batchImported = 0;
+              let batchRejected = 0;
               for (let i = 0; i < photos.length; i += CONCURRENCY) {
                 const batch = photos.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (photo) => {
                   try {
+                    // ── Post-Import Quality Check ──
+                    const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl);
+                    if (quality.rejected) {
+                      batchRejected++;
+                      return; // discard – too vivid / noisy / watermarked
+                    }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
                     await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
@@ -946,8 +1136,8 @@ export const appRouter = router({
                   } catch { /* skip duplicates / errors */ }
                 }));
               }
-              if (batchImported > 0) {
-                log(`✓ [${task.label}] "${task.query}": +${batchImported} (deficit was ${task.deficit})`);
+              if (batchImported > 0 || batchRejected > 0) {
+                log(`✓ [${task.label}] "${task.query}": +${batchImported} importiert, ${batchRejected} abgelehnt (deficit: ${task.deficit})`);
               }
             } catch (e) { log(`✗ "${task.query}" error: ${e}`); }
           }
