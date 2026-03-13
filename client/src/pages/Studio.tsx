@@ -967,7 +967,15 @@ export default function Studio() {
     setProgressMsg("Lade LAB-Index aller Kacheln...");
     setProgress(10);
     // Theme filter: if a theme is selected, always reload the index with theme param
-    const currentTheme = selectedThemeRef.current;
+    // IMPORTANT: Portrait mode always uses ALL tiles (ignores theme) for best skin-tone matching
+    const isPortraitModeForTheme = savedSettings.portraitMode === true;
+    let currentTheme = selectedThemeRef.current;
+    if (isPortraitModeForTheme && currentTheme && currentTheme !== 'alle') {
+      // Portrait: force 'alle' to ensure full tile pool for skin tones
+      currentTheme = 'alle';
+      setSelectedTheme('alle');
+      selectedThemeRef.current = 'alle';
+    }
     const themeParam = (currentTheme && currentTheme !== 'alle') ? `?theme=${encodeURIComponent(currentTheme)}` : '';
     let labIndex: Float32Array | null = (currentTheme === 'alle') ? labIndexRef.current : null;
     if (!labIndex) {
@@ -988,7 +996,24 @@ export default function Studio() {
 
     const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), or 15 (15D with isSkinFriendly)
     const USE_2STAGE = labIndex !== null && labIndex.length >= (FPT);
-    const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
+    let TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
+    // Safety fallback: if theme has too few tiles (< 500), reload with all tiles
+    // This prevents black/empty tiles when theme pool is exhausted
+    const MIN_THEME_TILES = 500;
+    if (USE_2STAGE && TOTAL_DB_TILES < MIN_THEME_TILES && currentTheme !== 'alle') {
+      console.warn(`[Studio] Theme '${currentTheme}' only has ${TOTAL_DB_TILES} tiles (< ${MIN_THEME_TILES}), falling back to all tiles`);
+      try {
+        const fallbackR = await fetch('/api/tile-lab-index');
+        if (fallbackR.ok) {
+          const buf = await fallbackR.arrayBuffer();
+          labIndex = new Float32Array(buf);
+          labIndexRef.current = labIndex;
+          TOTAL_DB_TILES = Math.floor(labIndex.length / FPT);
+          setSelectedTheme('alle');
+          selectedThemeRef.current = 'alle';
+        }
+      } catch { /* keep theme index if fallback fails */ }
+    }
     const IS_7D = FPT >= 7;
     const IS_14D = FPT >= 14;
     const IS_15D = FPT >= 15; // includes isSkinFriendly flag
