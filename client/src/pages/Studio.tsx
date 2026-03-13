@@ -1817,12 +1817,13 @@ export default function Studio() {
         }
         // Apply contrast boost from settings (default 1.30)
         const cBoost = savedSettings.contrastBoost ?? 1.30;
+        // NOTE: ctx.filter is NOT used here because Mobile Safari (iOS) throws
+        // InvalidStateError when ctx.filter is set on a canvas context.
+        // Contrast/brightness/saturation are applied manually in the pixel loop below.
         const boostCanvas = document.createElement('canvas');
         boostCanvas.width = TILE_PX; boostCanvas.height = TILE_PX;
         const bCtx = boostCanvas.getContext('2d')!;
-        bCtx.filter = `brightness(${(0.95 + cBoost * 0.05).toFixed(2)}) saturate(${(0.90 + cBoost * 0.15).toFixed(2)}) contrast(${cBoost.toFixed(2)})`;
         try { bCtx.drawImage(tileOffscreen, 0, 0); } catch { bCtx.drawImage(tileOffscreen, 0, 0, TILE_PX, TILE_PX); }
-        bCtx.filter = 'none';
         // Store original URL for hi-res re-render
         tilesRef.current[ci].url = img.dataset.originalSrc || img.src;
         // ── Professional Luminance-Scale + Moderate AB-Transfer (Reinhard-style) ────────
@@ -1888,7 +1889,14 @@ export default function Studio() {
           const clampedDeltaB = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaB));
           const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
           const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
-          const [nr, ng, nb] = labToRgb(newL, newA, newB);
+          // Apply contrast boost manually (replaces ctx.filter which breaks on iOS Safari)
+          // Contrast: scale L around midpoint 50 by cBoost factor
+          const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+          // Saturation boost: scale a/b chroma by cBoost
+          const satBoost = 0.90 + cBoost * 0.15; // matches old saturate() CSS filter
+          const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+          const boostedB = Math.max(-128, Math.min(127, newB * satBoost));
+          const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
           outData[pi]   = nr;
           outData[pi+1] = ng;
           outData[pi+2] = nb;
