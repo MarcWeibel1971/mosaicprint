@@ -605,13 +605,13 @@ export default function Studio() {
               tilePx: 8,              // 8px tiles = fine detail
               neighborRadius: 6,      // Wider anti-repetition for more variety
               neighborPenalty: 200,   // Strong anti-repetition
-              contrastBoost: 1.20,    // Mild contrast boost for matching
-              histogramBlend: 0.0,    // NO color transfer - tiles keep natural colors
-              baseOverlay: 0.0,       // NO overlay - pure tile-based rendering like reference
-              edgeBoost: 0.0,         // No edge overlay
-              overlayMode: 'none',    // Pure tile rendering
+              contrastBoost: 1.25,    // Slightly stronger contrast for face structure
+              histogramBlend: 0.07,   // Moderate color transfer: L_BLEND=0.55, AB_BLEND=0.24
+              baseOverlay: 0.18,      // Soft-light overlay: corrects color where tile pool is limited
+              edgeBoost: 0.22,        // Edge boost: sharpens eye/nose/mouth contours
+              overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
               labWeight: 0.15,        // LAB color distance
-              brightnessWeight: 0.50, // KEY: brightness drives face structure (luminance = face shape)
+              brightnessWeight: 0.60, // INCREASED: brightness drives face structure even more
               textureWeight: 0.15,    // Texture for skin/hair
               edgeWeight: 0.20,       // Edge energy for eye/mouth definition
               saturationWeight: 0.40, // Saturation matching for portrait
@@ -2065,19 +2065,21 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
-        // L_BLEND: minimum 0.20 always active (ensures brightness correction even without histogramBlend)
-        // At histogramBlend=0.09 -> blendFactor=0.9 -> (L_BLEND)=0.20+0.50*0.9=0.65
-        const L_BLEND  = 0.20 + 0.50 * blendFactor;  // 0.20 minimum, up to 0.70 at full blend
-        const AB_BLEND = 0.10 + 0.20 * blendFactor;  // 0.10 minimum, up to 0.30 at full blend
-        const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors
+        // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
+        // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
+        const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
+        // AB_BLEND: minimum 0.20 always active (ensures color correction even without histogramBlend)
+        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.20+0.20*0.7=0.34
+        const AB_BLEND = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
+        const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
         // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
         // Solution: in shadow zones, increase L_BLEND and apply local contrast stretch
         // so that subtle luminance differences between tiles become visible again.
-        const isShadowZone = tL < 35;  // dark area in original image
-        const shadowBoost = isShadowZone ? Math.max(0, (35 - tL) / 35) : 0; // 0-1, strongest at tL=0
-        const effectiveL_BLEND = Math.min(0.95, L_BLEND + shadowBoost * 0.40); // boost L correction in shadows
+        const isShadowZone = tL < 40;  // extended shadow zone threshold (was 35)
+        const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0; // 0-1, strongest at tL=0
+        const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50); // stronger boost in shadows (was 0.40)
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
         const td = tilePixels.data;
         // Step 1: Compute tile average L (for luminance scaling)
@@ -2102,9 +2104,9 @@ export default function Studio() {
           let newL = Math.max(0, Math.min(100, pl * lumScale));
           // Shadow contrast stretch: expand internal contrast around target L
           // This makes tile texture (edges, details) visible even in dark zones
-          if (isShadowZone && shadowBoost > 0.1) {
+          if (isShadowZone && shadowBoost > 0.05) {
             const deviation = pl - avgL;  // how much this pixel deviates from tile average
-            const stretchFactor = 1.0 + shadowBoost * 0.8;  // up to 1.8x stretch at deepest shadow
+            const stretchFactor = 1.0 + shadowBoost * 1.2;  // up to 2.2x stretch at deepest shadow (was 1.8x)
             newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
           }
           // Color: gentle shift toward target a/b, clamped to MAX_COLOR_SHIFT
@@ -2175,8 +2177,8 @@ export default function Studio() {
           const tr = targetData[i], tg = targetData[i+1], tb = targetData[i+2];
           const edge = edgeMap[ci];
           // Adaptive strength: BASE_OVERLAY at flat areas, +EDGE_BOOST at edges
-          // In face regions: extra +0.15 boost for better portrait visibility
-          const faceBoost = faceMask[ci] ? 0.15 : 0;
+          // In face regions: extra +0.25 boost for better portrait visibility (was +0.15)
+          const faceBoost = faceMask[ci] ? 0.25 : 0;
           const strength = Math.min(0.85, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);
           for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < (CANVAS_H); py++) {
             for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < (CANVAS_W); px++) {
