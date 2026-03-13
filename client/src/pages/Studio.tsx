@@ -601,19 +601,19 @@ export default function Studio() {
 
           if (imageType === 'portrait') {
             const portraitPreset = {
-              baseTiles: 100,         // More tiles = more detail in face (100 cols)
-              tilePx: 8,              // 8px tiles = fine detail
-              neighborRadius: 6,      // Wider anti-repetition for more variety
-              neighborPenalty: 200,   // Strong anti-repetition
+              baseTiles: 130,         // INCREASED: 130 cols = ~2.25x more tiles → eyes get ~48 tiles instead of 12
+              tilePx: 6,              // REDUCED: 6px tiles = finer grid → sharper eye/mouth detail
+              neighborRadius: 5,      // Slightly reduced (more tiles = neighbors are closer)
+              neighborPenalty: 180,   // Strong anti-repetition
               contrastBoost: 1.25,    // Slightly stronger contrast for face structure
               histogramBlend: 0.07,   // Moderate color transfer: L_BLEND=0.55, AB_BLEND=0.24
-              baseOverlay: 0.18,      // Soft-light overlay: corrects color where tile pool is limited
-              edgeBoost: 0.22,        // Edge boost: sharpens eye/nose/mouth contours
+              baseOverlay: 0.20,      // Slightly stronger overlay to compensate for smaller tiles
+              edgeBoost: 0.25,        // INCREASED: stronger edge sharpening for eye/mouth contours
               overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
               labWeight: 0.15,        // LAB color distance
-              brightnessWeight: 0.60, // INCREASED: brightness drives face structure even more
-              textureWeight: 0.15,    // Texture for skin/hair
-              edgeWeight: 0.20,       // Edge energy for eye/mouth definition
+              brightnessWeight: 0.60, // Brightness drives face structure
+              textureWeight: 0.12,    // Slightly reduced (smaller tiles have less texture signal)
+              edgeWeight: 0.22,       // Edge energy for eye/mouth definition
               saturationWeight: 0.40, // Saturation matching for portrait
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
@@ -2239,6 +2239,47 @@ export default function Studio() {
         ctx.drawImage(blurCanvas, 0, 0);
         ctx.globalAlpha = 1.0;
       } catch { /* ignore if canvas is tainted */ }
+    }
+    // -- Eye/Mouth Sharpening Pass (Portrait only) --------------------------------
+    // Problem: even with fine tiles (6px), eyes/mouth have limited tile resolution.
+    // Solution: draw the original image at moderate opacity ONLY over eye/mouth regions.
+    // This adds structural sharpness (contours, shadows) while keeping the mosaic look.
+    // Strength: 0.28 = visible but tiles still clearly recognizable underneath.
+    // Only active when MediaPipe detected subregions (eye/mouth cells exist).
+    const isPortraitMode = savedSettings.portraitMode === true;
+    const hasEyeRegions = subRegionMask.some(r => r === 'eye' || r === 'mouth');
+    if (isPortraitMode && hasEyeRegions && OVERLAY_MODE !== 'none') {
+      // Draw original image scaled to canvas size
+      const sharpCanvas = document.createElement('canvas');
+      sharpCanvas.width = CANVAS_W; sharpCanvas.height = CANVAS_H;
+      const sharpCtx = sharpCanvas.getContext('2d')!;
+      sharpCtx.drawImage(targetImg, 0, 0, CANVAS_W, CANVAS_H);
+      const sharpData = sharpCtx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const sd = sharpData.data;
+      // Get current mosaic pixels
+      const mosaicSnap = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const ms = mosaicSnap.data;
+      // Blend original over eye/mouth cells at high opacity
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const ci = row * COLS + col;
+          const subR = subRegionMask[ci];
+          // Eye: 0.32 opacity (strongest - eyes are most critical)
+          // Mouth: 0.28 opacity
+          // Nose: 0.18 opacity (subtle)
+          const sharpStrength = subR === 'eye' ? 0.32 : subR === 'mouth' ? 0.28 : subR === 'nose' ? 0.18 : 0;
+          if (sharpStrength === 0) continue;
+          for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < CANVAS_H; py++) {
+            for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < CANVAS_W; px++) {
+              const pi = (py * CANVAS_W + px) * 4;
+              ms[pi]   = Math.round(ms[pi]   * (1 - sharpStrength) + sd[pi]   * sharpStrength);
+              ms[pi+1] = Math.round(ms[pi+1] * (1 - sharpStrength) + sd[pi+1] * sharpStrength);
+              ms[pi+2] = Math.round(ms[pi+2] * (1 - sharpStrength) + sd[pi+2] * sharpStrength);
+            }
+          }
+        }
+      }
+      ctx.putImageData(mosaicSnap, 0, 0);
     }
     snapshotRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
 
