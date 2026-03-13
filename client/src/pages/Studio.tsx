@@ -998,7 +998,7 @@ export default function Studio() {
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
-    const TOP_K = isMobileOrSlow ? 80 : 120; // Increased: more candidates = better face detail (was 60/80)
+    const TOP_K = isMobileOrSlow ? 100 : 150; // More candidates = better face detail on mobile too (was 80/120)
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
@@ -1798,7 +1798,7 @@ export default function Studio() {
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
             if (isTargetSkin && isTileSkin) dist -= 12; // skin-tone bonus: prefer matching skin tiles
             // cheek/forehead: much stronger penalty for non-skin tiles in skin areas
-            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
+            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 100 : 50;
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
             // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
@@ -1811,13 +1811,13 @@ export default function Studio() {
             {
               const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
               const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
-              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 30) {
-                // Tile is colorful (sat>30) AND not warm AND not neutral -> subject penalty
-                dist += 80; // INCREASED: strongly push non-skin-subject tiles down in face ranking
+              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 25) {
+                // Tile is colorful (sat>25) AND not warm AND not neutral -> subject penalty
+                dist += 150; // STRONG: push non-skin-subject tiles far down in face ranking
               }
               // Extra penalty for cool/blue tiles in warm skin areas
               if (isTargetSkin && mf.lab[1] < -5) {
-                dist += 60; // Blue/green tile in warm skin area -> very wrong
+                dist += 120; // Blue/green tile in warm skin area -> very wrong
               }
             }
             // Low-saturation penalty (STRENGTHENED):
@@ -1828,14 +1828,14 @@ export default function Studio() {
               // Gray/neutral target area: strongly penalize colorful tiles (lowered threshold from 40)
               dist += (tileSatC - 35) / 100 * 6 * 100; // x6 multiplier (was x4)
             }
-            if (isTargetSkin && tileSatC < 15) {
-              // Skin area: penalize washed-out gray tiles (broadened from <12)
-              dist += (15 - tileSatC) / 15 * 6 * 100; // x6 multiplier (was x5)
+            if (isTargetSkin && tileSatC < 18) {
+              // Skin area: penalize washed-out gray tiles (broadened threshold)
+              dist += (18 - tileSatC) / 18 * 8 * 100; // x8 multiplier (was x6)
             }
-            // NEW: Penalize highly saturated tiles (sat>60) in ANY face region
+            // Penalize highly saturated tiles (sat>40) in ANY face region
             // These are the "rainbow noise" tiles that make faces look garish
-            if (tileSatC > 60) {
-              dist += (tileSatC - 60) / 40 * 8 * 100; // up to +800 for sat=100 in face
+            if (tileSatC > 40) {
+              dist += (tileSatC - 40) / 60 * 12 * 100; // up to +1200 for sat=100 in face (was sat>60, x8)
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
@@ -2587,7 +2587,7 @@ export default function Studio() {
             <div className={`flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center text-lg ${
               detectedImageType === 'portrait' ? 'bg-rose-100' : detectedImageType === 'landscape' ? 'bg-sky-100' : 'bg-violet-100'
             }`}>
-              {detectedImageType === 'portrait' ? '?' : detectedImageType === 'landscape' ? '??' : '?'}
+              {detectedImageType === 'portrait' ? '👤' : detectedImageType === 'landscape' ? '🌄' : '🖼️'}
             </div>
             {/* Text */}
             <div className="flex-1 min-w-0">
@@ -2618,7 +2618,7 @@ export default function Studio() {
         {suggestedThemes.length > 0 && (ready || loading) && (
           <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">?</span>
+              <span className="text-sm">🤖</span>
               <span className="text-xs font-semibold text-amber-800">KI-Themen-Vorschlaege basierend auf deinem Foto</span>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -2654,7 +2654,7 @@ export default function Studio() {
                     : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
                 }`}
               >
-                <span>?</span>
+                <span>🌈</span>
                 <span>Alle Themen</span>
               </button>
             </div>
@@ -2882,7 +2882,7 @@ export default function Studio() {
                         <img src={userPhotoImg.src} alt="Original" style={{ width: "100%", height: "100%", objectFit: "fill", display: "block" }} />
                       </div>
                       <div style={{ position: "absolute", top: 0, bottom: 0, left: `${comparePos}%`, transform: "translateX(-50%)", width: 3, background: "white", boxShadow: "0 0 8px rgba(0,0,0,0.5)", transition: "left 0.05s ease", pointerEvents: "none" }}>
-                        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 36, height: 36, borderRadius: "50%", background: "white", boxShadow: "0 2px 12px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>?</div>
+                        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 36, height: 36, borderRadius: "50%", background: "white", boxShadow: "0 2px 12px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>👁️</div>
                       </div>
                       <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(0,0,0,0.6)", color: "white", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 6 }}>Original</div>
                       <div style={{ position: "absolute", top: 8, right: 8, background: "rgba(59,107,255,0.85)", color: "white", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 6 }}>Mosaik</div>
@@ -2961,9 +2961,9 @@ export default function Studio() {
                   />
                 </div>
                 <div className="flex justify-between text-[10px] text-gray-500">
-                  <span>? Grau {qualityMetrics.satLow.toFixed(0)}%</span>
-                  <span>? Mittel {qualityMetrics.satMid.toFixed(0)}%</span>
-                  <span>? Lebendig {qualityMetrics.satHigh.toFixed(0)}%</span>
+                  <span>⚪ Grau {qualityMetrics.satLow.toFixed(0)}%</span>
+                  <span>🟡 Mittel {qualityMetrics.satMid.toFixed(0)}%</span>
+                  <span>🟢 Lebendig {qualityMetrics.satHigh.toFixed(0)}%</span>
                 </div>
               </div>
             </div>
@@ -2984,7 +2984,7 @@ export default function Studio() {
                   {(debugReport.generationMs / 1000).toFixed(1)}s
                 </span>
               </div>
-              <span className="text-gray-400 text-sm">{showDebugPanel ? '?' : '?'}</span>
+              <span className="text-gray-400 text-sm">{showDebugPanel ? '▲' : '▼'}</span>
             </button>
 
             {showDebugPanel && (
