@@ -1171,9 +1171,10 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // This is much faster than loading all DB tiles: only ~1500 tiles instead of 11000+
       const neededArray = Array.from(neededTileIds);
-      // Mobile: cap at 3000 to avoid OOM; Desktop: load all needed tiles
-      const MOBILE_CAP = 3000;
-      const idsForAtlas = isMobileOrSlow ? neededArray.slice(0, MOBILE_CAP) : neededArray;
+      // Mobile: 1500 Tiles reichen für gute Qualität (40x40=1600 Zellen, ~800-1200 unique)
+      // Das Yielding beim Extrahieren verhindert das Hängen, nicht der Cap
+      const MOBILE_CAP = isMobileOrSlow ? 1500 : 3000;
+      const idsForAtlas = neededArray.slice(0, MOBILE_CAP);
 
       setProgressMsg(`Lade ${idsForAtlas.length} Kacheln als Atlas...`);
       try {
@@ -1181,7 +1182,7 @@ export default function Studio() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: idsForAtlas, tileSize: 64 }),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(isMobileOrSlow ? 30000 : 60000),
         });
         if (atlasResp.ok) {
           const cols = parseInt(atlasResp.headers.get('X-Atlas-Cols') ?? '0');
@@ -1198,18 +1199,27 @@ export default function Studio() {
             img.src = atlasUrl;
           });
           // Extract each tile from the atlas
+          // Mobile: yield every 50 tiles to avoid blocking UI thread (was blocking at 43%)
           const offscreen = document.createElement('canvas');
           offscreen.width = ts;
           offscreen.height = ts;
           const octx = offscreen.getContext('2d')!;
-          for (const [idStr, [col, row]] of Object.entries(map)) {
+          const atlasEntries = Object.entries(map);
+          const EXTRACT_YIELD = isMobileOrSlow ? 50 : 200; // yield every N tiles
+          for (let ei = 0; ei < atlasEntries.length; ei++) {
+            const [idStr, [col, row]] = atlasEntries[ei] as [string, [number, number]];
             const id = Number(idStr);
             octx.clearRect(0, 0, ts, ts);
             octx.drawImage(atlasImg, col * ts, row * ts, ts, ts, 0, 0, ts, ts);
             const tileImg = new Image();
             tileImg.src = offscreen.toDataURL('image/jpeg', 0.85);
-            await new Promise<void>(r => { tileImg.onload = () => r(); tileImg.onerror = () => r(); });
             tileImgMap.set(id, tileImg);
+            // Yield to UI thread periodically to avoid blocking
+            if (ei % EXTRACT_YIELD === EXTRACT_YIELD - 1) {
+              const pct = 25 + Math.round((ei / atlasEntries.length) * 17);
+              setProgress(Math.min(pct, 41));
+              await new Promise(r => setTimeout(r, 0));
+            }
           }
           URL.revokeObjectURL(atlasUrl);
           console.log(`[Studio] Targeted atlas: ${tileImgMap.size}/${neededTileIds.size} tiles loaded`);
@@ -1220,10 +1230,13 @@ export default function Studio() {
       }
 
       // Load any tiles not covered by the atlas individually (fallback)
-      const missingIds = Array.from(neededTileIds).filter(id => !tileImgMap.has(id));
+      // Mobile: cap missing tiles to avoid long loading (atlas already covered main tiles)
+      const allMissingIds = Array.from(neededTileIds).filter(id => !tileImgMap.has(id));
+      const MISSING_CAP = isMobileOrSlow ? 400 : 5000;
+      const missingIds = allMissingIds.slice(0, MISSING_CAP);
       if (missingIds.length > 0) {
         setProgressMsg(`Lade ${missingIds.length} weitere Kacheln...`);
-        const BATCH = isMobileOrSlow ? 40 : 100;
+        const BATCH = isMobileOrSlow ? 20 : 100;
         let loaded = 0;
         for (let i = 0; i < missingIds.length; i += (BATCH)) {
           const batchIds = missingIds.slice(i, i + BATCH);
