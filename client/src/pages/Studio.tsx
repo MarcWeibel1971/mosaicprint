@@ -1173,7 +1173,7 @@ export default function Studio() {
       const neededArray = Array.from(neededTileIds);
       // Mobile: 1500 Tiles reichen für gute Qualität (40x40=1600 Zellen, ~800-1200 unique)
       // Das Yielding beim Extrahieren verhindert das Hängen, nicht der Cap
-      const MOBILE_CAP = isMobileOrSlow ? 1500 : 3000;
+      const MOBILE_CAP = isMobileOrSlow ? 2000 : 3000;
       const idsForAtlas = neededArray.slice(0, MOBILE_CAP);
 
       setProgressMsg(`Lade ${idsForAtlas.length} Kacheln als Atlas...`);
@@ -1801,23 +1801,23 @@ export default function Studio() {
             const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
-            // Green tiles (a < -3) are almost never correct in face areas
-            if (mf.lab[1] < -3) {
-              // Scale: a=-3 → +0, a=-15 → +72, a=-30 → +162
-              dist += Math.min(200, (-mf.lab[1] - 3) * 6); // up to +200 for very green tiles
-            }
-            // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
-            if (mf.lab[2] < -5) {
-              dist += Math.min(150, (-mf.lab[2] - 5) * 5); // up to +150 for very blue tiles
-            }
-            // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
-            {
-              const tileIsWarm = mf.lab[1] > 2 && mf.lab[2] > 2; // a>2, b>2 = warm/skin-like
-              const tileIsNeutral = tileSatC < 22; // low saturation = neutral/gray = OK for skin
-              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 40) {
-                dist += 50; // moderate: push non-skin-subject tiles down in face ranking
-              }
-            }
+             // Green tiles (a < -3) are almost never correct in face areas
+             if (mf.lab[1] < -3) {
+               // Scale: a=-3 → +0, a=-10 → +350, a=-20 → +850 (was max +200)
+               dist += Math.min(1000, (-mf.lab[1] - 3) * 50); // up to +1000 for very green tiles
+             }
+             // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
+             if (mf.lab[2] < -5) {
+               dist += Math.min(600, (-mf.lab[2] - 5) * 30); // up to +600 for very blue tiles
+             }
+             // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
+             {
+               const tileIsWarm = mf.lab[1] > 2 && mf.lab[2] > 2; // a>2, b>2 = warm/skin-like
+               const tileIsNeutral = tileSatC < 22; // low saturation = neutral/gray = OK for skin
+               if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 35) {
+                 dist += 150; // stronger: push non-skin-subject tiles down in face ranking
+               }
+             }
             // Low-saturation penalty (STRENGTHENED):
             // If target is low-sat (neutral/gray area) and tile is highly saturated -> penalty x4
             // If target is skin-toned and tile is desaturated -> penalty x4
