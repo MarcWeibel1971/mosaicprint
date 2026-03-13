@@ -1793,31 +1793,29 @@ export default function Studio() {
             // Saturation weight: cheek/forehead need very low sat tiles (skin), eye/mouth allow more color
             const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 2.5 : subRegion === 'nose' ? wSatBase * 2.0 : wSatBase * 1.5;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
-            // Skin-tone detection: warm L:40-80, a:5-25, b:10-35
-            const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
-            const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
-            if (isTargetSkin && isTileSkin) dist -= 12; // skin-tone bonus: prefer matching skin tiles
-            // cheek/forehead: much stronger penalty for non-skin tiles in skin areas
-            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 40 : 20;
+            // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
+            const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
+            const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
+            if (isTargetSkin && isTileSkin) dist -= 15; // skin-tone bonus: prefer matching skin tiles
+            // cheek/forehead: stronger penalty for non-skin tiles in skin areas
+            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
-            // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
-            // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
-            // in skin-toned target cells. This prevents colorful landscape/nature tiles from
-            // appearing in face/skin regions.
-            // We use the isSkinFriendly heuristic: tile is skin-friendly if its LAB is warm
-            // (a > 0, b > 0) OR if it's low-saturation (neutral/gray)
-            // Subject-Penalty in skin areas: always active (not just portrait mode)
-            // Prevents colorful landscape/nature tiles from appearing in face/skin regions
+            // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
+            // Green tiles (a < -3) are almost never correct in face areas
+            if (mf.lab[1] < -3) {
+              // Scale: a=-3 → +0, a=-15 → +72, a=-30 → +162
+              dist += Math.min(200, (-mf.lab[1] - 3) * 6); // up to +200 for very green tiles
+            }
+            // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
+            if (mf.lab[2] < -5) {
+              dist += Math.min(150, (-mf.lab[2] - 5) * 5); // up to +150 for very blue tiles
+            }
+            // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
             {
-              const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
-              const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
-              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 35) {
-                // Tile is colorful (sat>35) AND not warm AND not neutral -> subject penalty
-                dist += 60; // moderate: push non-skin-subject tiles down in face ranking
-              }
-              // Extra penalty for cool/blue tiles in warm skin areas
-              if (isTargetSkin && mf.lab[1] < -8) {
-                dist += 50; // Blue/green tile in warm skin area -> wrong
+              const tileIsWarm = mf.lab[1] > 2 && mf.lab[2] > 2; // a>2, b>2 = warm/skin-like
+              const tileIsNeutral = tileSatC < 22; // low saturation = neutral/gray = OK for skin
+              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 40) {
+                dist += 50; // moderate: push non-skin-subject tiles down in face ranking
               }
             }
             // Low-saturation penalty (STRENGTHENED):
