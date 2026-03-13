@@ -261,9 +261,11 @@ app.get("/api/tile/:id", async (req, res) => {
 
 // GET /api/tile-urls?ids=1,2,3  – returns direct tile128_url for hi-res rendering
 // Client can use these URLs directly (no proxy needed) for faster hi-res zoom
+// With ?hires=1: returns source_url (original high-res) for print quality
 app.get("/api/tile-urls", async (req, res) => {
   try {
     const idsParam = req.query.ids as string;
+    const wantHiRes = req.query.hires === '1';
     if (!idsParam) return res.status(400).json({ error: "Missing ids" });
     const ids = idsParam.split(',').map(Number).filter(n => !isNaN(n) && n > 0);
     if (ids.length === 0 || ids.length > 2000) return res.status(400).json({ error: "Invalid ids" });
@@ -274,7 +276,13 @@ app.get("/api/tile-urls", async (req, res) => {
     );
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
-      urlMap[row.id] = row.tile128_url || row.source_url || '';
+      if (wantHiRes) {
+        // For print: prefer source_url (original hi-res from Unsplash/Pexels), fallback to tile128_url
+        urlMap[row.id] = row.source_url || row.tile128_url || '';
+      } else {
+        // For screen zoom: tile128_url is fast and sufficient
+        urlMap[row.id] = row.tile128_url || row.source_url || '';
+      }
     }
     res.set("Cache-Control", "public, max-age=3600");
     res.json(urlMap);

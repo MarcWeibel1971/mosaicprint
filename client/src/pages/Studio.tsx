@@ -2279,11 +2279,13 @@ export default function Studio() {
       const { cols, rows } = mosaicParamsRef.current;
       // Dynamic tile size: each tile = exactly 1cm x 1cm at 300 DPI in the chosen format
       // Formula: tilePx = formatWidthCm / cols * (300 / 2.54)
-      // This ensures every tile is recognizable when printed at 1cm size
-      // Clamped to [118, 300]: min=1cm@300dpi, max=300px (server memory limit)
+      // Minimum 200px per tile: ensures tiles are clearly recognizable even at small print sizes
+      // At 200px: 60 cols x 200px = 12000px wide → 300 DPI at 101cm, excellent for all formats
+      // Clamped to [200, 400]: min=200px for clear detail, max=400px (server memory limit)
       const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
       const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
-      const PRINT_TILE_PX = Math.min(300, Math.max(118, Math.round(tileSizeCm * PX_PER_CM)));
+      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM); // px for 1:1 at 300dpi
+      const PRINT_TILE_PX = Math.min(400, Math.max(200, naturalTilePx)); // min 200px for recognizable tiles
       // Actual output dimensions (= format at 300 DPI, aspect-ratio preserved)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
@@ -3219,7 +3221,8 @@ export default function Studio() {
               const rows = mosaicParamsRef.current?.rows ?? 80;
               const PX_PER_CM = 300 / 2.54;
               const tileSizeCm = fmt.widthCm / cols;
-              const printTilePx = Math.min(300, Math.max(118, Math.round(tileSizeCm * PX_PER_CM)));
+              const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
+              const printTilePx = Math.min(400, Math.max(200, naturalTilePx2));
               const outW = cols * printTilePx;
               const outH = rows * printTilePx;
               const posterW = (cols * tileSizeCm).toFixed(0);
