@@ -1,7 +1,16 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { loadStripe } from "@stripe/stripe-js";
 import { Link } from "react-router-dom";
-// MediaPipe FaceLandmarker – loaded lazily to avoid blocking initial render
+import {
+  Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
+  Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check
+} from "lucide-react";
+import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
+import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
+import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
+
+
+// MediaPipe FaceLandmarker - loaded lazily to avoid blocking initial render
 type FaceLandmarkerResult = { faceLandmarks: Array<Array<{x: number; y: number; z: number}>> };
 type FaceLandmarkerInstance = { detect: (image: HTMLCanvasElement) => FaceLandmarkerResult };
 let _faceLandmarker: FaceLandmarkerInstance | null = null;
@@ -47,15 +56,7 @@ const FACE_LANDMARK_GROUPS = {
   // Eyebrows: 70, 63, 105, 66, 107, 336, 296, 334, 293, 300
   eyebrow:    [70, 63, 105, 66, 107, 336, 296, 334, 293, 300],
 };
-import {
-  Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
-  Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check
-} from "lucide-react";
-import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
-import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
-import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
-
-// ── Picsum fallback pool ──────────────────────────────────────────────────────
+// -- Picsum fallback pool ------------------------------------------------------
 const PICSUM_IDS: number[] = (() => {
   // IDs that return 404 on picsum.photos (verified via API)
   const skip = new Set([
@@ -101,7 +102,7 @@ function getPhotoUrls(count: number, tileSize: number): string[] {
 
 // loadImage is replaced by loadImageCached from image-cache.ts
 
-// LAB → RGB (inverse of rgbToLab)
+// LAB -> (RGB) (inverse of rgbToLab)
 function labToRgb(L: number, a: number, b: number): [number, number, number] {
   const fy = (L + 16) / 116;
   const fx = a / 500 + fy;
@@ -116,7 +117,7 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
   return [toSrgb(rLin), toSrgb(gLin), toSrgb(bLin)];
 }
 
-// RGB → LAB
+// RGB -> (LAB)
 function rgbToLab(r: number, g: number, b: number): [number, number, number] {
   let R = r / 255, G = g / 255, B = b / 255;
   R = R > 0.04045 ? Math.pow((R + 0.055) / 1.055, 2.4) : R / 12.92;
@@ -130,10 +131,10 @@ function rgbToLab(r: number, g: number, b: number): [number, number, number] {
 }
 
 /**
- * CIEDE2000 color difference formula (perceptually uniform, better than Euclidean ΔE)
+ * CIEDE2000 color difference formula (perceptually uniform, better than Euclidean DeltaE)
  * Significantly more accurate for skin tones: reduces over-emphasis on blue/yellow differences.
  * Reference: Sharma et al. 2005, validated against Rochester test data.
- * Returns ΔE₀₀ in range 0..~100 (< 2 = barely distinguishable, < 5 = small, > 10 = clearly different)
+ * Returns DeltaE?? in range 0..~100 (< 2 = barely distinguishable, < 5 = small, > 10 = clearly different)
  */
 function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, b2: number): number {
   const deg2rad = Math.PI / 180;
@@ -152,7 +153,7 @@ function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, 
   if (h1p < 0) h1p += 360;
   let h2p = (a2p === 0 && b2 === 0) ? 0 : Math.atan2(b2, a2p) * rad2deg;
   if (h2p < 0) h2p += 360;
-  // Step 2: ΔL', ΔC', ΔH'
+  // Step 2: DeltaL', DeltaC', DeltaH'
   const dLp = L2 - L1;
   const dCp = C2p - C1p;
   let dhp: number;
@@ -200,23 +201,23 @@ function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, 
 }
 
 // Printolino-konforme Druckformate
-// Pixelgrösse bei 300 dpi: px = cm × (300 / 2.54) = cm × 118.11
-// 300 DPI ist der Standard für hochwertige Fotoprodukte (Leinwand, Alu-Dibond)
-// Tile-Grösse für Druckqualität: 300px pro Tile (aus source_url geladen)
+// Pixelgroesse bei 300 dpi: px = cm x (300 / 2.54) = cm x 118.11
+// 300 DPI ist der Standard fuer hochwertige Fotoprodukte (Leinwand, Alu-Dibond)
+// Tile-Groesse fuer Druckqualitaet: 300px pro Tile (aus source_url geladen)
 const PRINT_FORMATS = [
-  { label: "20×20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 300, pxW: 2362, pxH: 2362 },
-  { label: "30×30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 300, pxW: 3543, pxH: 3543 },
-  { label: "40×40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 300, pxW: 4724, pxH: 4724 },
-  { label: "50×70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 300, pxW: 5906, pxH: 8268 },
-  { label: "70×70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 300, pxW: 8268, pxH: 8268 },
-  { label: "100×100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 300, pxW: 11811, pxH: 11811 },
+  { label: "20x20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 300, pxW: 2362, pxH: 2362 },
+  { label: "30x30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 300, pxW: 3543, pxH: 3543 },
+  { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 300, pxW: 4724, pxH: 4724 },
+  { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 300, pxW: 5906, pxH: 8268 },
+  { label: "70x70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 300, pxW: 8268, pxH: 8268 },
+  { label: "100x100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 300, pxW: 11811, pxH: 11811 },
 ];
 
 const MATERIALS = [
-  { label: "Leinwand", surcharge: 0, icon: "🖼️" },
-  { label: "Acrylglas", surcharge: 20, icon: "✨" },
-  { label: "Alu-Dibond", surcharge: 15, icon: "🔲" },
-  { label: "Fotopapier", surcharge: -10, icon: "📄" },
+  { label: "Leinwand", surcharge: 0, icon: "??" },
+  { label: "Acrylglas", surcharge: 20, icon: "?" },
+  { label: "Alu-Dibond", surcharge: 15, icon: "?" },
+  { label: "Fotopapier", surcharge: -10, icon: "?" },
 ];
 
 export default function Studio() {
@@ -232,7 +233,7 @@ export default function Studio() {
   const [sharpness, setSharpness] = useState(80);
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
-  const [selectedFormat, setSelectedFormat] = useState(1); // 30×30 default
+  const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
@@ -266,7 +267,7 @@ export default function Studio() {
     avgDeltaE: number;
     reuseRate: number;
     satLow: number;   // % tiles with saturation < 20 (muted/gray)
-    satMid: number;   // % tiles with saturation 20–60 (moderate)
+    satMid: number;   // % tiles with saturation 20-60 (moderate)
     satHigh: number;  // % tiles with saturation > 60 (vivid)
     totalTiles: number;
     uniqueTiles: number;
@@ -274,7 +275,7 @@ export default function Studio() {
   // Progressive rendering: show LAB-only preview while SSD matching runs
   const [renderPass, setRenderPass] = useState<1 | 2 | null>(null);
 
-  // ── Debug Report: detailed algorithm trace after generation ──────────────
+  // -- Debug Report: detailed algorithm trace after generation --------------
   const [debugReport, setDebugReport] = useState<{
     // Tile pool
     dbTilesTotal: number;       // tiles in LAB index
@@ -334,7 +335,7 @@ export default function Studio() {
   }, []);
 
   // Preload: Load the full 7D feature index (all tiles, ~330KB binary) in the background
-  // Format: [id, L, a, b, edge, brightness, saturation] × 7 floats × 4 bytes = 28 bytes/tile
+  // Format: [id, L, a, b, edge, brightness, saturation] x 7 floats x 4 bytes = 28 bytes/tile
   // This enables multi-dimensional k-NN: LAB + edge + brightness + saturation
   useEffect(() => {
     if (labIndexLoadedRef.current) return;
@@ -383,15 +384,15 @@ export default function Studio() {
 
   // HI-RES: threshold for activating hi-res canvas
     // Multi-tier zoom thresholds:
-    // zoom < 1.2 → 64px tiles (preview, already loaded)
-    // zoom 1.2–1.8 → 128px tiles (medium zoom)
-    // zoom > 1.8 → 200px tiles (high zoom, crisp detail)
+    // zoom < 1.2 -> 64px tiles (preview, already loaded)
+    // zoom 1.2-1.8 -> 128px tiles (medium zoom)
+    // zoom > 1.8 -> 200px tiles (high zoom, crisp detail)
     const HI_RES_THRESHOLD = 1.2;
     const ULTRA_RES_THRESHOLD = 1.8;
-    const showHiRes = ready && zoom >= HI_RES_THRESHOLD && sharpness > 0;
+    const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // Determine which resolution tier to use
-    const hiResTileSize = zoom >= ULTRA_RES_THRESHOLD ? 200 : 128;
-    // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2×
+    const hiResTileSize = zoom >= (ULTRA_RES_THRESHOLD) ? 200 : 128;
+    // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
     const hiResOpacity = showHiRes && hiResReady
       ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
       : 0;
@@ -432,8 +433,8 @@ export default function Studio() {
       const assignment = assignmentRef.current;
       const TOTAL = cols * rows;
 
-      // FIX A: Load only UNIQUE tile indices (deduplicate) – massive speedup
-      // A 60×60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
+      // FIX A: Load only UNIQUE tile indices (deduplicate) - massive speedup
+      // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
       const uniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
 
       // PERF: For DB tiles, fetch direct tile128_urls in one batch request
@@ -471,10 +472,10 @@ export default function Studio() {
         allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
       }
 
-      // Map: tile index → loaded hi-res image
+      // Map: tile index -> loaded hi-res image
       const hiResImgMap = new Map<number, HTMLImageElement>();
       const BATCH = 60; // larger batch for direct URLs (no proxy bottleneck)
-      for (let i = 0; i < uniqueIndices.length; i += BATCH) {
+      for (let i = 0; i < uniqueIndices.length; i += (BATCH)) {
         const batchIndices = uniqueIndices.slice(i, i + BATCH);
         const batchImgs = await Promise.all(
           batchIndices.map(idx => {
@@ -489,14 +490,14 @@ export default function Studio() {
       }
 
       // Draw hi-res tiles using the deduplicated map
-      for (let ci = 0; ci < TOTAL; ci++) {
+      for (let ci = 0; ci < (TOTAL); ci++) {
         const col = ci % cols, row = Math.floor(ci / cols);
         const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
         if (img && img.complete && img.naturalWidth > 0) {
           try {
             hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
           } catch (e) {
-            // Broken image – fill with neutral grey placeholder
+            // Broken image - fill with neutral grey placeholder
             hCtx.fillStyle = '#888888';
             hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
           }
@@ -530,7 +531,7 @@ export default function Studio() {
         setPan({ x: 0, y: 0 });
         setCompareMode(false);
 
-        // ── Auto Portrait Detection ──────────────────────────────────────────
+        // -- Auto Portrait Detection ------------------------------------------
         // Detect if the image is a portrait (face-heavy) and auto-apply optimal settings
         try {
           const aspectRatio = img.naturalWidth / img.naturalHeight;
@@ -596,8 +597,8 @@ export default function Studio() {
               neighborRadius: 6,      // Wider anti-repetition for more variety
               neighborPenalty: 200,   // Strong anti-repetition
               contrastBoost: 1.20,    // Mild contrast boost for matching
-              histogramBlend: 0.0,    // NO color transfer – tiles keep natural colors
-              baseOverlay: 0.0,       // NO overlay – pure tile-based rendering like reference
+              histogramBlend: 0.0,    // NO color transfer - tiles keep natural colors
+              baseOverlay: 0.0,       // NO overlay - pure tile-based rendering like reference
               edgeBoost: 0.0,         // No edge overlay
               overlayMode: 'none',    // Pure tile rendering
               labWeight: 0.15,        // LAB color distance
@@ -654,8 +655,8 @@ export default function Studio() {
             setAutoPresetApplied(null);
           }
 
-          // ── KI-Themen-Analyse: Farbpalette des Fotos analysieren ──
-          // Analysiert die dominanten Farbtöne und schlägt passende Tile-Themen vor
+          // -- KI-Themen-Analyse: Farbpalette des Fotos analysieren --
+          // Analysiert die dominanten Farbtoene und schlaegt passende Tile-Themen vor
           try {
             const paletteCanvas = document.createElement('canvas');
             paletteCanvas.width = 64; paletteCanvas.height = 64;
@@ -663,7 +664,7 @@ export default function Studio() {
             pCtx.drawImage(img, 0, 0, 64, 64);
             const pData = pCtx.getImageData(0, 0, 64, 64).data;
 
-            // Analyse: Hue-Histogramm + Helligkeits- und Sättigungsverteilung
+            // Analyse: Hue-Histogramm + Helligkeits- und Saettigungsverteilung
             let warmPixels = 0, coolPixels = 0, darkPixels = 0, brightPixels = 0;
             let greenPixels = 0, purplePixels = 0, totalPx = 0;
             let avgR = 0, avgG = 0, avgB = 0;
@@ -717,18 +718,18 @@ export default function Studio() {
 
             // Top 3 Themen nach Score, Mindest-Score 0.3
             const THEME_META: Record<string, {label: string; emoji: string}> = {
-              sunset: { label: 'Sunset', emoji: '🌅' },
-              ocean: { label: 'Ozean', emoji: '🌊' },
-              nature: { label: 'Natur', emoji: '🌿' },
-              urban: { label: 'Urban', emoji: '🏙️' },
-              abstract: { label: 'Abstrakt', emoji: '🎨' },
-              winter: { label: 'Winter', emoji: '❄️' },
-              portrait: { label: 'Portrait', emoji: '👤' },
-              food: { label: 'Food', emoji: '🍕' },
-              travel: { label: 'Reise', emoji: '✈️' },
-              animals: { label: 'Tiere', emoji: '🐾' },
-              flowers: { label: 'Blumen', emoji: '🌸' },
-              space: { label: 'Space', emoji: '🌌' },
+              sunset: { label: 'Sunset', emoji: '?' },
+              ocean: { label: 'Ozean', emoji: '?' },
+              nature: { label: 'Natur', emoji: '?' },
+              urban: { label: 'Urban', emoji: '??' },
+              abstract: { label: 'Abstrakt', emoji: '?' },
+              winter: { label: 'Winter', emoji: '??' },
+              portrait: { label: 'Portrait', emoji: '?' },
+              food: { label: 'Food', emoji: '?' },
+              travel: { label: 'Reise', emoji: '??' },
+              animals: { label: 'Tiere', emoji: '?' },
+              flowers: { label: 'Blumen', emoji: '?' },
+              space: { label: 'Space', emoji: '?' },
             };
             const sorted = Object.entries(themeScores)
               .filter(([, s]) => s > 0.3)
@@ -799,18 +800,18 @@ export default function Studio() {
     (mosaicParamsRef.current as any)._displayScale = DISPLAY_SCALE;
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // ???????????????????????????????????????????????????????????????????????
     // SSD PIXEL-LEVEL MATCHING (inspired by Mosaicer open-source engine)
     // Instead of comparing 1 average color per tile, we compare EVERY PIXEL
     // of each tile against the corresponding target region.
-    // This gives 192× more information (8×8×3 channels vs 1×3 channels).
-    // ═══════════════════════════════════════════════════════════════════════
+    // This gives 192x more information (8x8x3 channels vs 1x3 channels).
+    // ???????????????????????????????????????????????????????????????????????
 
-    const SSD_SIZE = 8; // Each tile & target region scaled to 8×8 for matching
+    const SSD_SIZE = 8; // Each tile & target region scaled to 8x8 for matching
     const TOTAL_TILES = COLS * ROWS;
 
     // Step 1: Create full-resolution target at SSD_SIZE per cell
-    // Target image scaled to (COLS * SSD_SIZE) × (ROWS * SSD_SIZE)
+    // Target image scaled to (COLS * SSD_SIZE) x (ROWS * SSD_SIZE)
     setProgressMsg("Analysiere Foto...");
     setProgress(5);
     const targetW = COLS * SSD_SIZE;
@@ -824,13 +825,13 @@ export default function Studio() {
     // Extract target region pixels for each cell (flattened RGB arrays)
     // targetRegions[cellIndex] = Uint8Array of SSD_SIZE*SSD_SIZE*3 values
     const targetRegions: Uint8Array[] = new Array(TOTAL_TILES);
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
+    for (let row = 0; row < (ROWS); row++) {
+      for (let col = 0; col < (COLS); col++) {
         const ci = row * COLS + col;
         const region = new Uint8Array(SSD_SIZE * SSD_SIZE * 3);
         let ri = 0;
-        for (let py = 0; py < SSD_SIZE; py++) {
-          for (let px = 0; px < SSD_SIZE; px++) {
+        for (let py = 0; py < (SSD_SIZE); py++) {
+          for (let px = 0; px < (SSD_SIZE); px++) {
             const srcX = col * SSD_SIZE + px;
             const srcY = row * SSD_SIZE + py;
             const si = (srcY * targetW + srcX) * 4;
@@ -850,18 +851,18 @@ export default function Studio() {
     offCtx.drawImage(targetImg, 0, 0, COLS, ROWS);
     const targetData = offCtx.getImageData(0, 0, COLS, ROWS).data;
 
-    // ── Low-Frequency Guidance (most important trick for mosaic quality) ──────
+    // -- Low-Frequency Guidance (most important trick for mosaic quality) ------
     // Apply Gaussian blur to extract low-frequency structure (face shape, shadows)
     // Matching against blurred target: clearer faces, less noisy mosaic
     const BLUR_RADIUS = 2; // blur in tile-grid pixels (= ~30px at 1:15 scale)
     const blurredData = new Uint8ClampedArray(targetData.length);
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
+    for (let row = 0; row < (ROWS); row++) {
+      for (let col = 0; col < (COLS); col++) {
         let rSum = 0, gSum = 0, bSum = 0, wSum = 0;
-        for (let dr = -BLUR_RADIUS; dr <= BLUR_RADIUS; dr++) {
-          for (let dc = -BLUR_RADIUS; dc <= BLUR_RADIUS; dc++) {
+        for (let dr = -BLUR_RADIUS; dr <= (BLUR_RADIUS); dr++) {
+          for (let dc = -BLUR_RADIUS; dc <= (BLUR_RADIUS); dc++) {
             const nr = row + dr, nc = col + dc;
-            if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+            if (nr < 0 || nr >= (ROWS) || nc < 0 || nc >= (COLS)) continue;
             // Gaussian weight: exp(-(dr^2+dc^2)/(2*sigma^2)), sigma=BLUR_RADIUS/2
             const sigma = BLUR_RADIUS / 1.5;
             const w = Math.exp(-(dr*dr + dc*dc) / (2 * sigma * sigma));
@@ -881,8 +882,8 @@ export default function Studio() {
     }
     // Use blurred data for tile matching (low-frequency guidance)
     const cellLab: [number, number, number][] = [];
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
+    for (let row = 0; row < (ROWS); row++) {
+      for (let col = 0; col < (COLS); col++) {
         const i = (row * COLS + col) * 4;
         // Mix: 50% blurred (structure) + 50% original (color accuracy)
         // Reduced blur weight for sharper contour matching (was 70/30)
@@ -905,8 +906,8 @@ export default function Studio() {
 
     let maxEdge = 0;
     const rawEdge: number[] = new Array(TOTAL_TILES).fill(0);
-    for (let row = 1; row < ROWS - 1; row++) {
-      for (let col = 1; col < COLS - 1; col++) {
+    for (let row = 1; row < (ROWS) - 1; row++) {
+      for (let col = 1; col < (COLS) - 1; col++) {
         // Sobel 3x3 on luminance
         const lum = (r: number, c: number) => {
           const i = (r * COLS + c) * 4;
@@ -924,36 +925,36 @@ export default function Studio() {
     }
     // Normalize edge map to 0-1
     const edgeNorm = maxEdge > 0 ? 1 / maxEdge : 1;
-    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+    for (let ci = 0; ci < (TOTAL_TILES); ci++) {
       edgeMap[ci] = rawEdge[ci] * edgeNorm;
       saliency[ci] = edgeMap[ci]; // saliency = edge strength
     }
 
     // Step 2: 2-STAGE MATCHING
     // Stage A: LAB k-NN over ALL tiles in DB (no image loading needed)
-    //   → For each mosaic cell, find Top-K candidates by LAB distance
+    //   -> For each mosaic cell, find Top-K candidates by LAB distance
     // Stage B: Load only the Top-K tile images, compute SSD, pick best
-    //   → Only ~30 images per cell are ever loaded (vs 2000 before)
+    //   -> Only ~30 images per cell are ever loaded (vs 2000 before)
     //
     // This gives: better quality (all 12K tiles searched) + faster loading
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const isMobileOrSlow = isMobile || (navigator as any).connection?.effectiveType === "2g";
 
     // FIX: Mobile gets reduced grid to prevent memory crash (iOS canvas limit ~16MP)
-    // iOS Safari kills tabs at ~150 MB RAM. Each tile image ~20 KB → max ~400 tiles in memory.
-    // With baseTiles=40, tilePx=12: 40×50×12px = 480×600px canvas, ~2000 cells
-    // TOP_K=15 → ~1200 unique tiles needed (well within 400 LRU cache limit)
+    // iOS Safari kills tabs at ~150 MB RAM. Each tile image ~20 KB -> max ~400 tiles in memory.
+    // With baseTiles=40, tilePx=12: 40x50x12px = 480x600px canvas, ~2000 cells
+    // TOP_K=15 -> ~1200 unique tiles needed (well within 400 LRU cache limit)
     if (isMobile) {
-      // Mobile: 60 tiles × 10px → ~3600 cells, ~1200 unique tiles → ~24 MB RAM (safe under iOS 150MB)
-      // Previously 40×12 was too coarse (2.25× fewer cells than desktop portrait 100×8)
-      const mobileMaxTiles = 60;  // was 40 – more tiles = better detail
-      const mobileTilePx = 10;    // was 12 – smaller tiles = more cells = more detail
+      // Mobile: 60 tiles x 10px -> ~3600 cells, ~1200 unique tiles -> ~24 MB RAM (safe under iOS 150MB)
+      // Previously 40x12 was too coarse (2.25x fewer cells than desktop portrait 100x8)
+      const mobileMaxTiles = 60;  // was 40 - more tiles = better detail
+      const mobileTilePx = 10;    // was 12 - smaller tiles = more cells = more detail
       if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
       if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
-      console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles ×', savedSettings.tilePx, 'px');
+      console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles x', savedSettings.tilePx, 'px');
     }
 
-     // ── Stage A: Load LAB index (if not already loaded) ──────────────────────
+     // -- Stage A: Load LAB index (if not already loaded) ----------------------
     setProgressMsg("Lade LAB-Index aller Kacheln...");
     setProgress(10);
     // Theme filter: if a theme is selected, always reload the index with theme param
@@ -977,14 +978,14 @@ export default function Studio() {
     }
 
     const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), or 15 (15D with isSkinFriendly)
-    const USE_2STAGE = labIndex !== null && labIndex.length >= FPT;
+    const USE_2STAGE = labIndex !== null && labIndex.length >= (FPT);
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
     const IS_14D = FPT >= 14;
     const IS_15D = FPT >= 15; // includes isSkinFriendly flag
     console.log(`[Studio] 2-stage matching: ${USE_2STAGE ? `YES (${TOTAL_DB_TILES} tiles, ${FPT}D index)` : 'NO (fallback to legacy)'}`);
 
-    // ── Stage A helper: multi-dimensional k-NN over all DB tiles ─────────────────────
+    // -- Stage A helper: multi-dimensional k-NN over all DB tiles ---------------------
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
@@ -1003,16 +1004,16 @@ export default function Studio() {
       // Brightness: prevents dark tiles in bright areas
       const W_L = 1.2, W_A = 2.0, W_B = 2.0; // Increased a/b weight: color accuracy is critical for skin tones
       const W_QUAD = IS_14D ? 0.6 : 0;        // Increased quadrant weight: spatial color gradients matter more
-      // W_EDGE: active for all index types – edge energy drives contour sharpness
+      // W_EDGE: active for all index types - edge energy drives contour sharpness
       const W_EDGE = IS_7D ? 25.0 : 22.0;     // Slightly increased for 14D/15D for sharper edges
-      // W_BRIGHT: brightness matching – prevents dark tiles in bright areas
+      // W_BRIGHT: brightness matching - prevents dark tiles in bright areas
       const W_BRIGHT = IS_7D ? 15.0 : 10.0;   // Increased from 8.0: brightness drives face structure
       // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
       const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 250); // Lower threshold, higher penalty
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
-      for (let i = 0; i < labIndex.length; i += FPT) {
+      for (let i = 0; i < labIndex.length; i += (FPT)) {
         const id = labIndex[i];
         const L = labIndex[i + 1];
         const a = labIndex[i + 2];
@@ -1026,11 +1027,11 @@ export default function Studio() {
           const dTRa = targetQuadA[1] - labIndex[i+6], dTRb = targetQuadB[1] - labIndex[i+7];
           const dBLa = targetQuadA[2] - labIndex[i+8], dBLb = targetQuadB[2] - labIndex[i+9];
           const dBRa = targetQuadA[3] - labIndex[i+10], dBRb = targetQuadB[3] - labIndex[i+11];
-          dist += W_QUAD*(dTLa*dTLa + dTLb*dTLb + dTRa*dTRa + dTRb*dTRb +
+          dist += (W_QUAD)*(dTLa*dTLa + dTLb*dTLb + dTRa*dTRa + dTRb*dTRb +
                           dBLa*dBLa + dBLb*dBLb + dBRa*dBRa + dBRb*dBRb);
           const edge = labIndex[i + 12];
           const brightness = labIndex[i + 13];
-          dist += W_EDGE*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
+          dist += (W_EDGE)*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
           // Extra brightness penalty: very dark tile (brightness<0.15) in bright area (targetBrightness>0.65)
           // Moderate penalty to avoid over-correction (white patches)
           if (targetBrightness > 0.65 && brightness < 0.15) {
@@ -1039,7 +1040,7 @@ export default function Studio() {
           }
           // Gray-penalty: penalize gray tiles when target is colorful
           const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
-          if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+          if (GRAY_PENALTY > 0 && sat < 0.08) dist += (GRAY_PENALTY);
           // Extra: penalize low-sat tiles in warm/skin-toned target areas (fixes gray patches in faces)
           // targetSat > 0.10 = target has some color (not pure gray); sat < 0.15 = tile is nearly gray
           if (targetSat > 0.10 && sat < 0.15 && targetA > 2) {
@@ -1060,17 +1061,17 @@ export default function Studio() {
           const dEdge = targetEdge - edge;
           const dBright = targetBrightness - brightness;
           const dSat = targetSat - sat;
-          dist += W_EDGE*dEdge*dEdge + W_BRIGHT*dBright*dBright + (10.0)*dSat*dSat;
+          dist += (W_EDGE)*dEdge*dEdge + W_BRIGHT*dBright*dBright + (10.0)*dSat*dSat;
           // Gray-penalty: penalize gray tiles when target is colorful
-          if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+          if (GRAY_PENALTY > 0 && sat < 0.08) dist += (GRAY_PENALTY);
         }
-        if (heap.length < TOP_K) {
+        if (heap.length < (TOP_K)) {
           heap.push({ tileId: id, labDist: dist });
           if (heap.length === TOP_K) {
             // Find initial worst
             worstIdx = 0;
             maxDist = heap[0].labDist;
-            for (let j = 1; j < TOP_K; j++) {
+            for (let j = 1; j < (TOP_K); j++) {
               if (heap[j].labDist > maxDist) { maxDist = heap[j].labDist; worstIdx = j; }
             }
           }
@@ -1079,7 +1080,7 @@ export default function Studio() {
           // Update worst
           worstIdx = 0;
           maxDist = heap[0].labDist;
-          for (let j = 1; j < TOP_K; j++) {
+          for (let j = 1; j < (TOP_K); j++) {
             if (heap[j].labDist > maxDist) { maxDist = heap[j].labDist; worstIdx = j; }
           }
         }
@@ -1087,22 +1088,22 @@ export default function Studio() {
       return heap.sort((a, b) => a.labDist - b.labDist);
     };
 
-    // ── Stage B: Pre-compute per-cell Top-K candidates ───────────────────────
+    // -- Stage B: Pre-compute per-cell Top-K candidates -----------------------
     // For each cell, find the Top-K tile IDs by LAB distance
     // Then deduplicate: collect the UNIQUE tile IDs needed across all cells
     setProgressMsg(`Suche beste Kacheln in ${TOTAL_DB_TILES.toLocaleString()} Bildern...`);
     setProgress(15);
 
-    // Map: tileId → candidate index (for SSD lookup after loading)
+    // Map: tileId -> candidate index (for SSD lookup after loading)
     const cellCandidates: Array<Array<{tileId: number; labDist: number}>> = [];
     const neededTileIds = new Set<number>();
 
     if (USE_2STAGE) {
       // 2-pass: first collect all candidates (with 14D features), then load images
-      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      for (let ci = 0; ci < (TOTAL_TILES); ci++) {
         const [tL, tA, tB] = cellLab[ci];
         // FIX: targetEdge/targetBright/targetSat must be active for ALL index types (7D, 14D, 15D)!
-        // Previously they were 0 for 14D/15D → Gray-Penalty in kNN was completely disabled → gray patches!
+        // Previously they were 0 for 14D/15D -> Gray-Penalty in kNN was completely disabled -> gray patches!
         const targetEdge = edgeMap[ci]; // always active
         const targetBright = tL / 100;  // always active
         const targetSat = Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60); // always active
@@ -1124,7 +1125,7 @@ export default function Studio() {
       // This preserves quality (best matches kept) while reducing memory footprint
       // Read mobileMaxTiles from Admin settings (default 1500 if not configured)
       const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 1500;
-      if (isMobileOrSlow && neededTileIds.size > MOBILE_MAX_TILES) {
+      if (isMobileOrSlow && neededTileIds.size > (MOBILE_MAX_TILES)) {
         // Score each tile: sum of (1/(rank+1)) across all cells where it appears
         // Higher score = appears as top candidate for more cells = more important to keep
         const tileScore = new Map<number, number>();
@@ -1149,16 +1150,16 @@ export default function Studio() {
       }
     }
 
-    // ── Stage B: Load only the needed tile images ─────────────────────────────
+    // -- Stage B: Load only the needed tile images -----------------------------
     setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder...`);
     setProgress(25);
 
-    // tileId → HTMLImageElement (loaded at 64px)
+    // tileId -> HTMLImageElement (loaded at 64px)
     const tileImgMap = new Map<number, HTMLImageElement>();
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
-      // ── Targeted Atlas strategy: build sprite-sheet only for needed tile IDs ──
+      // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // This is much faster than loading all DB tiles: only ~1500 tiles instead of 11000+
       const neededArray = Array.from(neededTileIds);
       // Mobile: cap at 3000 to avoid OOM; Desktop: load all needed tiles
@@ -1215,7 +1216,7 @@ export default function Studio() {
         setProgressMsg(`Lade ${missingIds.length} weitere Kacheln...`);
         const BATCH = isMobileOrSlow ? 40 : 100;
         let loaded = 0;
-        for (let i = 0; i < missingIds.length; i += BATCH) {
+        for (let i = 0; i < missingIds.length; i += (BATCH)) {
           const batchIds = missingIds.slice(i, i + BATCH);
           const batchImgs = await Promise.all(
             batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
@@ -1238,7 +1239,7 @@ export default function Studio() {
         const tileIdArray = Array.from(neededTileIds);
         const BATCH = isMobileOrSlow ? 40 : 100;
         let loaded = 0;
-        for (let i = 0; i < tileIdArray.length; i += BATCH) {
+        for (let i = 0; i < tileIdArray.length; i += (BATCH)) {
           const batchIds = tileIdArray.slice(i, i + BATCH);
           const batchImgs = await Promise.all(
             batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
@@ -1258,7 +1259,7 @@ export default function Studio() {
       setProgress(45);
     }
 
-    // ── Fallback: legacy pool if 2-stage not available ────────────────────────
+    // -- Fallback: legacy pool if 2-stage not available ------------------------
     // Build validImgs/validTileIds arrays for the rest of the pipeline
     let validImgs: HTMLImageElement[];
     let validTileIds: number[];
@@ -1285,7 +1286,7 @@ export default function Studio() {
       }
       const loadedImgs: (HTMLImageElement | null)[] = [];
       const BATCH = isMobileOrSlow ? 30 : 80;
-      for (let i = 0; i < allUrls.length; i += BATCH) {
+      for (let i = 0; i < allUrls.length; i += (BATCH)) {
         const batch = await Promise.all(allUrls.slice(i, i + BATCH).map(u => loadImageCached(u, IMG_TIMEOUT)));
         loadedImgs.push(...batch);
         setProgress(25 + Math.round(((i + BATCH) / allUrls.length) * 20));
@@ -1311,9 +1312,9 @@ export default function Studio() {
       quads: [[number,number,number],[number,number,number],[number,number,number],[number,number,number]]; // TL,TR,BL,BR
       brightness: number;                // 0-100
       texture: number;                   // luminance variance (0-1000)
-      saturation: number;                // chroma = sqrt(a²+b²), 0-100
+      saturation: number;                // chroma = sqrt(a^2+b^2), 0-100
       edgeEnergy: number;                // normalized Sobel energy 0-1 (frequency-aware)
-      ssdPixels: Uint8Array;             // 8×8 RGB pixel data for pixel-accurate SSD matching
+      ssdPixels: Uint8Array;             // 8x8 RGB pixel data for pixel-accurate SSD matching
     };
 
     const extractFeature = (d: Uint8ClampedArray, SZ: number): ImgFeature => {
@@ -1355,13 +1356,13 @@ export default function Studio() {
         }
         return qn>0 ? [qL/qn, qA/qn, qB/qn] : [50,0,0];
       };
-      // Extract 8×8 RGB pixel data for SSD matching (downscale from SZ to 8)
+      // Extract 8x8 RGB pixel data for SSD matching (downscale from SZ to 8)
       const SSD_SZ = 8;
       const ssdPixels = new Uint8Array(SSD_SZ * SSD_SZ * 3);
       const scaleX = SZ / SSD_SZ, scaleY = SZ / SSD_SZ;
       let si2 = 0;
-      for (let sy = 0; sy < SSD_SZ; sy++) {
-        for (let sx = 0; sx < SSD_SZ; sx++) {
+      for (let sy = 0; sy < (SSD_SZ); sy++) {
+        for (let sx = 0; sx < (SSD_SZ); sx++) {
           const srcX = Math.floor(sx * scaleX), srcY = Math.floor(sy * scaleY);
           const idx = (srcY * SZ + srcX) * 4;
           ssdPixels[si2++] = d[idx];
@@ -1395,7 +1396,7 @@ export default function Studio() {
       }
     });
 
-    // ── Filter out clipart-like tiles (white/flat backgrounds) ──────────────
+    // -- Filter out clipart-like tiles (white/flat backgrounds) --------------
     // Tiles with very high L (>92) AND very low texture (<3) are almost certainly
     // white-background clipart images that ruin the mosaic.
     // Also filter tiles with very low saturation AND high L (washed out).
@@ -1405,10 +1406,10 @@ export default function Studio() {
     const goodTileIds: number[] = [];
     // Compute target image average brightness to calibrate dark-tile filter
     let targetAvgL = 0;
-    for (let ci2 = 0; ci2 < TOTAL_TILES; ci2++) { targetAvgL += cellLab[ci2][0]; }
+    for (let ci2 = 0; ci2 < (TOTAL_TILES); ci2++) { targetAvgL += cellLab[ci2][0]; }
     targetAvgL /= TOTAL_TILES;
     // For bright target images (avg L > 65), filter out extremely dark tiles (L < 8 = nearly pure black)
-    // Threshold raised from 50→65 and 12→8 to avoid over-filtering (was causing white patches)
+    // Threshold raised from 50->65 and 12->8 to avoid over-filtering (was causing white patches)
     const filterDarkTiles = targetAvgL > 65;
     for (let i = 0; i < imgFeatures.length; i++) {
       const f = imgFeatures[i];
@@ -1431,7 +1432,7 @@ export default function Studio() {
 
     // Cell features from target image
     const cellFeatures: ImgFeature[] = [];
-    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+    for (let ci = 0; ci < (TOTAL_TILES); ci++) {
       const col = ci % COLS, row = Math.floor(ci / COLS);
       const [gL,gA,gB] = cellLab[ci];
       const sat = Math.sqrt(gA*gA + gB*gB);
@@ -1445,7 +1446,8 @@ export default function Studio() {
         edgeEnergy: edgeMap[ci], // use Sobel edge strength as target edge energy
         ssdPixels: new Uint8Array(8*8*3), // not used for cell features (targetRegions used instead)
       });
-      // ── Step 3b: Face Detection (MediaPipe FaceLandmarker) ──────────────────────────
+      // -- Step 3b: Face Detection (MediaPipe FaceLandmarker) --------------------------
+    }
     // Creates a subRegionMask with per-cell face subregion labels:
     // 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null
     // Each subregion gets different matching weights for optimal quality.
@@ -1552,7 +1554,7 @@ export default function Studio() {
       }
     } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }
 
-    // ── Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
+    // -- Progressive Rendering: Pass 1 (LAB-color preview) ---------------------
     // Before running the expensive SSD matching loop, draw a fast LAB-color preview:
     // each cell gets the average color of its best k-NN candidate (from Stage A).
     // This gives the user immediate visual feedback while the full SSD pass runs.
@@ -1560,7 +1562,7 @@ export default function Studio() {
     setProgressMsg("Vorschau (Pass 1)...");
     setProgress(49);
     if (USE_2STAGE) {
-      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      for (let ci = 0; ci < (TOTAL_TILES); ci++) {
         const col = ci % COLS, row = Math.floor(ci / COLS);
         const x = col * TILE_PX, y = row * TILE_PX;
         // Use the best k-NN candidate's LAB color as a solid fill
@@ -1589,7 +1591,7 @@ export default function Studio() {
 
     // Step 4: Match tiles
     // 2-STAGE MATCHING:
-    //   Stage A (done above): k-NN over ALL DB tiles in LAB space → cellCandidates[ci]
+    //   Stage A (done above): k-NN over ALL DB tiles in LAB space -> cellCandidates[ci]
     //   Stage B (here): For each cell, get the pre-computed Top-K candidates,
     //                   look up their loaded images, run SSD + full scoring, pick best
     //
@@ -1598,36 +1600,36 @@ export default function Studio() {
     setProgressMsg("Matche Fotos (Pass 2)...");
     setProgress(50);
 
-    // Build a tileId → index map for the loaded images (for 2-stage lookup)
+    // Build a tileId -> index map for the loaded images (for 2-stage lookup)
     const tileIdToIdx = new Map<number, number>();
     for (let i = 0; i < filteredTileIds.length; i++) {
       tileIdToIdx.set(filteredTileIds[i], i);
     }
 
     const useCount = new Array(filteredValidImgs.length).fill(0);
-    // MAX_REUSE: hard cap — if we have enough tiles, limit to 1-2 uses per tile
+    // MAX_REUSE: hard cap -- if we have enough tiles, limit to 1-2 uses per tile
     // With 17k+ tiles and 2k cells, each tile should ideally be used at most once
-    const MAX_REUSE = filteredValidImgs.length >= TOTAL_TILES * 3
+    const MAX_REUSE = filteredValidImgs.length >= (TOTAL_TILES) * 3
       ? 1  // plenty of tiles: each used max once
-      : filteredValidImgs.length >= TOTAL_TILES * 1.5
+      : filteredValidImgs.length >= (TOTAL_TILES) * 1.5
         ? 2  // good coverage: max 2 uses
         : Math.max(3, Math.ceil((TOTAL_TILES * 1.5) / Math.max(1, filteredValidImgs.length)));
     const assignment: number[] = new Array(TOTAL_TILES).fill(-1);
-    // Also store best rotation per tile (0=0°, 1=90°, 2=180°, 3=270°)
+    // Also store best rotation per tile (0=0deg, 1=90deg, 2=180deg, 3=270deg)
     const assignmentRotation: number[] = new Array(TOTAL_TILES).fill(0);
     // Repetition Lock: radius 4, penalty 160 (portrait-optimized per feedback)
     const NEIGHBOR_RADIUS = savedSettings.neighborRadius ?? 4;
     const NEIGHBOR_PENALTY = savedSettings.neighborPenalty ?? 160;
     const ENABLE_ROTATION = savedSettings.enableRotation ?? true; // Tile rotation for better matching
 
-    // Pre-compute rotated features for all tiles (0°, 90°, 180°, 270°)
-    // For rotation: 90° swaps quadrants: TL→TR→BR→BL→TL
+    // Pre-compute rotated features for all tiles (0deg, 90deg, 180deg, 270deg)
+    // For rotation: 90deg swaps quadrants: TL->TR->BR->BL->TL
     // quads order: [TL, TR, BL, BR]
     const rotateQuads = (quads: [[number,number,number],[number,number,number],[number,number,number],[number,number,number]], rot: number): [[number,number,number],[number,number,number],[number,number,number],[number,number,number]] => {
       if (rot === 0) return quads;
-      if (rot === 1) return [quads[2], quads[0], quads[3], quads[1]]; // 90°: BL→TL, TL→TR, BR→BL, TR→BR
-      if (rot === 2) return [quads[3], quads[2], quads[1], quads[0]]; // 180°
-      return [quads[1], quads[3], quads[0], quads[2]]; // 270°
+      if (rot === 1) return [quads[2], quads[0], quads[3], quads[1]]; // 90deg: BL->TL, TL->TR, BR->BL, TR->BR
+      if (rot === 2) return [quads[3], quads[2], quads[1], quads[0]]; // 180deg
+      return [quads[1], quads[3], quads[0], quads[2]]; // 270deg
     };
 
     const tileOrder = Array.from({ length: TOTAL_TILES }, (_, i) => i)
@@ -1637,7 +1639,7 @@ export default function Studio() {
     const sortedByL = Array.from({ length: filteredValidImgs.length }, (_, i) => i)
       .sort((a, b) => filteredImgFeatures[a].lab[0] - filteredImgFeatures[b].lab[0]);
 
-    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+    for (let ti = 0; ti < (TOTAL_TILES); ti++) {
       const ci = tileOrder[ti];
       const tf = cellFeatures[ci];
       const col = ci % COLS, row = Math.floor(ci / COLS);
@@ -1646,11 +1648,11 @@ export default function Studio() {
 
       // Collect neighbor tile IDs for anti-repetition
       const neighborIds = new Set<number>();
-      for (let dr = -NEIGHBOR_RADIUS; dr <= NEIGHBOR_RADIUS; dr++) {
-        for (let dc = -NEIGHBOR_RADIUS; dc <= NEIGHBOR_RADIUS; dc++) {
+      for (let dr = -NEIGHBOR_RADIUS; dr <= (NEIGHBOR_RADIUS); dr++) {
+        for (let dc = -NEIGHBOR_RADIUS; dc <= (NEIGHBOR_RADIUS); dc++) {
           if (dr === 0 && dc === 0) continue;
           const nr = row + dr, nc = col + dc;
-          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+          if (nr >= 0 && nr < (ROWS) && nc >= 0 && nc < (COLS)) {
             const ni = nr * COLS + nc;
             if (assignment[ni] >= 0) neighborIds.add(assignment[ni]);
           }
@@ -1672,7 +1674,7 @@ export default function Studio() {
       } else {
         // Legacy fallback: binary search in sortedByL
         const PRE_FILTER_COUNT = Math.min(80, filteredValidImgs.length);
-        if (filteredValidImgs.length > PRE_FILTER_COUNT * 2) {
+        if (filteredValidImgs.length > (PRE_FILTER_COUNT) * 2) {
           const targetL = tf.lab[0];
           let lo = 0, hi = sortedByL.length - 1;
           while (lo < hi) {
@@ -1700,14 +1702,14 @@ export default function Studio() {
         const mf = filteredImgFeatures[j];
         // Base penalties (rotation-independent)
         const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
-        const reusePenalty = useCount[j] >= MAX_REUSE ? 150 * (useCount[j] - MAX_REUSE + 1) : 0;
+        const reusePenalty = useCount[j] >= (MAX_REUSE) ? 150 * (useCount[j] - MAX_REUSE + 1) : 0;
 
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
-          // 0. Pixel-accurate SSD score (8×8 RGB comparison – most accurate signal)
+          // 0. Pixel-accurate SSD score (8x8 RGB comparison - most accurate signal)
           // Compares every pixel of the tile against the target region
-          const tRegion = targetRegions[ci]; // 8×8×3 RGB of target cell
-          const mPixels = mf.ssdPixels;       // 8×8×3 RGB of candidate tile
+          const tRegion = targetRegions[ci]; // 8x8x3 RGB of target cell
+          const mPixels = mf.ssdPixels;       // 8x8x3 RGB of candidate tile
           let ssdSum = 0;
           for (let px = 0; px < tRegion.length; px++) {
             const d2 = tRegion[px] - mPixels[px];
@@ -1715,8 +1717,8 @@ export default function Studio() {
           }
           const ssdScore = ssdSum / (tRegion.length / 3) / (255 * 255); // normalize 0-1
 
-          // 1. Global LAB distance (color matching) – CIEDE2000 (perceptually uniform)
-          // Replaces Euclidean ΔE: CIEDE2000 is more accurate for skin tones and near-neutral colors.
+          // 1. Global LAB distance (color matching) - CIEDE2000 (perceptually uniform)
+          // Replaces Euclidean DeltaE: CIEDE2000 is more accurate for skin tones and near-neutral colors.
           // Particularly important for portrait mosaics: reduces over-emphasis on blue/yellow shifts.
           const labDist = deltaE2000(tf.lab[0], tf.lab[1], tf.lab[2], mf.lab[0], mf.lab[1], mf.lab[2]);
           // 2. Quadrant LAB distances (spatial color accuracy)
@@ -1730,12 +1732,12 @@ export default function Studio() {
           const brightDiff = Math.abs(tf.brightness - mf.brightness);
           // 4. Texture similarity
           const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
-          // 5. Edge Priority Matching: adaptive weight 0.05–0.50 based on cell edge strength
+          // 5. Edge Priority Matching: adaptive weight 0.05-0.50 based on cell edge strength
           const cellEdge = edgeMap[ci]; // 0-1
           const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
           const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
           // Without overlay: SSD is the primary signal (pixel-accurate color+brightness match)
-          // SSD 45% · LAB 15% · Brightness 50% · Texture 15% · Quad 10% · Saturation 40%
+          // SSD 45% . LAB 15% . Brightness 50% . Texture 15% . Quad 10% . Saturation 40%
           // Higher SSD weight = tiles that look most like the target region (color + luminance)
           const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
           const wSsdBase = noOverlay ? 0.45 : 0.30; // 45% SSD when no overlay (pure tile rendering)
@@ -1744,10 +1746,10 @@ export default function Studio() {
           const wTextureBase = savedSettings.textureWeight ?? 0.08;
           // 6. Saturation difference
           // Prevents gray tiles in colorful areas and vice versa
-          // saturation = sqrt(a²+b²), range 0–100
+          // saturation = sqrt(a^2+b^2), range 0-100
           const targetSatC = tf.saturation;
           const tileSatC = mf.saturation;
-          const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0–1
+          const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0-1
           // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
           const wSatBase = savedSettings.saturationWeight ?? 0.25;
           // Repetition penalty: exponential growth to strongly discourage reuse
@@ -1788,25 +1790,25 @@ export default function Studio() {
               const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
               const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
               if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 30) {
-                // Tile is colorful (sat>30) AND not warm AND not neutral → subject penalty
+                // Tile is colorful (sat>30) AND not warm AND not neutral -> subject penalty
                 dist += 80; // INCREASED: strongly push non-skin-subject tiles down in face ranking
               }
               // Extra penalty for cool/blue tiles in warm skin areas
               if (isTargetSkin && mf.lab[1] < -5) {
-                dist += 60; // Blue/green tile in warm skin area → very wrong
+                dist += 60; // Blue/green tile in warm skin area -> very wrong
               }
             }
             // Low-saturation penalty (STRENGTHENED):
-            // If target is low-sat (neutral/gray area) and tile is highly saturated → penalty ×4
-            // If target is skin-toned and tile is desaturated → penalty ×4
+            // If target is low-sat (neutral/gray area) and tile is highly saturated -> penalty x4
+            // If target is skin-toned and tile is desaturated -> penalty x4
             // This is the key fix for "noisy / bunt" skin areas
             if (targetSatC < 25 && tileSatC > 35) {
               // Gray/neutral target area: strongly penalize colorful tiles (lowered threshold from 40)
-              dist += (tileSatC - 35) / 100 * 6 * 100; // ×6 multiplier (was ×4)
+              dist += (tileSatC - 35) / 100 * 6 * 100; // x6 multiplier (was x4)
             }
             if (isTargetSkin && tileSatC < 15) {
               // Skin area: penalize washed-out gray tiles (broadened from <12)
-              dist += (15 - tileSatC) / 15 * 6 * 100; // ×6 multiplier (was ×5)
+              dist += (15 - tileSatC) / 15 * 6 * 100; // x6 multiplier (was x5)
             }
             // NEW: Penalize highly saturated tiles (sat>60) in ANY face region
             // These are the "rainbow noise" tiles that make faces look garish
@@ -1821,16 +1823,16 @@ export default function Studio() {
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
           let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
           // BIDIRECTIONAL saturation penalty (fixes gray patches on mobile):
-          // (1) Colorful tile in gray/neutral target area → penalize
+          // (1) Colorful tile in gray/neutral target area -> penalize
           if (targetSatC < 25 && tileSatC > 40) {
-            dist += (tileSatC - 40) / 100 * 2 * 100; // ×2 multiplier for non-face
+            dist += (tileSatC - 40) / 100 * 2 * 100; // x2 multiplier for non-face
           }
-          // (2) Gray tile in colored/warm target area → penalize (KEY FIX for gray patches)
+          // (2) Gray tile in colored/warm target area -> penalize (KEY FIX for gray patches)
           if (targetSatC > 15 && tileSatC < 10) {
-            dist += (10 - tileSatC) / 10 * 4 * 100; // ×4: strongly push gray tiles away from colored areas
+            dist += (10 - tileSatC) / 10 * 4 * 100; // x4: strongly push gray tiles away from colored areas
           } else if (targetSatC > 10 && tileSatC < 18 && tf.lab[1] > 2) {
             // Softer penalty for slightly gray tiles in warm/colored areas
-            dist += (18 - tileSatC) / 18 * 2 * 100; // ×2 soft penalty
+            dist += (18 - tileSatC) / 18 * 2 * 100; // x2 soft penalty
           }
           // YELLOW TILE PENALTY: overly yellow tile (LAB b > 28) in skin/warm area (a > 3, b < 25)
           // Prevents bright yellow sunset tiles from appearing in skin-tone face areas
@@ -1838,11 +1840,11 @@ export default function Studio() {
           const targetA = tf.lab[1];  // LAB a channel: positive = red/warm
           const targetBLab = tf.lab[2]; // LAB b channel of target
           if (tileB > 28 && targetA > 3 && targetBLab < 22) {
-            // Tile is very yellow but target is warm/skin (not yellow) → penalize
+            // Tile is very yellow but target is warm/skin (not yellow) -> penalize
             dist += (tileB - 28) * (targetA / 10) * 6; // up to ~120 penalty
           }
           // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
-          // Moderate penalty only – avoid over-correction (white patches)
+          // Moderate penalty only - avoid over-correction (white patches)
           const targetBr = tf.brightness; // 0-100
           const tileBr = mf.brightness;   // 0-100
           if (targetBr > 70 && tileBr < 15) {
@@ -1867,13 +1869,13 @@ export default function Studio() {
     validImgsRef.current = filteredValidImgs;
     tileIdsRef.current = filteredTileIds;
 
-    // ── Compute Quality Metrics ──────────────────────────────────────────────
+    // -- Compute Quality Metrics ----------------------------------------------
     // Compute after matching so we have the final assignment
     try {
       let deltaESum = 0;
       let satLowCount = 0, satMidCount = 0, satHighCount = 0;
       const uniqueUsed = new Set<number>();
-      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      for (let ci = 0; ci < (TOTAL_TILES); ci++) {
         const idx = assignment[ci];
         if (idx < 0) continue;
         uniqueUsed.add(idx);
@@ -1882,7 +1884,7 @@ export default function Studio() {
         // Delta-E: CIEDE2000 (perceptually uniform, same formula as Stage C scoring)
         deltaESum += deltaE2000(tf.lab[0], tf.lab[1], tf.lab[2], mf.lab[0], mf.lab[1], mf.lab[2]);
         // Saturation distribution of assigned tiles
-        const sat = mf.saturation; // sqrt(a²+b²), range 0–100
+        const sat = mf.saturation; // sqrt(a^2+b^2), range 0-100
         if (sat < 20) satLowCount++;
         else if (sat <= 60) satMidCount++;
         else satHighCount++;
@@ -1898,7 +1900,7 @@ export default function Studio() {
         uniqueTiles: uniqueUsed.size,
       });
 
-      // ── Build Debug Report ──────────────────────────────────────────────
+      // -- Build Debug Report ----------------------------------------------
       const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
       const faceCellCount = faceMask.filter(Boolean).length;
       setDebugReport({
@@ -1962,12 +1964,12 @@ export default function Studio() {
     const tileCtx = tileOffscreen.getContext('2d')!;
 
     const RENDER_BATCH = 60;
-    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+    for (let ci = 0; ci < (TOTAL_TILES); ci++) {
       const col = ci % COLS;
       const row = Math.floor(ci / COLS);
       const x = col * TILE_PX, y = row * TILE_PX;
       const img = filteredValidImgs[assignment[ci]];
-      const rot = assignmentRotation[ci]; // 0=0°, 1=90°, 2=180°, 3=270°
+      const rot = assignmentRotation[ci]; // 0=0deg, 1=90deg, 2=180deg, 3=270deg
       if (img && img.complete && img.naturalWidth > 0) {
         // Draw tile with rotation into offscreen canvas
         tileCtx.clearRect(0, 0, TILE_PX, TILE_PX);
@@ -1982,7 +1984,7 @@ export default function Studio() {
           tileCtx.restore();
         }
         } catch (e) {
-          // Broken image – fill with target pixel color as fallback
+          // Broken image - fill with target pixel color as fallback
           const fi = (row * COLS + col) * 4;
           tileCtx.fillStyle = `rgb(${targetData[fi]},${targetData[fi+1]},${targetData[fi+2]})`;
           tileCtx.fillRect(0, 0, TILE_PX, TILE_PX);
@@ -1998,32 +2000,32 @@ export default function Studio() {
         try { bCtx.drawImage(tileOffscreen, 0, 0); } catch { bCtx.drawImage(tileOffscreen, 0, 0, TILE_PX, TILE_PX); }
         // Store original URL for hi-res re-render
         tilesRef.current[ci].url = img.dataset.originalSrc || img.src;
-        // ── Professional Luminance-Scale + Moderate AB-Transfer (Reinhard-style) ────────
+        // -- Professional Luminance-Scale + Moderate AB-Transfer (Reinhard-style) --------
         // Based on best-practice mosaic engine pipeline:
-        //   1. Luminance scaling: pixel.L *= (targetL / tileAvgL)   → clamp 0.6–1.5
+        //   1. Luminance scaling: pixel.L *= (targetL / tileAvgL)   -> clamp 0.6-1.5
         //   2. Moderate AB shift: pixel.A = mix(pixel.A, targetA, AB_BLEND)
-        //   3. Max color shift clamp: |delta_A|, |delta_B| ≤ MAX_COLOR_SHIFT
+        //   3. Max color shift clamp: |delta_A|, |delta_B| <= (MAX_COLOR_SHIFT)
         //
-        // L_BLEND = 0.70 (luminance dominates – eye sees structure via brightness)
-        // AB_BLEND = 0.25 (gentle color nudge – preserves natural tile colors)
+        // L_BLEND = 0.70 (luminance dominates - eye sees structure via brightness)
+        // AB_BLEND = 0.25 (gentle color nudge - preserves natural tile colors)
         // MAX_COLOR_SHIFT = 18 (prevents unnatural tinting)
         //
-        // histogramBlend slider (0–0.15) scales both: 0.10 = full strength
-        // Mosaicer reference: NO overlay by default – tiles match naturally via precise color selection
+        // histogramBlend slider (0-0.15) scales both: 0.10 = full strength
+        // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
         // L_BLEND: minimum 0.20 always active (ensures brightness correction even without histogramBlend)
-        // At histogramBlend=0.09 → blendFactor=0.9 → L_BLEND=0.20+0.50*0.9=0.65
+        // At histogramBlend=0.09 -> blendFactor=0.9 -> (L_BLEND)=0.20+0.50*0.9=0.65
         const L_BLEND  = 0.20 + 0.50 * blendFactor;  // 0.20 minimum, up to 0.70 at full blend
         const AB_BLEND = 0.10 + 0.20 * blendFactor;  // 0.10 minimum, up to 0.30 at full blend
         const MAX_COLOR_SHIFT = 12;            // tighter clamp to preserve natural tile colors
         const [tL, tA, tB] = cellLab[ci];
-        // ── Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility ──
-        // Problem: tiles in shadow zones all look uniformly dark → face structure lost
+        // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
+        // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
         // Solution: in shadow zones, increase L_BLEND and apply local contrast stretch
         // so that subtle luminance differences between tiles become visible again.
         const isShadowZone = tL < 35;  // dark area in original image
-        const shadowBoost = isShadowZone ? Math.max(0, (35 - tL) / 35) : 0; // 0–1, strongest at tL=0
+        const shadowBoost = isShadowZone ? Math.max(0, (35 - tL) / 35) : 0; // 0-1, strongest at tL=0
         const effectiveL_BLEND = Math.min(0.95, L_BLEND + shadowBoost * 0.40); // boost L correction in shadows
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
         const td = tilePixels.data;
@@ -2035,7 +2037,7 @@ export default function Studio() {
         }
         const avgL = sumL / pCount;
         // Luminance scale factor: how much brighter/darker target is vs tile
-        // Wide clamp 0.15–4.0 to allow strong darkening/brightening for portrait visibility
+        // Wide clamp 0.15-4.0 to allow strong darkening/brightening for portrait visibility
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
         const clampedLumScale = Math.max(0.15, Math.min(4.0, rawLumScale));
         const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
@@ -2115,8 +2117,8 @@ export default function Studio() {
       olCtx.drawImage(canvas, 0, 0);
       const mosaicData = olCtx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       const md = mosaicData.data;
-      for (let row = 0; row < ROWS; row++) {
-        for (let col = 0; col < COLS; col++) {
+      for (let row = 0; row < (ROWS); row++) {
+        for (let col = 0; col < (COLS); col++) {
           const ci = row * COLS + col;
           const i = (row * COLS + col) * 4;
           const tr = targetData[i], tg = targetData[i+1], tb = targetData[i+2];
@@ -2125,11 +2127,11 @@ export default function Studio() {
           // In face regions: extra +0.15 boost for better portrait visibility
           const faceBoost = faceMask[ci] ? 0.15 : 0;
           const strength = Math.min(0.85, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);
-          for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < CANVAS_H; py++) {
-            for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < CANVAS_W; px++) {
+          for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < (CANVAS_H); py++) {
+            for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < (CANVAS_W); px++) {
               const pi = (py * CANVAS_W + px) * 4;
               if (OVERLAY_MODE === 'softlight') {
-                // ── Soft-Light Blending (Photoshop formula) ──
+                // -- Soft-Light Blending (Photoshop formula) --
                 const softLight = (base: number, blend: number) => {
                   const b = blend / 255, s = base / 255;
                   const result = b < 0.5
@@ -2141,7 +2143,7 @@ export default function Studio() {
                 md[pi+1] = Math.round(md[pi+1] * (1 - strength) + softLight(md[pi+1], tg) * strength);
                 md[pi+2] = Math.round(md[pi+2] * (1 - strength) + softLight(md[pi+2], tb) * strength);
               } else {
-                // ── Alpha Blend (simpler, more direct color shift) ──
+                // -- Alpha Blend (simpler, more direct color shift) --
                 md[pi]   = Math.round(md[pi]   * (1 - strength) + tr * strength);
                 md[pi+1] = Math.round(md[pi+1] * (1 - strength) + tg * strength);
                 md[pi+2] = Math.round(md[pi+2] * (1 - strength) + tb * strength);
@@ -2153,7 +2155,7 @@ export default function Studio() {
       olCtx.putImageData(mosaicData, 0, 0);
       ctx.drawImage(overlayCanvas, 0, 0);
     }
-    // overlayMode === 'none': skip overlay entirely – pure tile rendering
+    // overlayMode === 'none': skip overlay entirely - pure tile rendering
 
     // Vignette
     const vigGrad = ctx.createRadialGradient(
@@ -2166,7 +2168,7 @@ export default function Studio() {
     ctx.fillStyle = vigGrad;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.restore();
-    // ── Blur-Overlay: soften harsh tile grid edges for smoother mosaic look ──
+    // -- Blur-Overlay: soften harsh tile grid edges for smoother mosaic look --
     // Draw a 1px-blurred copy of the mosaic at configurable opacity on top.
     // This blends hard pixel-grid lines without making tiles themselves blurry.
     // Only in pure tile mode (overlayMode='none') to avoid double-blending.
@@ -2227,7 +2229,7 @@ export default function Studio() {
     const fmt = PRINT_FORMATS[selectedFormat];
 
     // FIX: preserve mosaic aspect ratio instead of forcing square format
-    // The mosaic canvas has the correct proportions (cols × tilePx : rows × tilePx)
+    // The mosaic canvas has the correct proportions (cols x tilePx : rows x tilePx)
     // We scale to fit within fmt dimensions while keeping the aspect ratio.
     const mosaicAspect = canvas.width / canvas.height;
     const fmtAspect = fmt.pxW / fmt.pxH;
@@ -2251,12 +2253,12 @@ export default function Studio() {
       // PRINT MODE: server-side rendering via /api/print-render
       // Strategy: use a fixed tile size of 200px per tile for print quality.
       // This gives each tile enough resolution to show recognizable detail when zoomed.
-      // Final output = cols × 200px (e.g. 100 cols → 20000px wide = excellent for any print size)
-      // The print service scales down to the requested format (e.g. 30×30cm @ 300 DPI = 3543px)
+      // Final output = cols x 200px (e.g. 100 cols -> 20000px wide = excellent for any print size)
+      // The print service scales down to the requested format (e.g. 30x30cm @ 300 DPI = 3543px)
       // but the source file at 20000px gives 300 DPI even at 170cm width.
       const { cols, rows } = mosaicParamsRef.current;
       // Fixed 200px per tile: good balance of quality vs. server memory
-      // 100 cols × 200px = 20000px (fine), 50 cols × 200px = 10000px (fine)
+      // 100 cols x 200px = 20000px (fine), 50 cols x 200px = 10000px (fine)
       const PRINT_TILE_PX = 200;
       // Actual output dimensions
       const printOutW = cols * PRINT_TILE_PX;
@@ -2264,7 +2266,7 @@ export default function Studio() {
 
       try {
         setLoading(true);
-        setProgressMsg(`Server rendert Druckqualität (${printOutW}×${printOutH}px)...`);
+        setProgressMsg(`Server rendert Druckqualitaet (${printOutW}x${printOutH}px)...`);
         setProgress(10);
 
         const controller = new AbortController();
@@ -2286,19 +2288,19 @@ export default function Studio() {
 
         if (!resp.ok) {
           const errText = await resp.text().catch(() => '');
-          throw new Error(`Server error: ${resp.status} – ${errText}`);
+          throw new Error(`Server error: ${resp.status} - ${errText}`);
         }
 
         // Server returns a JSON token instead of raw bytes.
-        // Client opens /api/print-download/:token directly – this forces Edge/Chrome
+        // Client opens /api/print-download/:token directly - this forces Edge/Chrome
         // to treat it as a real HTTP file download, bypassing Adobe Acrobat's
         // file association that intercepts Blob/Data-URL downloads.
         const { token, filename, size } = await resp.json();
         console.log(`[Print] Token received: ${token}, file: ${filename}, size: ${(size/1024/1024).toFixed(1)} MB`);
 
-        setProgressMsg(`✓ Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
+        setProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
 
-        // Open the download URL directly – Edge treats this as a binary file download
+        // Open the download URL directly - Edge treats this as a binary file download
         const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
         const link = document.createElement('a');
         link.href = downloadUrl;
@@ -2308,7 +2310,7 @@ export default function Studio() {
         link.click();
         document.body.removeChild(link);
 
-        setProgressMsg(`✓ Gespeichert: ${filename}`);
+        setProgressMsg(`OK Gespeichert: ${filename}`);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
@@ -2328,7 +2330,7 @@ export default function Studio() {
         document.body.appendChild(link2);
         link2.click();
         document.body.removeChild(link2);
-        setTimeout(() => URL.revokeObjectURL(url2), 10000);
+        setTimeout(() => (URL).revokeObjectURL(url2), 10000);
       } finally {
         setLoading(false);
         setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
@@ -2340,7 +2342,7 @@ export default function Studio() {
     outCtx.drawImage(canvas, 0, 0, outW, outH);
 
     // Add watermark for preview downloads
-    const wm = "MosaicPrint.ch – Vorschau";
+    const wm = "MosaicPrint.ch - Vorschau";
     const fontSize = Math.max(24, Math.round(outW * 0.025));
     outCtx.save();
     outCtx.globalAlpha = 0.28;
@@ -2396,12 +2398,12 @@ export default function Studio() {
         window.location.href = data.url; // Redirect to Stripe Checkout
       } else if (data.error) {
         // Stripe not configured: allow direct download as fallback
-        setPaymentError("Stripe nicht konfiguriert – direkt herunterladen.");
+        setPaymentError("Stripe nicht konfiguriert - direkt herunterladen.");
         handleDownload(true);
       }
     } catch {
       // Network error: allow direct download as fallback
-      setPaymentError("Zahlung nicht verfügbar – direkt herunterladen.");
+      setPaymentError("Zahlung nicht verfuegbar - direkt herunterladen.");
       handleDownload(true);
     } finally {
       setPaymentLoading(false);
@@ -2443,7 +2445,7 @@ export default function Studio() {
           <h1 className="font-serif text-3xl sm:text-4xl text-gray-900 mb-2">
             Dein Foto als <em className="text-coral-500 not-italic">lebendiges Kunstwerk</em>
           </h1>
-          <p className="text-gray-500">Lade dein Lieblingsfoto hoch – unsere KI baut es aus Hunderten kleiner Fotos nach.</p>
+          <p className="text-gray-500">Lade dein Lieblingsfoto hoch - unsere KI baut es aus Hunderten kleiner Fotos nach.</p>
         </div>
 
         {/* Cache status badge */}
@@ -2452,8 +2454,8 @@ export default function Studio() {
             <div className="inline-flex items-center gap-1.5 bg-green-50 border border-green-200 text-green-700 text-xs font-semibold px-3 py-1.5 rounded-full">
               <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               {dbTileCount !== null
-                ? `${dbTileCount.toLocaleString('de-CH')} Bilder verfügbar – schneller Start garantiert`
-                : `${cacheSize} Bilder im Cache – schneller Start garantiert`}
+                ? `${dbTileCount.toLocaleString('de-CH')} Bilder verfuegbar - schneller Start garantiert`
+                : `${cacheSize} Bilder im Cache - schneller Start garantiert`}
             </div>
           </div>
         )}
@@ -2461,22 +2463,22 @@ export default function Studio() {
         {/* Theme filter chips */}
         {!userPhoto && !loading && (
           <div className="max-w-xl mx-auto mb-6">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Thema wählen</p>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Thema waehlen</p>
             <div className="flex flex-wrap gap-2 justify-center">
               {[
-                { key: 'alle', label: 'Alle', emoji: '🌈' },
-                { key: 'sunset', label: 'Sunset', emoji: '🌅' },
-                { key: 'nature', label: 'Natur', emoji: '🌿' },
-                { key: 'urban', label: 'Urban', emoji: '🏙️' },
-                { key: 'portrait', label: 'Portrait', emoji: '👤' },
-                { key: 'abstract', label: 'Abstrakt', emoji: '🎨' },
-                { key: 'food', label: 'Food', emoji: '🍕' },
-                { key: 'travel', label: 'Reise', emoji: '✈️' },
-                { key: 'ocean', label: 'Ozean', emoji: '🌊' },
-                { key: 'winter', label: 'Winter', emoji: '❄️' },
-                { key: 'animals', label: 'Tiere', emoji: '🐾' },
-                { key: 'flowers', label: 'Blumen', emoji: '🌸' },
-                { key: 'space', label: 'Space', emoji: '🌌' },
+                { key: 'alle', label: 'Alle', emoji: '?' },
+                { key: 'sunset', label: 'Sunset', emoji: '?' },
+                { key: 'nature', label: 'Natur', emoji: '?' },
+                { key: 'urban', label: 'Urban', emoji: '??' },
+                { key: 'portrait', label: 'Portrait', emoji: '?' },
+                { key: 'abstract', label: 'Abstrakt', emoji: '?' },
+                { key: 'food', label: 'Food', emoji: '?' },
+                { key: 'travel', label: 'Reise', emoji: '??' },
+                { key: 'ocean', label: 'Ozean', emoji: '?' },
+                { key: 'winter', label: 'Winter', emoji: '??' },
+                { key: 'animals', label: 'Tiere', emoji: '?' },
+                { key: 'flowers', label: 'Blumen', emoji: '?' },
+                { key: 'space', label: 'Space', emoji: '?' },
               ].map(({ key, label, emoji }) => (
                 <button
                   key={key}
@@ -2512,8 +2514,8 @@ export default function Studio() {
               <Upload className="w-8 h-8 text-coral-600" />
             </div>
             <p className="text-xl font-bold text-gray-800 mb-2">Foto hochladen</p>
-            <p className="text-gray-500 mb-1">JPG, PNG, HEIC · Drag & Drop oder klicken</p>
-            <p className="text-sm text-gray-400">Empfohlen: min. 1000×1000 px für beste Qualität</p>
+            <p className="text-gray-500 mb-1">JPG, PNG, HEIC . Drag & Drop oder klicken</p>
+            <p className="text-sm text-gray-400">Empfohlen: min. 1000x1000 px fuer beste Qualitaet</p>
           </div>
         )}
 
@@ -2536,7 +2538,7 @@ export default function Studio() {
                     ? 'bg-amber-50 border-amber-200 text-amber-700'
                     : 'bg-coral-50 border-coral-200 text-coral-700'
                 }`}>
-                  {renderPass === 1 ? '⚡ Pass 1: Schnellvorschau' : '🎯 Pass 2: Präzisions-Matching'}
+                  {renderPass === 1 ? '? Pass 1: Schnellvorschau' : '? Pass 2: Praezisions-Matching'}
                 </span>
               </div>
             )}
@@ -2550,7 +2552,7 @@ export default function Studio() {
           </div>
         )}
 
-        {/* AI Detection Banner – shown after upload when image type is detected */}
+        {/* AI Detection Banner - shown after upload when image type is detected */}
         {detectedImageType && (ready || loading) && (
           <div className={`flex items-center gap-3 rounded-2xl px-4 py-3 mb-4 border shadow-sm ${
             detectedImageType === 'portrait'
@@ -2563,7 +2565,7 @@ export default function Studio() {
             <div className={`flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center text-lg ${
               detectedImageType === 'portrait' ? 'bg-rose-100' : detectedImageType === 'landscape' ? 'bg-sky-100' : 'bg-violet-100'
             }`}>
-              {detectedImageType === 'portrait' ? '🧑' : detectedImageType === 'landscape' ? '🏔️' : '🎨'}
+              {detectedImageType === 'portrait' ? '?' : detectedImageType === 'landscape' ? '??' : '?'}
             </div>
             {/* Text */}
             <div className="flex-1 min-w-0">
@@ -2571,14 +2573,14 @@ export default function Studio() {
                 detectedImageType === 'portrait' ? 'text-rose-500' : detectedImageType === 'landscape' ? 'text-sky-500' : 'text-violet-500'
               }`}>KI-Erkennung</p>
               <p className="text-sm font-semibold text-gray-800">
-                {detectedImageType === 'portrait' && 'Portrait erkannt – Optimale Einstellungen für Gesichter aktiv'}
-                {detectedImageType === 'landscape' && 'Landschaft erkannt – Optimale Einstellungen für Natur & Architektur aktiv'}
-                {detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt – Standard-Einstellungen aktiv'}
+                {detectedImageType === 'portrait' && 'Portrait erkannt - Optimale Einstellungen fuer Gesichter aktiv'}
+                {detectedImageType === 'landscape' && 'Landschaft erkannt - Optimale Einstellungen fuer Natur & Architektur aktiv'}
+                {detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt - Standard-Einstellungen aktiv'}
               </p>
               <p className="text-xs text-gray-500 mt-0.5">
-                {detectedImageType === 'portrait' && 'Feineres Raster · Stärkere Helligkeits- & Sättigungs-Gewichtung · Haut-Ton-Boost'}
-                {detectedImageType === 'landscape' && 'Grössere Kacheln · Mehr Farb-Genauigkeit · Weite Komposition'}
-                {detectedImageType === 'abstract' && 'Ausgewogene Gewichtung für allgemeine Motive'}
+                {detectedImageType === 'portrait' && 'Feineres Raster . Staerkere Helligkeits- & Saettigungs-Gewichtung . Haut-Ton-Boost'}
+                {detectedImageType === 'landscape' && 'Groessere Kacheln . Mehr Farb-Genauigkeit . Weite Komposition'}
+                {detectedImageType === 'abstract' && 'Ausgewogene Gewichtung fuer allgemeine Motive'}
               </p>
             </div>
             {/* Badge */}
@@ -2590,12 +2592,12 @@ export default function Studio() {
           </div>
         )}
 
-        {/* KI-Themen-Vorschläge: shown after upload, before/during rendering */}
+        {/* KI-Themen-Vorschlaege: shown after upload, before/during rendering */}
         {suggestedThemes.length > 0 && (ready || loading) && (
           <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">✨</span>
-              <span className="text-xs font-semibold text-amber-800">KI-Themen-Vorschläge basierend auf deinem Foto</span>
+              <span className="text-sm">?</span>
+              <span className="text-xs font-semibold text-amber-800">KI-Themen-Vorschlaege basierend auf deinem Foto</span>
             </div>
             <div className="flex flex-wrap gap-2">
               {suggestedThemes.map(({ key, label, emoji, score }) => (
@@ -2619,7 +2621,7 @@ export default function Studio() {
                 >
                   <span>{emoji}</span>
                   <span>{label}</span>
-                  {score > 1.2 && <span className="text-xs opacity-70">★</span>}
+                  {score > 1.2 && <span className="text-xs opacity-70">?</span>}
                 </button>
               ))}
               <button
@@ -2630,7 +2632,7 @@ export default function Studio() {
                     : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
                 }`}
               >
-                <span>🌈</span>
+                <span>?</span>
                 <span>Alle Themen</span>
               </button>
             </div>
@@ -2647,7 +2649,7 @@ export default function Studio() {
                     <button
                       onClick={() => setShowPhotoPreview(true)}
                       className="flex items-center gap-2 hover:opacity-80 transition-opacity"
-                      title="Hochgeladenes Foto vergrössern"
+                      title="Hochgeladenes Foto vergroessern"
                     >
                       <img src={userPhoto} alt="Dein Foto" className="w-8 h-8 rounded-lg object-cover" />
                       <span className="text-xs font-semibold text-gray-700">Dein Foto</span>
@@ -2686,7 +2688,7 @@ export default function Studio() {
                       <button
                         onClick={() => handleDownload(true)}
                         className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 shadow-sm hover:shadow-md transition-all text-amber-700 hover:text-amber-900"
-                        title="Admin: Druckqualität herunterladen (ohne Wasserzeichen, 400px Tiles)"
+                        title="Admin: Druckqualitaet herunterladen (ohne Wasserzeichen, 400px Tiles)"
                       >
                         <Printer className="w-4 h-4" />
                       </button>
@@ -2733,7 +2735,7 @@ export default function Studio() {
                   }}
                 />
 
-                {/* Hi-Res canvas overlay – rendered once when zoom crosses threshold */}
+                {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
                 {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
                 <canvas
                   ref={hiResCanvasRef}
@@ -2758,7 +2760,7 @@ export default function Studio() {
 
               {ready && zoom === 1 && (
                 <div className="absolute bottom-3 right-3 text-xs text-white/80 bg-black/40 rounded-lg px-2 py-1 pointer-events-none">
-                  Scroll zum Zoomen · Drag zum Verschieben
+                  Scroll zum Zoomen . Drag zum Verschieben
                 </div>
               )}
             </div>
@@ -2785,15 +2787,15 @@ export default function Studio() {
               <div className="mb-4 bg-white rounded-2xl border border-coral-100 shadow-sm p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div>
-                    <p className="text-sm font-bold text-gray-800">Mosaik-Schärfe</p>
-                    <p className="text-xs text-gray-500">Zoom ≥ 1.5×: Regler steuert Schärfe der Tile-Fotos</p>
+                    <p className="text-sm font-bold text-gray-800">Mosaik-Schaerfe</p>
+                    <p className="text-xs text-gray-500">Zoom &gt;= 1.5x: Regler steuert Schaerfe der Tile-Fotos</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold text-coral-600 bg-coral-50 rounded px-2 py-0.5">{sharpness}%</span>
-                    {zoom >= HI_RES_THRESHOLD ? (
+                    {zoom >= (HI_RES_THRESHOLD) ? (
                       <span className="text-xs font-semibold text-green-600 bg-green-50 rounded px-2 py-0.5">Hi-Res aktiv</span>
                     ) : (
-                      <span className="text-xs text-gray-400 bg-gray-50 rounded px-2 py-0.5">Zoom in für Schärfe</span>
+                      <span className="text-xs text-gray-400 bg-gray-50 rounded px-2 py-0.5">Zoom in fuer Schaerfe</span>
                     )}
                   </div>
                 </div>
@@ -2804,7 +2806,7 @@ export default function Studio() {
                 />
                 <div className="flex justify-between text-xs text-gray-400 mt-1">
                   <span>Kein Hi-Res</span>
-                  <span>Maximale Schärfe</span>
+                  <span>Maximale Schaerfe</span>
                 </div>
               </div>
             )}
@@ -2858,7 +2860,7 @@ export default function Studio() {
                         <img src={userPhotoImg.src} alt="Original" style={{ width: "100%", height: "100%", objectFit: "fill", display: "block" }} />
                       </div>
                       <div style={{ position: "absolute", top: 0, bottom: 0, left: `${comparePos}%`, transform: "translateX(-50%)", width: 3, background: "white", boxShadow: "0 0 8px rgba(0,0,0,0.5)", transition: "left 0.05s ease", pointerEvents: "none" }}>
-                        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 36, height: 36, borderRadius: "50%", background: "white", boxShadow: "0 2px 12px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>⇔</div>
+                        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 36, height: 36, borderRadius: "50%", background: "white", boxShadow: "0 2px 12px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>?</div>
                       </div>
                       <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(0,0,0,0.6)", color: "white", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 6 }}>Original</div>
                       <div style={{ position: "absolute", top: 8, right: 8, background: "rgba(59,107,255,0.85)", color: "white", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 6 }}>Mosaik</div>
@@ -2880,13 +2882,13 @@ export default function Studio() {
         {ready && qualityMetrics && (
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <span className="text-base font-bold text-gray-900">Qualitätsanalyse</span>
+              <span className="text-base font-bold text-gray-900">Qualitaetsanalyse</span>
               <span className="text-xs font-semibold text-gray-400 bg-gray-50 border border-gray-200 rounded-full px-2 py-0.5">{qualityMetrics.totalTiles} Kacheln</span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {/* Average Delta-E */}
               <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-xs text-gray-500 mb-1">Ø Farb-Abstand</p>
+                <p className="text-xs text-gray-500 mb-1">? Farb-Abstand</p>
                 <p className={`text-xl font-bold ${
                   qualityMetrics.avgDeltaE < 12 ? 'text-green-600'
                   : qualityMetrics.avgDeltaE < 22 ? 'text-amber-600'
@@ -2894,13 +2896,13 @@ export default function Studio() {
                 }`}>
                   {qualityMetrics.avgDeltaE.toFixed(1)}
                 </p>
-                <p className="text-[10px] text-gray-400">ΔE (LAB)</p>
+                <p className="text-[10px] text-gray-400">DeltaE (LAB)</p>
                 <p className={`text-[10px] font-semibold mt-0.5 ${
                   qualityMetrics.avgDeltaE < 12 ? 'text-green-600'
                   : qualityMetrics.avgDeltaE < 22 ? 'text-amber-600'
                   : 'text-red-500'
                 }`}>
-                  {qualityMetrics.avgDeltaE < 12 ? '✓ Sehr gut' : qualityMetrics.avgDeltaE < 22 ? '▲ Gut' : '▼ Niedrig'}
+                  {qualityMetrics.avgDeltaE < 12 ? 'OK Sehr gut' : qualityMetrics.avgDeltaE < 22 ? '? Gut' : '? Niedrig'}
                 </p>
               </div>
               {/* Unique tiles */}
@@ -2913,17 +2915,17 @@ export default function Studio() {
                   : qualityMetrics.reuseRate > 0.6 ? 'text-amber-600'
                   : 'text-red-500'
                 }`}>
-                  {Math.round(qualityMetrics.reuseRate * 100)}% Diversität
+                  {Math.round(qualityMetrics.reuseRate * 100)}% Diversitaet
                 </p>
               </div>
               {/* Saturation distribution */}
               <div className="bg-gray-50 rounded-xl p-3 col-span-2">
-                <p className="text-xs text-gray-500 mb-2">Sättigungs-Verteilung</p>
+                <p className="text-xs text-gray-500 mb-2">Saettigungs-Verteilung</p>
                 <div className="flex rounded-full overflow-hidden h-3 mb-1.5">
                   <div
                     className="bg-gray-300 transition-all"
                     style={{ width: `${qualityMetrics.satLow.toFixed(0)}%` }}
-                    title={`Grau/Gedämpft: ${qualityMetrics.satLow.toFixed(0)}%`}
+                    title={`Grau/Gedaempft: ${qualityMetrics.satLow.toFixed(0)}%`}
                   />
                   <div
                     className="bg-coral-300 transition-all"
@@ -2937,16 +2939,16 @@ export default function Studio() {
                   />
                 </div>
                 <div className="flex justify-between text-[10px] text-gray-500">
-                  <span>■ Grau {qualityMetrics.satLow.toFixed(0)}%</span>
-                  <span>■ Mittel {qualityMetrics.satMid.toFixed(0)}%</span>
-                  <span>■ Lebendig {qualityMetrics.satHigh.toFixed(0)}%</span>
+                  <span>? Grau {qualityMetrics.satLow.toFixed(0)}%</span>
+                  <span>? Mittel {qualityMetrics.satMid.toFixed(0)}%</span>
+                  <span>? Lebendig {qualityMetrics.satHigh.toFixed(0)}%</span>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── DEBUG PANEL ── */}
+        {/* -- DEBUG PANEL -- */}
         {ready && debugReport && (
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm mb-6 overflow-hidden">
             {/* Header / toggle */}
@@ -2955,12 +2957,12 @@ export default function Studio() {
               className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-gray-50 transition-colors"
             >
               <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-gray-800">🔬 Algorithmus-Bericht</span>
+                <span className="text-sm font-bold text-gray-800">? Algorithmus-Bericht</span>
                 <span className="text-[10px] font-semibold text-gray-400 bg-gray-100 rounded-full px-2 py-0.5">
                   {(debugReport.generationMs / 1000).toFixed(1)}s
                 </span>
               </div>
-              <span className="text-gray-400 text-sm">{showDebugPanel ? '▲' : '▼'}</span>
+              <span className="text-gray-400 text-sm">{showDebugPanel ? '?' : '?'}</span>
             </button>
 
             {showDebugPanel && (
@@ -2968,7 +2970,7 @@ export default function Studio() {
 
                 {/* 1. Tile-Pool */}
                 <div className="pt-4">
-                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">1 · Tile-Pool</p>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">1 . Tile-Pool</p>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div className="bg-gray-50 rounded-xl p-3">
                       <p className="text-[10px] text-gray-400 mb-0.5">DB-Index (gesamt)</p>
@@ -2999,7 +3001,7 @@ export default function Studio() {
 
                 {/* 2. Gitter & Matching-Konfiguration */}
                 <div>
-                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">2 · Gitter & Matching</p>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">2 . Gitter & Matching</p>
                   <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                     {[
                       { label: 'Spalten', value: debugReport.cols },
@@ -3018,12 +3020,12 @@ export default function Studio() {
                   <div className="grid grid-cols-2 gap-2 mt-2">
                     <div className="bg-gray-50 rounded-xl p-2.5">
                       <p className="text-[10px] text-gray-400">Anti-Repetitions-Radius</p>
-                      <p className="text-sm font-bold text-gray-900">{debugReport.neighborRadius} Kacheln · Penalty {debugReport.neighborPenalty}</p>
+                      <p className="text-sm font-bold text-gray-900">{debugReport.neighborRadius} Kacheln . Penalty {debugReport.neighborPenalty}</p>
                     </div>
                     <div className="bg-gray-50 rounded-xl p-2.5">
                       <p className="text-[10px] text-gray-400">Gesichtserkennung</p>
                       <p className="text-sm font-bold text-gray-900">
-                        {debugReport.facesDetected} Gesicht{debugReport.facesDetected !== 1 ? 'er' : ''} · {debugReport.faceCellPct.toFixed(0)}% Kacheln
+                        {debugReport.facesDetected} Gesicht{debugReport.facesDetected !== 1 ? 'er' : ''} . {debugReport.faceCellPct.toFixed(0)}% Kacheln
                       </p>
                     </div>
                   </div>
@@ -3031,13 +3033,13 @@ export default function Studio() {
 
                 {/* 3. Scoring-Gewichte */}
                 <div>
-                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">3 · Scoring-Gewichte (Stage C)</p>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">3 . Scoring-Gewichte (Stage C)</p>
                   <div className="space-y-1.5">
                     {[
-                      { label: 'SSD (Pixel-Matching 8×8)', value: debugReport.wSsd, color: 'bg-blue-500' },
+                      { label: 'SSD (Pixel-Matching 8x8)', value: debugReport.wSsd, color: 'bg-blue-500' },
                       { label: 'Helligkeit (Brightness)', value: debugReport.wBrightness, color: 'bg-amber-500' },
                       { label: 'LAB-Farb-Abstand (CIEDE2000)', value: debugReport.wLab, color: 'bg-coral-500' },
-                      { label: 'Sättigung', value: debugReport.wSaturation, color: 'bg-purple-500' },
+                      { label: 'Saettigung', value: debugReport.wSaturation, color: 'bg-purple-500' },
                       { label: 'Textur', value: debugReport.wTexture, color: 'bg-green-500' },
                       { label: 'Quadrant-Farben', value: debugReport.wQuad, color: 'bg-teal-500' },
                     ].map(({ label, value, color }) => (
@@ -3053,19 +3055,19 @@ export default function Studio() {
                       </div>
                     ))}
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-1.5">In Gesichts-Regionen: SSD 35% · Brightness ×1.3 · Edge ×1.8 · Texture ×1.5</p>
+                  <p className="text-[10px] text-gray-400 mt-1.5">In Gesichts-Regionen: SSD 35% . Brightness x1.3 . Edge x1.8 . Texture x1.5</p>
                 </div>
 
                 {/* 4. Farb-Transfer */}
                 <div>
-                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">4 · Farb-Transfer (Reinhard-Stil)</p>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">4 . Farb-Transfer (Reinhard-Stil)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                     {[
                       { label: 'L-Blend', value: debugReport.lBlend.toFixed(2), hint: 'Helligkeit' },
                       { label: 'AB-Blend', value: debugReport.abBlend.toFixed(2), hint: 'Farb-Shift' },
-                      { label: 'Max Shift', value: `±${debugReport.maxColorShift}`, hint: 'a/b Clamp' },
-                      { label: 'Histogram', value: debugReport.histogramBlend.toFixed(2), hint: 'Blend-Stärke' },
-                      { label: 'Kontrast', value: `×${debugReport.contrastBoost.toFixed(2)}`, hint: 'Boost' },
+                      { label: 'Max Shift', value: `?${debugReport.maxColorShift}`, hint: 'a/b Clamp' },
+                      { label: 'Histogram', value: debugReport.histogramBlend.toFixed(2), hint: 'Blend-Staerke' },
+                      { label: 'Kontrast', value: `x${debugReport.contrastBoost.toFixed(2)}`, hint: 'Boost' },
                     ].map(({ label, value, hint }) => (
                       <div key={label} className="bg-gray-50 rounded-xl p-2.5 text-center">
                         <p className="text-[10px] text-gray-400">{label}</p>
@@ -3078,7 +3080,7 @@ export default function Studio() {
 
                 {/* 5. Overlay */}
                 <div>
-                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">5 · Overlay</p>
+                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">5 . Overlay</p>
                   <div className="grid grid-cols-3 gap-2">
                     <div className="bg-gray-50 rounded-xl p-2.5 text-center">
                       <p className="text-[10px] text-gray-400">Modus</p>
@@ -3094,17 +3096,17 @@ export default function Studio() {
                     </div>
                   </div>
                   <p className="text-[10px] text-gray-400 mt-1.5">
-                    Effektive Stärke: {(debugReport.baseOverlay * 100).toFixed(0)}% (flach) bis {((debugReport.baseOverlay + debugReport.edgeBoost) * 100).toFixed(0)}% (Kanten)
+                    Effektive Staerke: {(debugReport.baseOverlay * 100).toFixed(0)}% (flach) bis {((debugReport.baseOverlay + debugReport.edgeBoost) * 100).toFixed(0)}% (Kanten)
                   </p>
                 </div>
 
                 {/* Hinweis */}
                 <div className="bg-blue-50 border border-blue-100 rounded-xl p-3">
-                  <p className="text-[10px] text-blue-700 font-semibold mb-1">💡 Wie verbessere ich das Ergebnis?</p>
+                  <p className="text-[10px] text-blue-700 font-semibold mb-1">? Wie verbessere ich das Ergebnis?</p>
                   <ul className="text-[10px] text-blue-600 space-y-0.5 list-disc list-inside">
-                    <li>Hoher ΔE (&gt;20): Mehr Tiles importieren – Admin → Gezielte Importe</li>
-                    <li>Gesicht unklar: Overlay erhöhen (Admin → Einstellungen → baseOverlay)</li>
-                    <li>Zu bunt: Sättigungs-Gewicht erhöhen (wSaturation → 0.35+)</li>
+                    <li>Hoher DeltaE (&gt;20): Mehr Tiles importieren - Admin -&gt; Gezielte Importe</li>
+                    <li>Gesicht unklar: Overlay erhoehen (Admin -&gt; Einstellungen -&gt; baseOverlay)</li>
+                    <li>Zu bunt: Saettigungs-Gewicht erhoehen (wSaturation -&gt; 0.35+)</li>
                     <li>Wiederholungen: Mehr Tiles importieren oder MAX_REUSE reduzieren</li>
                   </ul>
                 </div>
@@ -3128,7 +3130,7 @@ export default function Studio() {
 
             {/* Format selection */}
             <div className="mb-5">
-              <p className="text-sm font-bold text-gray-700 mb-3">Format wählen</p>
+              <p className="text-sm font-bold text-gray-700 mb-3">Format waehlen</p>
               <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                 {PRINT_FORMATS.map(({ label, price }, idx) => (
                   <button
@@ -3151,7 +3153,7 @@ export default function Studio() {
 
             {/* Material selection */}
             <div className="mb-6">
-              <p className="text-sm font-bold text-gray-700 mb-3">Material wählen</p>
+              <p className="text-sm font-bold text-gray-700 mb-3">Material waehlen</p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {MATERIALS.map(({ label, surcharge, icon }, idx) => (
                   <button
@@ -3166,7 +3168,7 @@ export default function Studio() {
                     <div className="text-xl mb-1">{icon}</div>
                     <div className="text-xs font-bold text-gray-900">{label}</div>
                     <div className="text-xs text-gray-500">
-                      {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `−CHF ${Math.abs(surcharge)}` : "Inklusive"}
+                      {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `?CHF ${Math.abs(surcharge)}` : "Inklusive"}
                     </div>
                   </button>
                 ))}
@@ -3177,7 +3179,7 @@ export default function Studio() {
             <div className="bg-coral-50 rounded-xl p-4 mb-5">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} · {MATERIALS[selectedMaterial].label}</p>
+                  <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} . {MATERIALS[selectedMaterial].label}</p>
                   <p className="text-sm text-gray-500">inkl. MwSt., Druck & Lieferung CH</p>
                 </div>
                 <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
@@ -3189,8 +3191,8 @@ export default function Studio() {
               <p className="font-bold mb-0.5">Printolino-konformes Format</p>
               <p>
                 Dein Mosaik wird als RGB-PNG mit {PRINT_FORMATS[selectedFormat].dpi} dpi ausgegeben
-                ({PRINT_FORMATS[selectedFormat].pxW}×{PRINT_FORMATS[selectedFormat].pxH} px) –
-                optimiert für {PRINT_FORMATS[selectedFormat].label} Druck bei Printolino.
+                ({PRINT_FORMATS[selectedFormat].pxW}x{PRINT_FORMATS[selectedFormat].pxH} px) -
+                optimiert fuer {PRINT_FORMATS[selectedFormat].label} Druck bei Printolino.
               </p>
             </div>
 
@@ -3222,7 +3224,7 @@ export default function Studio() {
                 className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
               >
                 {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                Druckbereite Datei kaufen · CHF {totalPrice}
+                Druckbereite Datei kaufen . CHF {totalPrice}
               </button>
               <a
                 href={`https://www.printolino.ch?ref=mosaicprint&format=${encodeURIComponent(PRINT_FORMATS[selectedFormat].label)}&material=${encodeURIComponent(MATERIALS[selectedMaterial].label)}`}
@@ -3269,7 +3271,7 @@ export default function Studio() {
             <p className="text-sm font-semibold text-coral-800 mb-1">Kostenlose Vorschau</p>
             <p className="text-xs text-coral-600">Die Vorschau ist kostenlos. Erst beim Bestellen des Drucks fallen Kosten an.</p>
             <Link to="/preise" className="inline-flex items-center gap-1 text-xs text-coral-700 hover:text-coral-900 font-semibold mt-2 underline">
-              Alle Preise ansehen →
+              Alle Preise ansehen -&gt;
             </Link>
           </div>
         )}
@@ -3317,18 +3319,18 @@ export default function Studio() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label}</p>
-                  <p className="text-sm text-gray-500">{MATERIALS[selectedMaterial].label} · Druckbereite PNG-Datei</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{PRINT_FORMATS[selectedFormat].pxW}×{PRINT_FORMATS[selectedFormat].pxH} px · {PRINT_FORMATS[selectedFormat].dpi} dpi · RGB</p>
+                  <p className="text-sm text-gray-500">{MATERIALS[selectedMaterial].label} . Druckbereite PNG-Datei</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{PRINT_FORMATS[selectedFormat].pxW}x{PRINT_FORMATS[selectedFormat].pxH} px . {PRINT_FORMATS[selectedFormat].dpi} dpi . RGB</p>
                 </div>
                 <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
               </div>
             </div>
 
             <div className="text-xs text-gray-500 mb-4 space-y-1">
-              <p>✓ Sofort-Download nach Zahlung</p>
-              <p>✓ Wasserzeichenfreie Druckdatei</p>
-              <p>✓ Printolino-konformes Format (RGB PNG)</p>
-              <p>✓ Sichere Zahlung via Stripe</p>
+              <p>OK Sofort-Download nach Zahlung</p>
+              <p>OK Wasserzeichenfreie Druckdatei</p>
+              <p>OK Printolino-konformes Format (RGB PNG)</p>
+              <p>OK Sichere Zahlung via Stripe</p>
             </div>
 
             <button
@@ -3337,11 +3339,11 @@ export default function Studio() {
               className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60 mb-3"
             >
               {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
-              {paymentLoading ? "Weiterleitung..." : `CHF ${totalPrice} – Jetzt bezahlen`}
+              {paymentLoading ? "Weiterleitung..." : `CHF ${totalPrice} - Jetzt bezahlen`}
             </button>
 
             <p className="text-xs text-center text-gray-400">
-              Gesichert durch Stripe · Kreditkarte, TWINT, PayPal
+              Gesichert durch Stripe . Kreditkarte, TWINT, PayPal
             </p>
           </div>
         </div>
