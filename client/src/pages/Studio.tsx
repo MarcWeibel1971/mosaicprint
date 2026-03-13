@@ -2152,18 +2152,54 @@ export default function Studio() {
           throw new Error(`Server error: ${resp.status} – ${errText}`);
         }
 
-        // Ensure we get a JPEG blob (not PDF)
-        const rawBlob = await resp.blob();
-        const jpegBlob = new Blob([rawBlob], { type: 'image/jpeg' });
-        const url = URL.createObjectURL(jpegBlob);
-        const link = document.createElement('a');
-        link.download = `mosaicprint-${printOutW}x${printOutH}-druckbereit.jpg`;
-        link.href = url;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-        setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px, ${PRINT_TILE_PX}px/Tile)`);
+        // Download as JPEG – use ArrayBuffer to force binary save and prevent
+        // Edge/Acrobat from intercepting the download and converting to PDF.
+        const arrayBuffer = await resp.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        // Verify JPEG magic bytes (FF D8 FF)
+        const isJpeg = uint8[0] === 0xFF && uint8[1] === 0xD8 && uint8[2] === 0xFF;
+        console.log(`[Print] Received ${arrayBuffer.byteLength} bytes, isJpeg=${isJpeg}`);
+        const jpegBlob = new Blob([uint8], { type: 'image/jpeg' });
+        const filename = `mosaicprint-${printOutW}x${printOutH}-druckbereit.jpg`;
+
+        // Use showSaveFilePicker if available (Chrome/Edge 86+) – forces native save dialog
+        // This bypasses Acrobat's file association and always saves as .jpg
+        if ('showSaveFilePicker' in window) {
+          try {
+            const fileHandle = await (window as any).showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: 'JPEG Bild', accept: { 'image/jpeg': ['.jpg', '.jpeg'] } }],
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(jpegBlob);
+            await writable.close();
+            setProgressMsg(`✓ Gespeichert: ${filename}`);
+          } catch (saveErr: any) {
+            // User cancelled or API not supported – fall back to link download
+            if (saveErr?.name !== 'AbortError') {
+              const url = URL.createObjectURL(jpegBlob);
+              const link = document.createElement('a');
+              link.download = filename;
+              link.href = url;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              setTimeout(() => URL.revokeObjectURL(url), 15000);
+            }
+            setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px)`);
+          }
+        } else {
+          // Fallback for browsers without File System Access API
+          const url = URL.createObjectURL(jpegBlob);
+          const link = document.createElement('a');
+          link.download = filename;
+          link.href = url;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(url), 15000);
+          setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px, ${PRINT_TILE_PX}px/Tile)`);
+        }
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
