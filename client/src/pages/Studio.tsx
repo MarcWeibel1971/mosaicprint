@@ -2361,16 +2361,26 @@ export default function Studio() {
 
         setProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
 
-        // Open the download URL directly - Edge treats this as a binary file download
+         // Fetch the JPEG as a Blob and trigger a download via object URL.
+        // This is the most reliable cross-browser approach:
+        // - avoids link.target='_blank' which causes some browsers to open in tab
+        // - avoids PDF-plugin interception (Acrobat, browser PDF viewer)
+        // - works on Chrome, Edge, Firefox, Safari
         const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+        setProgressMsg(`Lade Datei herunter (${(size/1024/1024).toFixed(1)} MB)...`);
+        const fileResp = await fetch(downloadUrl);
+        if (!fileResp.ok) throw new Error(`Download fehlgeschlagen: ${fileResp.status}`);
+        const blob = await fileResp.blob();
+        // Force MIME type to image/jpeg to prevent PDF-plugin interception
+        const jpegBlob = new Blob([blob], { type: 'image/jpeg' });
+        const blobUrl = URL.createObjectURL(jpegBlob);
         const link = document.createElement('a');
-        link.href = downloadUrl;
-        link.download = filename;
-        link.target = '_blank'; // open in new tab to avoid navigation
+        link.href = blobUrl;
+        link.download = filename.endsWith('.jpg') ? filename : filename + '.jpg';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
         setProgressMsg(`OK Gespeichert: ${filename}`);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
