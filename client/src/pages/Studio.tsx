@@ -1797,8 +1797,12 @@ export default function Studio() {
             // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
             const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
             const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
-            // Dynamic brightness weight: reduce for bright face areas (>65 L) to prevent over-darkening warm faces
-            const faceBrightBoost = tf.brightness > 65 ? 0.85 : 1.0;
+            // Dynamic brightness weight:
+            // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
+            //   so the algorithm picks light tiles, not dark/cool ones
+            // - Moderately bright areas (L>65): slight reduction to prevent over-darkening warm faces
+            const isVeryBright = tf.brightness > 75; // white hair, beard, bright highlights
+            const faceBrightBoost = isVeryBright ? 1.6 : (tf.brightness > 65 ? 0.85 : 1.0);
             const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.5 : wBrightBase * 1.3) * faceBrightBoost;
             const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
             const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
@@ -1813,15 +1817,23 @@ export default function Studio() {
             const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
-             // Green tiles (a < -3) are almost never correct in face areas
-             if (mf.lab[1] < -3) {
-               // Scale: a=-3 → +0, a=-10 → +350, a=-20 → +850 (was max +200)
-               dist += Math.min(1000, (-mf.lab[1] - 3) * 50); // up to +1000 for very green tiles
-             }
-             // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
-             // Increased from *30 to *50: blue/purple tiles must be strongly penalized in warm faces
-             if (mf.lab[2] < -5) {
-               dist += Math.min(800, (-mf.lab[2] - 5) * 50); // up to +800 for very blue tiles
+             // Exception: very bright target areas (L>75 = white hair/beard) – cool/neutral tiles are OK there
+             if (!isVeryBright) {
+               // Green tiles (a < -3) are almost never correct in skin areas
+               if (mf.lab[1] < -3) {
+                 dist += Math.min(1000, (-mf.lab[1] - 3) * 50); // up to +1000 for very green tiles
+               }
+               // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
+               // Only penalize dark blue tiles (tileL < 65) in bright areas – light cool tiles are fine for hair
+               if (mf.lab[2] < -5) {
+                 const bluePenaltyFactor = mf.lab[0] < 65 ? 50 : 15; // dark blue: strong penalty; light blue: mild
+                 dist += Math.min(800, (-mf.lab[2] - 5) * bluePenaltyFactor);
+               }
+             } else {
+               // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
+               if (mf.lab[2] < -5 && mf.lab[0] < 60) {
+                 dist += Math.min(400, (-mf.lab[2] - 5) * 25); // mild penalty for dark blue in bright areas
+               }
              }
              // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
              {
@@ -1831,22 +1843,27 @@ export default function Studio() {
                  dist += 150; // stronger: push non-skin-subject tiles down in face ranking
                }
              }
-            // Low-saturation penalty (STRENGTHENED):
-            // If target is low-sat (neutral/gray area) and tile is highly saturated -> penalty x4
-            // If target is skin-toned and tile is desaturated -> penalty x4
-            // This is the key fix for "noisy / bunt" skin areas
-            if (targetSatC < 25 && tileSatC > 35) {
-              // Gray/neutral target area: strongly penalize colorful tiles (lowered threshold from 40)
-              dist += (tileSatC - 35) / 100 * 6 * 100; // x6 multiplier (was x4)
-            }
-            if (isTargetSkin && tileSatC < 12) {
-              // Skin area: penalize very washed-out gray tiles
-              dist += (12 - tileSatC) / 12 * 3 * 100; // up to +300 for sat=0 in skin area
-            }
-            // Penalize highly saturated tiles (sat>65) in ANY face region
-            // Reduced from *5 to *3: was too aggressive, caused system to pick cool/gray tiles instead
-            if (tileSatC > 65) {
-              dist += (tileSatC - 65) / 35 * 3 * 100; // up to +300 for sat=100 in face
+            // Low-saturation penalty: only active for non-bright target areas (L < 75)
+            // For very bright areas (white hair/beard, L>75): skip sat penalties entirely
+            // – those areas need light tiles regardless of saturation
+            if (!isVeryBright) {
+              if (targetSatC < 25 && tileSatC > 35) {
+                // Gray/neutral target area: strongly penalize colorful tiles
+                dist += (tileSatC - 35) / 100 * 6 * 100; // x6 multiplier
+              }
+              if (isTargetSkin && tileSatC < 12) {
+                // Skin area: penalize very washed-out gray tiles
+                dist += (12 - tileSatC) / 12 * 3 * 100; // up to +300 for sat=0 in skin area
+              }
+              // Penalize highly saturated tiles (sat>65) in face regions
+              if (tileSatC > 65) {
+                dist += (tileSatC - 65) / 35 * 3 * 100; // up to +300 for sat=100 in face
+              }
+            } else {
+              // Very bright target (L>75): only penalize DARK tiles (they look wrong in bright areas)
+              if (mf.lab[0] < 50 && tf.brightness > 80) {
+                dist += (50 - mf.lab[0]) * 3; // up to +150 for very dark tile in very bright area
+              }
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
