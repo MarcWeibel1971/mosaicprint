@@ -601,21 +601,21 @@ export default function Studio() {
 
           if (imageType === 'portrait') {
             const portraitPreset = {
-              baseTiles: 130,         // INCREASED: 130 cols = ~2.25x more tiles → eyes get ~48 tiles instead of 12
-              tilePx: 6,              // REDUCED: 6px tiles = finer grid → sharper eye/mouth detail
-              neighborRadius: 5,      // Slightly reduced (more tiles = neighbors are closer)
-              neighborPenalty: 180,   // Strong anti-repetition
-              contrastBoost: 1.25,    // Slightly stronger contrast for face structure
-              histogramBlend: 0.07,   // Moderate color transfer: L_BLEND=0.55, AB_BLEND=0.24
-              baseOverlay: 0.20,      // Slightly stronger overlay to compensate for smaller tiles
-              edgeBoost: 0.25,        // INCREASED: stronger edge sharpening for eye/mouth contours
-              overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
-              labWeight: 0.15,        // LAB color distance
-              brightnessWeight: 0.60, // Brightness drives face structure
-              textureWeight: 0.12,    // Slightly reduced (smaller tiles have less texture signal)
-              edgeWeight: 0.22,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.40, // Saturation matching for portrait
-              portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
+              baseTiles: 100,         // 100 cols: good detail without being too fine
+              tilePx: 8,              // 8px tiles: recognizable photos, good color signal
+              neighborRadius: 4,
+              neighborPenalty: 160,
+              contrastBoost: 1.20,
+              histogramBlend: 0.07,   // L_BLEND~0.68, AB_BLEND~0.34
+              baseOverlay: 0.18,
+              edgeBoost: 0.22,
+              overlayMode: 'softlight',
+              labWeight: 0.15,
+              brightnessWeight: 0.55, // slightly reduced: prevents over-darkening warm faces
+              textureWeight: 0.10,
+              edgeWeight: 0.20,
+              saturationWeight: 0.35, // reduced: less aggressive sat-penalty → warmer tiles allowed
+              portraitMode: true,
             };
             // Merge: Admin settings override preset (Admin wins)
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(portraitPreset)));
@@ -1797,11 +1797,13 @@ export default function Studio() {
             // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
             const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
             const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
-            const wBrightF   = subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.8 : wBrightBase * 1.5;
+            // Dynamic brightness weight: reduce for bright face areas (>65 L) to prevent over-darkening warm faces
+            const faceBrightBoost = tf.brightness > 65 ? 0.85 : 1.0;
+            const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.5 : wBrightBase * 1.3) * faceBrightBoost;
             const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
             const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
-            // Saturation weight: cheek/forehead need very low sat tiles (skin), eye/mouth allow more color
-            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 2.5 : subRegion === 'nose' ? wSatBase * 2.0 : wSatBase * 1.5;
+            // Saturation weight: reduced to allow warmer tiles in face (was ×2.5/×2.0/×1.5 → too aggressive)
+            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.5 : subRegion === 'nose' ? wSatBase * 1.3 : wSatBase * 1.1;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
@@ -1817,8 +1819,9 @@ export default function Studio() {
                dist += Math.min(1000, (-mf.lab[1] - 3) * 50); // up to +1000 for very green tiles
              }
              // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
+             // Increased from *30 to *50: blue/purple tiles must be strongly penalized in warm faces
              if (mf.lab[2] < -5) {
-               dist += Math.min(600, (-mf.lab[2] - 5) * 30); // up to +600 for very blue tiles
+               dist += Math.min(800, (-mf.lab[2] - 5) * 50); // up to +800 for very blue tiles
              }
              // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
              {
@@ -1841,9 +1844,9 @@ export default function Studio() {
               dist += (12 - tileSatC) / 12 * 3 * 100; // up to +300 for sat=0 in skin area
             }
             // Penalize highly saturated tiles (sat>65) in ANY face region
-            // These are the "rainbow noise" tiles that make faces look garish
+            // Reduced from *5 to *3: was too aggressive, caused system to pick cool/gray tiles instead
             if (tileSatC > 65) {
-              dist += (tileSatC - 65) / 35 * 5 * 100; // up to +500 for sat=100 in face
+              dist += (tileSatC - 65) / 35 * 3 * 100; // up to +300 for sat=100 in face
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
