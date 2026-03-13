@@ -201,10 +201,17 @@ export default function Studio() {
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
   const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number}>>([]);
-  // Admin mode: detected by presence of admin_visited flag OR algo overrides in localStorage
+  // Owner mode: activated by secret URL param ?owner=2b98c0bb3c8e7b17868d22ac8e157bfe
+  // Once activated, stored permanently in localStorage
   const [isAdminMode] = useState<boolean>(() => {
     try {
-      return !!localStorage.getItem('mosaicprint_admin_visited') ||
+      const OWNER_SECRET = '2b98c0bb3c8e7b17868d22ac8e157bfe';
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('owner') === OWNER_SECRET) {
+        localStorage.setItem('mosaicprint_owner_mode', '1');
+      }
+      return !!localStorage.getItem('mosaicprint_owner_mode') ||
+             !!localStorage.getItem('mosaicprint_admin_visited') ||
              !!localStorage.getItem('mosaicprint_algo_overrides');
     } catch { return false; }
   });
