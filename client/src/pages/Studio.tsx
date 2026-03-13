@@ -1115,30 +1115,58 @@ export default function Studio() {
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
-      // ── Hybrid strategy: Atlas for first 3000 tiles, individual requests for the rest ──
-      // Mobile Safari crashes with atlas > ~3000 tiles (sprite-sheet too large to decode).
-      // Solution: cap atlas at 3000, then load remaining tiles individually in parallel.
-      const ATLAS_MOBILE_CAP = isMobileOrSlow ? 3000 : 8000;
-      const atlasMaxTiles = Math.min(neededTileIds.size + 200, ATLAS_MOBILE_CAP);
+      // ── Targeted Atlas strategy: build sprite-sheet only for needed tile IDs ──
+      // This is much faster than loading all DB tiles: only ~1500 tiles instead of 11000+
+      const neededArray = Array.from(neededTileIds);
+      // Mobile: cap at 3000 to avoid OOM; Desktop: load all needed tiles
+      const MOBILE_CAP = 3000;
+      const idsForAtlas = isMobileOrSlow ? neededArray.slice(0, MOBILE_CAP) : neededArray;
 
-      setProgressMsg('Lade Kachel-Atlas...');
-      const atlas = await loadTileAtlas(
-        selectedTheme === 'all' ? '' : selectedTheme,
-        64,
-        atlasMaxTiles,
-        (pct) => setProgress(25 + Math.round(pct * 0.15)),
-      );
-
-      if (atlas && atlas.tileCount > 0) {
-        // Extract only the needed tiles that are in the atlas
-        setProgressMsg(`Extrahiere Kacheln aus Atlas...`);
-        const extracted = await atlas.preExtract(neededTileIds);
-        for (const [id, img] of extracted) tileImgMap.set(id, img);
-        console.log(`[Studio] Atlas: ${tileImgMap.size}/${neededTileIds.size} tiles from sprite-sheet`);
-        setProgress(40);
+      setProgressMsg(`Lade ${idsForAtlas.length} Kacheln als Atlas...`);
+      try {
+        const atlasResp = await fetch('/api/tile-atlas-targeted', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: idsForAtlas, tileSize: 64 }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (atlasResp.ok) {
+          const cols = parseInt(atlasResp.headers.get('X-Atlas-Cols') ?? '0');
+          const rows = parseInt(atlasResp.headers.get('X-Atlas-Rows') ?? '0');
+          const ts = parseInt(atlasResp.headers.get('X-Atlas-TileSize') ?? '64');
+          const mapJson = atlasResp.headers.get('X-Atlas-Map');
+          const map: Record<number, [number, number]> = mapJson ? JSON.parse(mapJson) : {};
+          const blob = await atlasResp.blob();
+          const atlasUrl = URL.createObjectURL(blob);
+          const atlasImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = reject;
+            img.src = atlasUrl;
+          });
+          // Extract each tile from the atlas
+          const offscreen = document.createElement('canvas');
+          offscreen.width = ts;
+          offscreen.height = ts;
+          const octx = offscreen.getContext('2d')!;
+          for (const [idStr, [col, row]] of Object.entries(map)) {
+            const id = Number(idStr);
+            octx.clearRect(0, 0, ts, ts);
+            octx.drawImage(atlasImg, col * ts, row * ts, ts, ts, 0, 0, ts, ts);
+            const tileImg = new Image();
+            tileImg.src = offscreen.toDataURL('image/jpeg', 0.85);
+            await new Promise<void>(r => { tileImg.onload = () => r(); tileImg.onerror = () => r(); });
+            tileImgMap.set(id, tileImg);
+          }
+          URL.revokeObjectURL(atlasUrl);
+          console.log(`[Studio] Targeted atlas: ${tileImgMap.size}/${neededTileIds.size} tiles loaded`);
+          setProgress(42);
+        }
+      } catch (e) {
+        console.warn('[Studio] Targeted atlas failed, falling back to individual requests', e);
       }
 
-      // Load any tiles not covered by the atlas individually
+      // Load any tiles not covered by the atlas individually (fallback)
       const missingIds = Array.from(neededTileIds).filter(id => !tileImgMap.has(id));
       if (missingIds.length > 0) {
         setProgressMsg(`Lade ${missingIds.length} weitere Kacheln...`);
@@ -1153,11 +1181,11 @@ export default function Studio() {
             if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
           }
           loaded += batchIds.length;
-          const pct = 40 + Math.round((loaded / missingIds.length) * 5);
+          const pct = 42 + Math.round((loaded / missingIds.length) * 3);
           setProgress(Math.min(pct, 45));
           await new Promise(r => setTimeout(r, 0));
         }
-        console.log(`[Studio] +${tileImgMap.size - (neededTileIds.size - missingIds.length)} individual tiles loaded`);
+        console.log(`[Studio] +${missingIds.length - (neededTileIds.size - tileImgMap.size)} individual tiles loaded`);
       }
 
       if (tileImgMap.size === 0) {

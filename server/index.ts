@@ -505,6 +505,96 @@ app.post("/api/admin/remove-shutterstock", async (_req, res) => {
 // Cache: in-memory per (theme, tileSize, maxTiles), TTL 30 minutes
 // First build: ~10-30s (downloads all tiles), subsequent: instant
 
+// POST /api/tile-atlas-targeted - builds a sprite-sheet for a specific list of tile IDs
+// Body: { ids: number[], tileSize?: number }
+// Returns: JPEG sprite-sheet with X-Atlas-Cols, X-Atlas-Rows, X-Atlas-TileSize headers
+// Map is returned as JSON in /api/tile-atlas-map-targeted (same body)
+app.post('/api/tile-atlas-targeted', async (req, res) => {
+  try {
+    const ids: number[] = (req.body?.ids ?? []).slice(0, 5000);
+    const tileSize = Math.min(Math.max(Number(req.body?.tileSize ?? 64), 32), 128);
+    if (ids.length === 0) return res.status(400).json({ error: 'No ids provided' });
+
+    const cacheKey = `targeted|${ids.slice().sort((a,b)=>a-b).join(',')}|${tileSize}`;
+    const cached = atlasCacheMap.get(cacheKey);
+    if (cached && (Date.now() - cached.builtAt) < ATLAS_CACHE_TTL_MS) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Content-Length', cached.jpeg.length);
+      res.setHeader('Cache-Control', 'public, max-age=1800');
+      res.setHeader('X-Atlas-Cols', cached.cols.toString());
+      res.setHeader('X-Atlas-Rows', cached.rows.toString());
+      res.setHeader('X-Atlas-TileSize', cached.tileSize.toString());
+      res.setHeader('X-Atlas-Map', JSON.stringify(cached.map));
+      return res.send(cached.jpeg);
+    }
+
+    const pool = db.getPool();
+    const placeholders = ids.map((_,i) => `$${i+1}`).join(',');
+    const result = await pool.query(
+      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id IN (${placeholders}) ORDER BY id ASC`,
+      ids
+    );
+    const rows = result.rows;
+    const n = rows.length;
+    if (n === 0) return res.status(404).json({ error: 'No tiles found' });
+
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows2 = Math.ceil(n / cols);
+    const atlasW = cols * tileSize;
+    const atlasH = rows2 * tileSize;
+
+    const CONCURRENCY = 20;
+    const compositeInputs: sharp.OverlayOptions[] = [];
+    const tileMap: Record<number, [number, number]> = {};
+
+    for (let i = 0; i < n; i += CONCURRENCY) {
+      const batch = rows.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (row: any, bi: number) => {
+        const idx = i + bi;
+        const col = idx % cols;
+        const rowIdx = Math.floor(idx / cols);
+        const url = row.tile128_url || row.source_url || '';
+        if (!url) return;
+        try {
+          const cacheKeyTile = `${row.id}-128`;
+          let imgBuf: Buffer | null = null;
+          const tileCached = tileCacheMap.get(cacheKeyTile);
+          if (tileCached) { imgBuf = tileCached.buf; }
+          else if (url.startsWith('data:')) { imgBuf = Buffer.from(url.split(',')[1], 'base64'); }
+          else {
+            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
+            if (resp.ok) imgBuf = Buffer.from(await resp.arrayBuffer());
+          }
+          if (!imgBuf) return;
+          const resized = await sharp(imgBuf).resize(tileSize, tileSize, { fit: 'cover' }).jpeg({ quality: 80 }).toBuffer();
+          compositeInputs[idx] = { input: resized, top: rowIdx * tileSize, left: col * tileSize };
+          tileMap[Number(row.id)] = [col, rowIdx];
+        } catch { /* skip */ }
+      }));
+    }
+
+    const validInputs = compositeInputs.filter(Boolean);
+    const atlasJpeg = await sharp({
+      create: { width: atlasW, height: atlasH, channels: 3, background: { r: 128, g: 128, b: 128 } }
+    }).composite(validInputs).jpeg({ quality: 82 }).toBuffer();
+
+    const atlasData: AtlasCache = { jpeg: atlasJpeg, map: tileMap, tileSize, cols, rows: rows2, builtAt: Date.now() };
+    atlasCacheMap.set(cacheKey, atlasData);
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Length', atlasJpeg.length);
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    res.setHeader('X-Atlas-Cols', cols.toString());
+    res.setHeader('X-Atlas-Rows', rows2.toString());
+    res.setHeader('X-Atlas-TileSize', tileSize.toString());
+    res.setHeader('X-Atlas-Map', JSON.stringify(tileMap));
+    return res.send(atlasJpeg);
+  } catch (err: any) {
+    console.error('[atlas-targeted] Error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/tile-atlas-map - returns the tile position map as JSON (separate from the JPEG)
 app.get('/api/tile-atlas-map', async (req, res) => {
   const theme = ((req.query.theme as string) ?? '').toLowerCase().trim();
