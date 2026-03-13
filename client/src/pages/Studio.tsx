@@ -1055,14 +1055,20 @@ export default function Studio() {
           if (targetSat > 0.10 && sat < 0.15 && targetA > 2) {
             dist += (0.15 - sat) * 300; // up to +45 penalty for very gray tiles in colored areas
           }
-          // isSkinFriendly (15D): in portrait mode, boost skin-friendly tiles for face regions
-          // This ensures the Stage A pre-filter already favors neutral/warm tiles for skin areas
-          if (IS_15D && savedSettings.portraitMode) {
-            const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
-            // If target is a skin-toned cell (warm LAB) and tile is NOT skin-friendly, penalize
-            const isTargetSkinArea = targetL >= 40 && targetL <= 80 && targetA >= 3 && targetA <= 28;
-            if (isTargetSkinArea && !isSkinFriendlyTile) dist += 50; // push non-skin tiles down in ranking
-          }
+          // Stage A: direct green/blue tile penalty for skin areas (uses raw LAB a/b values)
+           // This is the most effective pre-filter: green tiles (a<-3) almost never belong in faces
+           const isTargetSkinArea = targetL >= 35 && targetL <= 85 && targetA >= 2 && targetA <= 30;
+           if (isTargetSkinArea) {
+             // Green tile penalty: scale from a=-3 (0) to a=-15 (+600) to a=-25 (+1000)
+             if (a < -3) dist += Math.min(1000, (-a - 3) * 50);
+             // Blue tile penalty: scale from b=-5 (0) to b=-15 (+300)
+             if (b < -5) dist += Math.min(500, (-b - 5) * 30);
+           }
+           // isSkinFriendly (15D): in portrait mode, boost skin-friendly tiles for face regions
+           if (IS_15D && savedSettings.portraitMode) {
+             const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
+             if (isTargetSkinArea && !isSkinFriendlyTile) dist += 200; // stronger: was +50
+           }
         } else if (IS_7D) {
           const edge = labIndex[i + 4];
           const brightness = labIndex[i + 5];
