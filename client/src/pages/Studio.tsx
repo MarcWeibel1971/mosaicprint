@@ -601,20 +601,20 @@ export default function Studio() {
 
           if (imageType === 'portrait') {
             const portraitPreset = {
-              baseTiles: 130,         // INCREASED: 130 cols = ~2.25x more tiles → eyes get ~48 tiles instead of 12
-              tilePx: 6,              // REDUCED: 6px tiles = finer grid → sharper eye/mouth detail
+              baseTiles: 110,         // BALANCED: 110 cols = more tiles than default (100) but tiles still recognizable
+              tilePx: 8,              // RESTORED: 8px tiles = recognizable photos even before hi-res loads (6px was too small)
               neighborRadius: 5,      // Slightly reduced (more tiles = neighbors are closer)
               neighborPenalty: 180,   // Strong anti-repetition
-              contrastBoost: 1.38,    // INCREASED: stronger punch/pop for face structure (was 1.25)
-              histogramBlend: 0.08,   // Slightly stronger color transfer: L_BLEND=0.57, AB_BLEND=0.26
-              baseOverlay: 0.22,      // INCREASED: stronger overlay for color correction (was 0.20)
-              edgeBoost: 0.28,        // INCREASED: stronger edge sharpening for eye/mouth contours (was 0.25)
+              contrastBoost: 1.30,    // BALANCED: contrast without washing out tile texture (was 1.38)
+              histogramBlend: 0.06,   // REDUCED: less color transfer to keep tile look (was 0.08)
+              baseOverlay: 0.14,      // REDUCED: less overlay = more tile texture visible (was 0.22)
+              edgeBoost: 0.22,        // REDUCED: subtle edge sharpening (was 0.28)
               overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
               labWeight: 0.15,        // LAB color distance
-              brightnessWeight: 0.62, // INCREASED: brightness drives face structure (was 0.60)
+              brightnessWeight: 0.60, // Brightness drives face structure
               textureWeight: 0.12,    // Slightly reduced (smaller tiles have less texture signal)
-              edgeWeight: 0.24,       // INCREASED: edge energy for eye/mouth definition (was 0.22)
-              saturationWeight: 0.42, // INCREASED: saturation matching for portrait (was 0.40)
+              edgeWeight: 0.22,       // Edge energy for eye/mouth definition
+              saturationWeight: 0.40, // Saturation matching for portrait
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             // Merge: Admin settings override preset (Admin wins)
@@ -2145,8 +2145,8 @@ export default function Studio() {
           // Apply contrast boost manually (replaces ctx.filter which breaks on iOS Safari)
           // Contrast: scale L around midpoint 50 by cBoost factor
           const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
-          // Saturation boost: scale a/b chroma by cBoost (STRENGTHENED: 0.20 factor, was 0.15)
-          const satBoost = 0.90 + cBoost * 0.20; // stronger saturation pop
+          // Saturation boost: scale a/b chroma by cBoost
+          const satBoost = 0.90 + cBoost * 0.15; // balanced saturation (0.20 was too aggressive)
           const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
           const boostedB = Math.max(-128, Math.min(127, newB * satBoost));
           const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
@@ -2354,10 +2354,16 @@ export default function Studio() {
           // eye/mouth: minimal smoothing (preserve sharpness)
           // other face: moderate smoothing
           // non-face: no smoothing
-          const smoothStr = subR === 'cheek' || subR === 'forehead' ? 0.35
-            : subR === 'nose' ? 0.20
-            : subR === 'eye' || subR === 'mouth' ? 0.08
-            : faceMask[ci] ? 0.15
+          // Smoothing values REDUCED: too much smoothing made mosaic look like a blurred photo
+          // Goal: reduce noise WITHOUT hiding tile texture
+          // cheek/forehead: 12% (was 35%) - subtle skin smoothing only
+          // nose: 8% (was 20%)
+          // eye/mouth: 0% (was 8%) - no smoothing, keep sharpness
+          // other face: 6% (was 15%)
+          const smoothStr = subR === 'cheek' || subR === 'forehead' ? 0.12
+            : subR === 'nose' ? 0.08
+            : subR === 'eye' || subR === 'mouth' ? 0.0
+            : faceMask[ci] ? 0.06
             : 0;
           if (smoothStr === 0) continue;
           for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < CANVAS_H; py++) {
