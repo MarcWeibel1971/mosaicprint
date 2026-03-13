@@ -389,8 +389,8 @@ export default function Studio() {
     // zoom > 1.8 -> 200px tiles (high zoom, crisp detail)
     // Mobile: höherer Threshold + kleinere Tiles = deutlich schneller
     const _isMobileHR = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
-    const HI_RES_THRESHOLD = _isMobileHR ? 2.0 : 1.2;
-    const ULTRA_RES_THRESHOLD = _isMobileHR ? 3.5 : 1.8;
+    const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;  // LOWERED: hi-res activates immediately on desktop
+    const ULTRA_RES_THRESHOLD = _isMobileHR ? 3.0 : 1.6;
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // Determine which resolution tier to use
     // Mobile: 64px (schnell) oder 128px (sehr hoher Zoom), Desktop: 128px oder 200px
@@ -2402,27 +2402,22 @@ export default function Studio() {
 
         setProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
 
-         // Fetch the JPEG as a Blob and trigger a download via object URL.
-        // This is the most reliable cross-browser approach:
-        // - avoids link.target='_blank' which causes some browsers to open in tab
-        // - avoids PDF-plugin interception (Acrobat, browser PDF viewer)
-        // - works on Chrome, Edge, Firefox, Safari
+        // MOST RELIABLE DOWNLOAD METHOD: hidden <a> with direct server URL
+        // The server sets Content-Disposition: attachment + Content-Type: image/jpeg
+        // Using a hidden <a> with download attribute is the most reliable cross-browser approach.
+        // fetch+blob can be intercepted by PDF plugins (Acrobat, Edge PDF viewer).
+        // window.location.href would navigate away from the page.
+        // Hidden <a> click with direct URL: browser respects Content-Disposition: attachment.
         const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
-        setProgressMsg(`Lade Datei herunter (${(size/1024/1024).toFixed(1)} MB)...`);
-        const fileResp = await fetch(downloadUrl);
-        if (!fileResp.ok) throw new Error(`Download fehlgeschlagen: ${fileResp.status}`);
-        const blob = await fileResp.blob();
-        // Force MIME type to image/jpeg to prevent PDF-plugin interception
-        const jpegBlob = new Blob([blob], { type: 'image/jpeg' });
-        const blobUrl = URL.createObjectURL(jpegBlob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = filename.endsWith('.jpg') ? filename : filename + '.jpg';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-        setProgressMsg(`OK Gespeichert: ${filename}`);
+        setProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
+        const dlLink = document.createElement('a');
+        dlLink.href = downloadUrl;
+        dlLink.download = filename.endsWith('.jpg') ? filename : filename + '.jpg';
+        dlLink.style.display = 'none';
+        document.body.appendChild(dlLink);
+        dlLink.click();
+        setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
+        setProgressMsg(`✓ Download gestartet: ${filename}`);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
@@ -2842,11 +2837,10 @@ export default function Studio() {
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
-                    imageRendering: "auto",
+                     imageRendering: zoom > 1 ? "pixelated" : "auto",  // pixelated = crisp tiles when zoomed in
                     maxWidth: "none",
                   }}
                 />
-
                 {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
                 {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
                 <canvas
@@ -2860,7 +2854,7 @@ export default function Studio() {
                     maxWidth: "none",
                     opacity: hiResOpacity,
                     pointerEvents: "none",
-                    imageRendering: "auto",
+                    imageRendering: zoom > 1 ? "pixelated" : "auto",  // crisp hi-res tiles when zoomed
                   }}
                 />
                 {hiResLoading && showHiRes && (
