@@ -909,14 +909,42 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     }
 
     console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Disposition', `attachment; filename="mosaicprint-${outW}x${outH}-druckbereit.jpg"`);
-    res.setHeader('Content-Length', mosaicJpeg.length);
-    res.send(mosaicJpeg);
+
+    // Save to temp file and return a download token.
+    // This allows the client to open a direct HTTP URL (window.location.href = url)
+    // which forces Edge/Chrome to treat it as a binary file download,
+    // bypassing Adobe Acrobat's file association that intercepts Blob downloads.
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tmpDir = '/tmp/mosaicprint-downloads';
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, `${token}.jpg`);
+    fs.writeFileSync(tmpFile, mosaicJpeg);
+    // Auto-delete after 10 minutes
+    setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10 * 60 * 1000);
+
+    const filename = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
+    res.json({ token, filename, size: mosaicJpeg.length, width: outW, height: outH });
   } catch (e) {
     console.error('[print-render] Error:', e);
     res.status(500).json({ error: String(e) });
   }
+});
+
+// GET /api/print-download/:token – serve the pre-rendered JPEG file
+// Client opens this URL directly (window.location.href) to force a binary download
+app.get('/api/print-download/:token', (req, res) => {
+  const { token } = req.params;
+  // Validate token: only alphanumeric, dash, dot
+  if (!/^[\w.-]+$/.test(token)) return res.status(400).send('Invalid token');
+  const tmpFile = path.join('/tmp/mosaicprint-downloads', `${token}.jpg`);
+  if (!fs.existsSync(tmpFile)) return res.status(404).send('File not found or expired');
+  const filename = req.query.filename as string || 'mosaicprint-druckbereit.jpg';
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+  const stream = fs.createReadStream(tmpFile);
+  stream.pipe(res);
 });
 
 // tRPC API (for Admin panel)

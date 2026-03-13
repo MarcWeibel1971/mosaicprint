@@ -2160,54 +2160,26 @@ export default function Studio() {
           throw new Error(`Server error: ${resp.status} – ${errText}`);
         }
 
-        // Download as JPEG – use ArrayBuffer to force binary save and prevent
-        // Edge/Acrobat from intercepting the download and converting to PDF.
-        const arrayBuffer = await resp.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuffer);
-        // Verify JPEG magic bytes (FF D8 FF)
-        const isJpeg = uint8[0] === 0xFF && uint8[1] === 0xD8 && uint8[2] === 0xFF;
-        console.log(`[Print] Received ${arrayBuffer.byteLength} bytes, isJpeg=${isJpeg}`);
-        const jpegBlob = new Blob([uint8], { type: 'image/jpeg' });
-        const filename = `mosaicprint-${printOutW}x${printOutH}-druckbereit.jpg`;
+        // Server returns a JSON token instead of raw bytes.
+        // Client opens /api/print-download/:token directly – this forces Edge/Chrome
+        // to treat it as a real HTTP file download, bypassing Adobe Acrobat's
+        // file association that intercepts Blob/Data-URL downloads.
+        const { token, filename, size } = await resp.json();
+        console.log(`[Print] Token received: ${token}, file: ${filename}, size: ${(size/1024/1024).toFixed(1)} MB`);
 
-        // Use showSaveFilePicker if available (Chrome/Edge 86+) – forces native save dialog
-        // This bypasses Acrobat's file association and always saves as .jpg
-        if ('showSaveFilePicker' in window) {
-          try {
-            const fileHandle = await (window as any).showSaveFilePicker({
-              suggestedName: filename,
-              types: [{ description: 'JPEG Bild', accept: { 'image/jpeg': ['.jpg', '.jpeg'] } }],
-            });
-            const writable = await fileHandle.createWritable();
-            await writable.write(jpegBlob);
-            await writable.close();
-            setProgressMsg(`✓ Gespeichert: ${filename}`);
-          } catch (saveErr: any) {
-            // User cancelled or API not supported – fall back to link download
-            if (saveErr?.name !== 'AbortError') {
-              const url = URL.createObjectURL(jpegBlob);
-              const link = document.createElement('a');
-              link.download = filename;
-              link.href = url;
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-              setTimeout(() => URL.revokeObjectURL(url), 15000);
-            }
-            setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px)`);
-          }
-        } else {
-          // Fallback for browsers without File System Access API
-          const url = URL.createObjectURL(jpegBlob);
-          const link = document.createElement('a');
-          link.download = filename;
-          link.href = url;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(url), 15000);
-          setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px, ${PRINT_TILE_PX}px/Tile)`);
-        }
+        setProgressMsg(`✓ Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
+
+        // Open the download URL directly – Edge treats this as a binary file download
+        const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        link.target = '_blank'; // open in new tab to avoid navigation
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        setProgressMsg(`✓ Gespeichert: ${filename}`);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
