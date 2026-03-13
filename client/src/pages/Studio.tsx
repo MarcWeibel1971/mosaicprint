@@ -1550,7 +1550,9 @@ export default function Studio() {
           }
         }
       }
-    } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
+    } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }
+
+    // ── Progressive Rendering: Pass 1 (LAB-color preview) ─────────────────────
     // Before running the expensive SSD matching loop, draw a fast LAB-color preview:
     // each cell gets the average color of its best k-NN candidate (from Stage A).
     // This gives the user immediate visual feedback while the full SSD pass runs.
