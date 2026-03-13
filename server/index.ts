@@ -20,6 +20,7 @@ if (!isRailway) {
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
@@ -663,11 +664,15 @@ app.get('/api/tile-atlas', async (req, res) => {
 // ── Server-side Print Render ──────────────────────────────────────────────────
 // POST /api/print-render
 // Body: { tileIds: number[], assignment: number[], cols: number, rows: number, tilePx?: number }
-// Returns: JPEG of the full-resolution mosaic (no watermark, 128px tiles)
-// This avoids loading thousands of hi-res images in the browser.
+// Returns: JPEG of the full-resolution mosaic (no watermark)
+// Uses source_url (original high-res images) for print quality.
+// Disk cache at /tmp/mosaicprint-hires/ to avoid re-downloading.
+const HIRES_CACHE_DIR = '/tmp/mosaicprint-hires';
+if (!fs.existsSync(HIRES_CACHE_DIR)) fs.mkdirSync(HIRES_CACHE_DIR, { recursive: true });
+
 app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) => {
   try {
-    const { tileIds, assignment, cols, rows, tilePx = 128 } = req.body as {
+    const { tileIds, assignment, cols, rows, tilePx = 400 } = req.body as {
       tileIds: number[];
       assignment: number[];
       cols: number;
@@ -679,42 +684,69 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const TILE_PX = Math.min(Math.max(tilePx, 64), 256);
+    // PRINT_TILE_PX: 400px per tile → 50×50 tiles = 20000×20000px (200 DPI at 100×100cm)
+    // Clamp between 256 (minimum for visible detail) and 600 (max reasonable)
+    const TILE_PX = Math.min(Math.max(tilePx, 256), 600);
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
     const pool = db.getPool();
 
-    // Fetch unique tile IDs needed
+    // Fetch unique tile IDs needed – prefer source_url for hi-res, fallback to tile128_url
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
     const result = await pool.query(
       `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id = ANY($1)`,
       [uniqueIds]
     );
-    const urlMap: Record<number, string> = {};
+    const urlMap: Record<number, { hiRes: string; fallback: string }> = {};
     for (const row of result.rows) {
-      urlMap[row.id] = row.tile128_url || row.source_url || '';
+      urlMap[row.id] = {
+        hiRes: row.source_url || '',
+        fallback: row.tile128_url || row.source_url || ''
+      };
     }
 
-    // Load tile images in parallel batches
+    // Load tile images in parallel batches with disk cache
     const tileBuffers: Record<number, Buffer> = {};
-    const CONCURRENCY = 20;
+    const CONCURRENCY = 10; // lower concurrency for large images
     for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
       const batch = uniqueIds.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (id) => {
-        const url = urlMap[id];
-        if (!url) return;
-        try {
-          // Check tile cache first
-          const cacheKey = `${id}-128`;
-          const cached = tileCacheMap.get(cacheKey);
-          if (cached) { tileBuffers[id] = cached.buf; return; }
-          if (url.startsWith('data:')) {
-            tileBuffers[id] = Buffer.from(url.split(',')[1], 'base64');
-          } else {
-            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
-            if (resp.ok) tileBuffers[id] = Buffer.from(await resp.arrayBuffer());
-          }
-        } catch { /* skip */ }
+        const urls = urlMap[id];
+        if (!urls) return;
+        // Check disk cache first (keyed by tile id)
+        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}.jpg`);
+        if (fs.existsSync(cacheFile)) {
+          try {
+            tileBuffers[id] = fs.readFileSync(cacheFile);
+            return;
+          } catch { /* fall through to download */ }
+        }
+        // Try source_url (hi-res original), fallback to tile128_url
+        const urlsToTry = [urls.hiRes, urls.fallback].filter(Boolean);
+        for (const url of urlsToTry) {
+          try {
+            if (url.startsWith('data:')) {
+              tileBuffers[id] = Buffer.from(url.split(',')[1], 'base64');
+              break;
+            }
+            const resp = await fetch(url, {
+              headers: { 'User-Agent': 'MosaicPrint/1.0' },
+              signal: AbortSignal.timeout(15000)
+            });
+            if (resp.ok) {
+              const buf = Buffer.from(await resp.arrayBuffer());
+              // Resize to TILE_PX and cache to disk
+              const resized = await sharp(buf)
+                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
+                .jpeg({ quality: 92, mozjpeg: true })
+                .toBuffer();
+              tileBuffers[id] = resized;
+              // Save to disk cache (async, don't await)
+              fs.writeFile(cacheFile, resized, () => {});
+              break;
+            }
+          } catch { /* try next url */ }
+        }
       }));
     }
 
@@ -727,15 +759,17 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       const col = ci % cols;
       const row = Math.floor(ci / cols);
       try {
-        const resized = await sharp(buf).resize(TILE_PX, TILE_PX, { fit: 'cover' }).jpeg({ quality: 85 }).toBuffer();
+        // Ensure correct size (may already be resized from cache)
+        const resized = await sharp(buf).resize(TILE_PX, TILE_PX, { fit: 'cover' }).jpeg({ quality: 92 }).toBuffer();
         compositeInputs.push({ input: resized, top: row * TILE_PX, left: col * TILE_PX });
       } catch { /* skip */ }
     }
 
-    // Render final mosaic
+    // Render final mosaic – large canvas, use sharp streaming
+    console.log(`[print-render] Compositing ${compositeInputs.length} tiles at ${TILE_PX}px → ${outW}×${outH}px`);
     const mosaicJpeg = await sharp({
-      create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } }
-    }).composite(compositeInputs).jpeg({ quality: 92 }).toBuffer();
+      create: { width: outW, height: outH, channels: 3, background: { r: 200, g: 200, b: 200 } }
+    }).composite(compositeInputs).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
 
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Content-Disposition', `attachment; filename="mosaicprint-${outW}x${outH}-druckbereit.jpg"`);
