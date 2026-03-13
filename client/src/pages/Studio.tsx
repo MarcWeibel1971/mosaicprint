@@ -605,16 +605,16 @@ export default function Studio() {
               tilePx: 8,              // RESTORED: 8px tiles = recognizable photos even before hi-res loads (6px was too small)
               neighborRadius: 5,      // Slightly reduced (more tiles = neighbors are closer)
               neighborPenalty: 180,   // Strong anti-repetition
-              contrastBoost: 1.30,    // BALANCED: contrast without washing out tile texture (was 1.38)
-              histogramBlend: 0.06,   // REDUCED: less color transfer to keep tile look (was 0.08)
-              baseOverlay: 0.14,      // REDUCED: less overlay = more tile texture visible (was 0.22)
-              edgeBoost: 0.22,        // REDUCED: subtle edge sharpening (was 0.28)
+              contrastBoost: 1.28,    // Subtle contrast boost
+              histogramBlend: 0.12,   // INCREASED: stronger color transfer for correct skin tones (was 0.06)
+              baseOverlay: 0.20,      // INCREASED: overlay needed for color correction (was 0.14 = too weak)
+              edgeBoost: 0.22,        // Subtle edge sharpening
               overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
               labWeight: 0.15,        // LAB color distance
               brightnessWeight: 0.60, // Brightness drives face structure
-              textureWeight: 0.12,    // Slightly reduced (smaller tiles have less texture signal)
+              textureWeight: 0.12,    // Tile texture weight
               edgeWeight: 0.22,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.40, // Saturation matching for portrait
+              saturationWeight: 0.55, // INCREASED: stronger saturation matching prevents gray tiles in skin areas
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             // Merge: Admin settings override preset (Admin wins)
@@ -1832,9 +1832,10 @@ export default function Studio() {
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
             const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
-            if (isTargetSkin && isTileSkin) dist -= 15; // skin-tone bonus: prefer matching skin tiles
-            // cheek/forehead: stronger penalty for non-skin tiles in skin areas
-            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
+            if (isTargetSkin && isTileSkin) dist -= 80; // INCREASED: strong skin-tone bonus (was 15)
+            // cheek/forehead: much stronger penalty for non-skin tiles in skin areas
+            // Skin areas need warm tiles - gray/blue/green tiles must be strongly penalized
+            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 300 : 150; // INCREASED (was 50/25)
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
              // Green tiles (a < -3) are almost never correct in face areas
