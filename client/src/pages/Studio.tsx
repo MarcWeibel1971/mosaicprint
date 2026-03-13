@@ -942,7 +942,7 @@ export default function Studio() {
     // 14D distance: global LAB + quadrant a/b (8 values) + edge + brightness
     // Quadrant colors catch color gradients (e.g. blue sky top / green grass bottom)
     // TOP_K=80 gives SSD stage enough diverse candidates to avoid repetition
-    const TOP_K = isMobileOrSlow ? 60 : 80; // Mobile: 60 candidates gives good diversity; unique tiles capped at 1000 via frequency selection
+    const TOP_K = isMobileOrSlow ? 80 : 120; // Increased: more candidates = better face detail (was 60/80)
     const knnLAB = (
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
@@ -955,17 +955,14 @@ export default function Studio() {
       // Quadrant a/b: color distribution within tile (catches gradients)
       // Edge: shape similarity
       // Brightness: prevents dark tiles in bright areas
-      const W_L = 1.0, W_A = 1.5, W_B = 1.5; // slightly higher weight on a/b for color accuracy
-      const W_QUAD = IS_14D ? 0.4 : 0;        // quadrant color weight (per quadrant a/b pair)
+      const W_L = 1.2, W_A = 2.0, W_B = 2.0; // Increased a/b weight: color accuracy is critical for skin tones
+      const W_QUAD = IS_14D ? 0.6 : 0;        // Increased quadrant weight: spatial color gradients matter more
       // W_EDGE: active for all index types – edge energy drives contour sharpness
-      // IS_15D: 18.0 (slightly less than IS_7D=25 since 15D already encodes spatial structure)
-      const W_EDGE = IS_7D ? 25.0 : 18.0;     // shape priority – now active for 14D/15D too!
-      // FIX: W_BRIGHT was IS_7D-only (=0 for 14D/15D) – that caused dark tiles in bright areas!
-      // Now always active: 8.0 for 14D/15D (lower than 7D=15 since LAB-L already captures brightness)
-      const W_BRIGHT = IS_7D ? 15.0 : 8.0;    // brightness matching – prevents dark tiles in bright areas
+      const W_EDGE = IS_7D ? 25.0 : 22.0;     // Slightly increased for 14D/15D for sharper edges
+      // W_BRIGHT: brightness matching – prevents dark tiles in bright areas
+      const W_BRIGHT = IS_7D ? 15.0 : 10.0;   // Increased from 8.0: brightness drives face structure
       // Gray-penalty: when target cell is colorful (sat > 0.15), penalize gray tiles (sat < 0.08)
-      // FIX: also apply to IS_14D/IS_15D (was only IS_7D before – caused gray patches!)
-      const GRAY_PENALTY = Math.max(0, (targetSat - 0.15) * 200);
+      const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 250); // Lower threshold, higher penalty
       const heap: Array<{tileId: number; labDist: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
@@ -1635,46 +1632,57 @@ export default function Studio() {
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
           const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
-          // Face region: boost SSD, brightness, edge and texture weights for sharper eye/nose/mouth
+          // Face region: boost SSD, LAB, brightness, edge and texture weights for sharper eye/nose/mouth
           if (inFace) {
-            const wSsdFace = 0.35;             // Reduced SSD weight – more room for LAB/brightness in face areas
-            const wLabF = wLabBase * 0.60;     // less LAB weight – SSD handles color
-            const wBrightF = wBrightBase * 1.30; // extra brightness boost in face areas
-            const faceEdgeWeight = edgeWeight * 1.8; // stronger edge matching in faces
-            const faceTextureWeight = wTextureBase * 1.5; // texture matters for skin/hair
-            // Saturation weight in face regions: full weight (portrait preset = 0.45)
-            const faceSatWeight = wSatBase;
-            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.06 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
+            const wSsdFace = 0.55;             // INCREASED: SSD is the primary pixel-accurate signal for face sharpness
+            const wLabF = wLabBase * 1.20;     // INCREASED: LAB color accuracy is critical in face regions (was 0.60)
+            const wBrightF = wBrightBase * 1.50; // INCREASED: brightness drives face structure (was 1.30)
+            const faceEdgeWeight = edgeWeight * 2.2; // INCREASED: stronger edge matching for eye/nose/mouth contours
+            const faceTextureWeight = wTextureBase * 1.8; // INCREASED: texture matters for skin/hair/beard
+            // Saturation weight in face regions: boosted to prevent colorful tiles in skin areas
+            const faceSatWeight = wSatBase * 1.5; // INCREASED: stronger saturation matching in face
+            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-80, a:5-25, b:10-35
             const isTargetSkin = tf.lab[0] >= 40 && tf.lab[0] <= 80 && tf.lab[1] >= 5 && tf.lab[1] <= 25 && tf.lab[2] >= 10 && tf.lab[2] <= 35;
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
             if (isTargetSkin && isTileSkin) dist -= 8; // skin-tone bonus: prefer matching skin tiles
-            if (isTargetSkin && !isTileSkin) dist += 12; // penalize non-skin tiles in skin areas
+            if (isTargetSkin && !isTileSkin) dist += 25; // INCREASED: stronger penalty for non-skin tiles in skin areas
             // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
             // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
             // in skin-toned target cells. This prevents colorful landscape/nature tiles from
             // appearing in face/skin regions.
             // We use the isSkinFriendly heuristic: tile is skin-friendly if its LAB is warm
             // (a > 0, b > 0) OR if it's low-saturation (neutral/gray)
-            if (isTargetSkin && savedSettings.portraitMode) {
+            // Subject-Penalty in skin areas: always active (not just portrait mode)
+            // Prevents colorful landscape/nature tiles from appearing in face/skin regions
+            {
               const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
               const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
-              if (!tileIsWarm && !tileIsNeutral && tileSatC > 35) {
-                // Tile is colorful (sat>35) AND not warm AND not neutral → subject penalty
-                dist += 50; // push non-skin-subject tiles down in face ranking
+              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 30) {
+                // Tile is colorful (sat>30) AND not warm AND not neutral → subject penalty
+                dist += 80; // INCREASED: strongly push non-skin-subject tiles down in face ranking
+              }
+              // Extra penalty for cool/blue tiles in warm skin areas
+              if (isTargetSkin && mf.lab[1] < -5) {
+                dist += 60; // Blue/green tile in warm skin area → very wrong
               }
             }
             // Low-saturation penalty (STRENGTHENED):
             // If target is low-sat (neutral/gray area) and tile is highly saturated → penalty ×4
             // If target is skin-toned and tile is desaturated → penalty ×4
             // This is the key fix for "noisy / bunt" skin areas
-            if (targetSatC < 25 && tileSatC > 40) {
-              // Gray/neutral target area: strongly penalize colorful tiles
-              dist += (tileSatC - 40) / 100 * 4 * 100; // ×4 multiplier
+            if (targetSatC < 25 && tileSatC > 35) {
+              // Gray/neutral target area: strongly penalize colorful tiles (lowered threshold from 40)
+              dist += (tileSatC - 35) / 100 * 6 * 100; // ×6 multiplier (was ×4)
             }
-            if (isTargetSkin && tileSatC < 12) {
-              // Skin area: penalize washed-out gray tiles (was < 8, now < 12 = broader fix)
-              dist += (12 - tileSatC) / 12 * 5 * 100; // ×5 multiplier (stronger than before)
+            if (isTargetSkin && tileSatC < 15) {
+              // Skin area: penalize washed-out gray tiles (broadened from <12)
+              dist += (15 - tileSatC) / 15 * 6 * 100; // ×6 multiplier (was ×5)
+            }
+            // NEW: Penalize highly saturated tiles (sat>60) in ANY face region
+            // These are the "rainbow noise" tiles that make faces look garish
+            if (tileSatC > 60) {
+              dist += (tileSatC - 60) / 40 * 8 * 100; // up to +800 for sat=100 in face
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
