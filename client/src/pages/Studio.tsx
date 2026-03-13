@@ -605,16 +605,16 @@ export default function Studio() {
               tilePx: 6,              // REDUCED: 6px tiles = finer grid → sharper eye/mouth detail
               neighborRadius: 5,      // Slightly reduced (more tiles = neighbors are closer)
               neighborPenalty: 180,   // Strong anti-repetition
-              contrastBoost: 1.25,    // Slightly stronger contrast for face structure
-              histogramBlend: 0.07,   // Moderate color transfer: L_BLEND=0.55, AB_BLEND=0.24
-              baseOverlay: 0.20,      // Slightly stronger overlay to compensate for smaller tiles
-              edgeBoost: 0.25,        // INCREASED: stronger edge sharpening for eye/mouth contours
+              contrastBoost: 1.38,    // INCREASED: stronger punch/pop for face structure (was 1.25)
+              histogramBlend: 0.08,   // Slightly stronger color transfer: L_BLEND=0.57, AB_BLEND=0.26
+              baseOverlay: 0.22,      // INCREASED: stronger overlay for color correction (was 0.20)
+              edgeBoost: 0.28,        // INCREASED: stronger edge sharpening for eye/mouth contours (was 0.25)
               overlayMode: 'softlight', // Soft-light: preserves tile texture while correcting color
               labWeight: 0.15,        // LAB color distance
-              brightnessWeight: 0.60, // Brightness drives face structure
+              brightnessWeight: 0.62, // INCREASED: brightness drives face structure (was 0.60)
               textureWeight: 0.12,    // Slightly reduced (smaller tiles have less texture signal)
-              edgeWeight: 0.22,       // Edge energy for eye/mouth definition
-              saturationWeight: 0.40, // Saturation matching for portrait
+              edgeWeight: 0.24,       // INCREASED: edge energy for eye/mouth definition (was 0.22)
+              saturationWeight: 0.42, // INCREASED: saturation matching for portrait (was 0.40)
               portraitMode: true,     // enables skin-tone boost + isSkinFriendly filter
             };
             // Merge: Admin settings override preset (Admin wins)
@@ -649,7 +649,7 @@ export default function Studio() {
               tilePx: 14,
               neighborRadius: 4,
               neighborPenalty: 160,
-              contrastBoost: 1.20,
+              contrastBoost: 1.35,  // INCREASED: more punch/pop (was 1.20)
               histogramBlend: 0.05,
               baseOverlay: 0.12,
               edgeBoost: 0.18,
@@ -1795,13 +1795,14 @@ export default function Studio() {
             // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
             // nose: high brightness, moderate edge, strong sat penalty (skin area)
             // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
-            const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-            const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
-            const wBrightF   = subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.8 : wBrightBase * 1.5;
-            const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
-            const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
-            // Saturation weight: cheek/forehead need very low sat tiles (skin), eye/mouth allow more color
-            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 2.5 : subRegion === 'nose' ? wSatBase * 2.0 : wSatBase * 1.5;
+            const wSsdFace   = subRegion === 'eye' ? 0.70 : subRegion === 'mouth' ? 0.65 : subRegion === 'nose' ? 0.58 : 0.52;
+            const wLabF      = subRegion === 'eye' ? wLabBase * 1.6 : subRegion === 'mouth' ? wLabBase * 1.5 : wLabBase * 1.3;
+            const wBrightF   = subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 2.2 : wBrightBase * 1.6;
+            // STRENGTHENED: eye/mouth edge-boost ×3.5 (was ×3.0) for sharper contours
+            const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.5 : subRegion === 'mouth' ? edgeWeight * 3.0 : subRegion === 'nose' ? edgeWeight * 2.2 : edgeWeight * 1.5;
+            const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.8 : subRegion === 'mouth' ? wTextureBase * 2.2 : wTextureBase * 1.6;
+            // STRENGTHENED: cheek/forehead sat-penalty ×3.0 (was ×2.5) - key fix for skin noise
+            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 3.0 : subRegion === 'nose' ? wSatBase * 2.5 : wSatBase * 1.8;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
@@ -2119,8 +2120,8 @@ export default function Studio() {
           // Apply contrast boost manually (replaces ctx.filter which breaks on iOS Safari)
           // Contrast: scale L around midpoint 50 by cBoost factor
           const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
-          // Saturation boost: scale a/b chroma by cBoost
-          const satBoost = 0.90 + cBoost * 0.15; // matches old saturate() CSS filter
+          // Saturation boost: scale a/b chroma by cBoost (STRENGTHENED: 0.20 factor, was 0.15)
+          const satBoost = 0.90 + cBoost * 0.20; // stronger saturation pop
           const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
           const boostedB = Math.max(-128, Math.min(127, newB * satBoost));
           const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
@@ -2281,6 +2282,92 @@ export default function Studio() {
       }
       ctx.putImageData(mosaicSnap, 0, 0);
     }
+
+    // -- Frequency Separation Post-Processing (Portrait only) ----------------------
+    // Technique: separate low-freq (color/tone) from high-freq (detail/edges)
+    // Apply: smooth low-freq to reduce skin noise, keep high-freq for tile texture
+    // Result: cleaner skin tones without losing tile detail
+    // Only active for portrait mode to avoid slowing down non-portrait renders
+    if (isPortraitMode) {
+      const fsData = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const fsd = fsData.data;
+      // Step 1: Create low-frequency (blurred) version using box blur (radius 2px)
+      // Box blur is fast and sufficient for frequency separation
+      const blurRadius = 2;
+      const blurred = new Uint8ClampedArray(fsd.length);
+      for (let y = 0; y < CANVAS_H; y++) {
+        for (let x = 0; x < CANVAS_W; x++) {
+          let rSum = 0, gSum = 0, bSum = 0, count = 0;
+          for (let dy = -blurRadius; dy <= blurRadius; dy++) {
+            for (let dx = -blurRadius; dx <= blurRadius; dx++) {
+              const ny = y + dy, nx = x + dx;
+              if (ny >= 0 && ny < CANVAS_H && nx >= 0 && nx < CANVAS_W) {
+                const pi = (ny * CANVAS_W + nx) * 4;
+                rSum += fsd[pi]; gSum += fsd[pi+1]; bSum += fsd[pi+2];
+                count++;
+              }
+            }
+          }
+          const pi = (y * CANVAS_W + x) * 4;
+          blurred[pi]   = rSum / count;
+          blurred[pi+1] = gSum / count;
+          blurred[pi+2] = bSum / count;
+          blurred[pi+3] = fsd[pi+3];
+        }
+      }
+      // Step 2: Blend back - skin areas get more low-freq smoothing
+      // Non-skin areas (eyes, mouth, hair) keep more high-freq detail
+      // Skin smoothing: 35% low-freq blend (reduces noise without losing tile look)
+      // Eye/mouth: 10% low-freq blend (keep detail)
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const ci = row * COLS + col;
+          const subR = subRegionMask[ci];
+          // Determine smoothing strength per region
+          // cheek/forehead: most smoothing (skin noise reduction)
+          // nose: moderate smoothing
+          // eye/mouth: minimal smoothing (preserve sharpness)
+          // other face: moderate smoothing
+          // non-face: no smoothing
+          const smoothStr = subR === 'cheek' || subR === 'forehead' ? 0.35
+            : subR === 'nose' ? 0.20
+            : subR === 'eye' || subR === 'mouth' ? 0.08
+            : faceMask[ci] ? 0.15
+            : 0;
+          if (smoothStr === 0) continue;
+          for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < CANVAS_H; py++) {
+            for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < CANVAS_W; px++) {
+              const pi = (py * CANVAS_W + px) * 4;
+              fsd[pi]   = Math.round(fsd[pi]   * (1 - smoothStr) + blurred[pi]   * smoothStr);
+              fsd[pi+1] = Math.round(fsd[pi+1] * (1 - smoothStr) + blurred[pi+1] * smoothStr);
+              fsd[pi+2] = Math.round(fsd[pi+2] * (1 - smoothStr) + blurred[pi+2] * smoothStr);
+            }
+          }
+        }
+      }
+      // Step 3: Local sharpening for eye/mouth regions (Hebel 4)
+      // Unsharp mask: sharpen = original + strength * (original - blurred)
+      // Applied only to eye/mouth to make contours pop
+      const sharpStr = 0.45; // unsharp mask strength (0.3-0.6 is typical)
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const ci = row * COLS + col;
+          const subR = subRegionMask[ci];
+          if (subR !== 'eye' && subR !== 'mouth') continue;
+          for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < CANVAS_H; py++) {
+            for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < CANVAS_W; px++) {
+              const pi = (py * CANVAS_W + px) * 4;
+              // Unsharp mask: original + strength * (original - blurred)
+              fsd[pi]   = Math.max(0, Math.min(255, Math.round(fsd[pi]   + sharpStr * (fsd[pi]   - blurred[pi]))));
+              fsd[pi+1] = Math.max(0, Math.min(255, Math.round(fsd[pi+1] + sharpStr * (fsd[pi+1] - blurred[pi+1]))));
+              fsd[pi+2] = Math.max(0, Math.min(255, Math.round(fsd[pi+2] + sharpStr * (fsd[pi+2] - blurred[pi+2]))));
+            }
+          }
+        }
+      }
+      ctx.putImageData(fsData, 0, 0);
+    }
+
     snapshotRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
 
     // Auto-zoom
