@@ -774,11 +774,14 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // PRINT_TILE_PX: 400px per tile → 50×50 tiles = 20000×20000px (200 DPI at 100×100cm)
-    // Clamp between 256 (minimum for visible detail) and 600 (max reasonable)
-    const TILE_PX = Math.min(Math.max(tilePx, 256), 600);
+    // PRINT_TILE_PX: client sends outW/cols (= target tile size at 300 DPI)
+    // Clamp between 64 (minimum for visible detail) and 400 (memory limit)
+    // At 128px: 100 cols × 128px = 12800px wide (fine for 30cm @ 300 DPI)
+    // At 300px: 50 cols × 300px = 15000px wide (excellent for 50cm @ 300 DPI)
+    const TILE_PX = Math.min(Math.max(tilePx, 64), 400);
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
+    console.log(`[print-render] Request: cols=${cols} rows=${rows} tilePx=${tilePx} → clamped=${TILE_PX} output=${outW}×${outH}px`);
     const pool = db.getPool();
 
     // Fetch unique tile IDs needed – prefer source_url for hi-res, fallback to tile128_url
@@ -841,26 +844,71 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     }
 
     // Build composite inputs for sharp
-    const compositeInputs: sharp.OverlayOptions[] = [];
-    for (let ci = 0; ci < cols * rows; ci++) {
-      const tileId = tileIds[assignment[ci]];
-      const buf = tileBuffers[tileId];
-      if (!buf) continue;
-      const col = ci % cols;
-      const row = Math.floor(ci / cols);
+    // For large images (>8000px), render in row-strips to avoid OOM
+    // Each strip = STRIP_ROWS rows, composited separately, then joined vertically
+    const STRIP_ROWS = Math.max(1, Math.floor(4000 / TILE_PX)); // ~4000px per strip
+    const totalCells = cols * rows;
+    console.log(`[print-render] Building ${totalCells} tile composites at ${TILE_PX}px → ${outW}×${outH}px (${Math.ceil(rows/STRIP_ROWS)} strips)`);
+
+    // Pre-resize all unique tile buffers to TILE_PX (they may already be cached at this size)
+    const resizedBuffers: Record<number, Buffer> = {};
+    for (const [id, buf] of Object.entries(tileBuffers)) {
       try {
-        // Ensure correct size (may already be resized from cache)
-        const resized = await sharp(buf).resize(TILE_PX, TILE_PX, { fit: 'cover' }).jpeg({ quality: 92 }).toBuffer();
-        compositeInputs.push({ input: resized, top: row * TILE_PX, left: col * TILE_PX });
-      } catch { /* skip */ }
+        resizedBuffers[Number(id)] = await sharp(buf)
+          .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+      } catch { /* skip bad tiles */ }
     }
 
-    // Render final mosaic – large canvas, use sharp streaming
-    console.log(`[print-render] Compositing ${compositeInputs.length} tiles at ${TILE_PX}px → ${outW}×${outH}px`);
-    const mosaicJpeg = await sharp({
-      create: { width: outW, height: outH, channels: 3, background: { r: 200, g: 200, b: 200 } }
-    }).composite(compositeInputs).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
+    // Render strips and collect them
+    const stripBuffers: Buffer[] = [];
+    for (let stripStart = 0; stripStart < rows; stripStart += STRIP_ROWS) {
+      const stripEnd = Math.min(stripStart + STRIP_ROWS, rows);
+      const stripH = (stripEnd - stripStart) * TILE_PX;
+      const compositeInputs: sharp.OverlayOptions[] = [];
 
+      for (let r = stripStart; r < stripEnd; r++) {
+        for (let c = 0; c < cols; c++) {
+          const ci = r * cols + c;
+          const tileId = tileIds[assignment[ci]];
+          const buf = resizedBuffers[tileId];
+          if (!buf) continue;
+          compositeInputs.push({
+            input: buf,
+            top: (r - stripStart) * TILE_PX,
+            left: c * TILE_PX,
+          });
+        }
+      }
+
+      const stripJpeg = await sharp({
+        create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      }).composite(compositeInputs).jpeg({ quality: 90 }).toBuffer();
+      stripBuffers.push(stripJpeg);
+      console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
+    }
+
+    // Join strips vertically
+    let mosaicJpeg: Buffer;
+    if (stripBuffers.length === 1) {
+      // Single strip: re-encode at higher quality
+      mosaicJpeg = await sharp(stripBuffers[0]).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
+    } else {
+      // Multiple strips: stack them
+      const joinInputs: sharp.OverlayOptions[] = [];
+      let yOffset = 0;
+      for (const stripBuf of stripBuffers) {
+        const meta = await sharp(stripBuf).metadata();
+        joinInputs.push({ input: stripBuf, top: yOffset, left: 0 });
+        yOffset += meta.height ?? STRIP_ROWS * TILE_PX;
+      }
+      mosaicJpeg = await sharp({
+        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      }).composite(joinInputs).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
+    }
+
+    console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Content-Disposition', `attachment; filename="mosaicprint-${outW}x${outH}-druckbereit.jpg"`);
     res.setHeader('Content-Length', mosaicJpeg.length);

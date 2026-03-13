@@ -154,16 +154,16 @@ function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, 
 }
 
 // Printolino-konforme Druckformate
-// Pixelgrösse bei 150 dpi: px = cm × (150 / 2.54) = cm × 59.055
-// Mindestanforderung Printolino: 72 dpi (= 28.35 px/cm)
-// Empfehlung: 150 dpi für gutes Ergebnis bei handhabbarerDateigrösse
+// Pixelgrösse bei 300 dpi: px = cm × (300 / 2.54) = cm × 118.11
+// 300 DPI ist der Standard für hochwertige Fotoprodukte (Leinwand, Alu-Dibond)
+// Tile-Grösse für Druckqualität: 300px pro Tile (aus source_url geladen)
 const PRINT_FORMATS = [
-  { label: "20×20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 150, pxW: 1181, pxH: 1181 },
-  { label: "30×30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 150, pxW: 1772, pxH: 1772 },
-  { label: "40×40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 150, pxW: 2362, pxH: 2362 },
-  { label: "50×70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 150, pxW: 2953, pxH: 4134 },
-  { label: "70×70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 150, pxW: 4134, pxH: 4134 },
-  { label: "100×100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 150, pxW: 5906, pxH: 5906 },
+  { label: "20×20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 300, pxW: 2362, pxH: 2362 },
+  { label: "30×30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 300, pxW: 3543, pxH: 3543 },
+  { label: "40×40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 300, pxW: 4724, pxH: 4724 },
+  { label: "50×70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 300, pxW: 5906, pxH: 8268 },
+  { label: "70×70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 300, pxW: 8268, pxH: 8268 },
+  { label: "100×100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 300, pxW: 11811, pxH: 11811 },
 ];
 
 const MATERIALS = [
@@ -2112,14 +2112,26 @@ export default function Studio() {
 
     if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
       // PRINT MODE: server-side rendering via /api/print-render
-      // The server loads tiles from DB and renders the mosaic with sharp (no browser memory issues)
+      // Strategy: use a fixed tile size of 200px per tile for print quality.
+      // This gives each tile enough resolution to show recognizable detail when zoomed.
+      // Final output = cols × 200px (e.g. 100 cols → 20000px wide = excellent for any print size)
+      // The print service scales down to the requested format (e.g. 30×30cm @ 300 DPI = 3543px)
+      // but the source file at 20000px gives 300 DPI even at 170cm width.
       const { cols, rows } = mosaicParamsRef.current;
-      const PRINT_TILE_PX = Math.max(64, Math.floor(Math.min(outW / cols, outH / rows)));
+      // Fixed 200px per tile: good balance of quality vs. server memory
+      // 100 cols × 200px = 20000px (fine), 50 cols × 200px = 10000px (fine)
+      const PRINT_TILE_PX = 200;
+      // Actual output dimensions
+      const printOutW = cols * PRINT_TILE_PX;
+      const printOutH = rows * PRINT_TILE_PX;
 
       try {
         setLoading(true);
-        setProgressMsg('Server rendert Druckqualität...');
+        setProgressMsg(`Server rendert Druckqualität (${printOutW}×${printOutH}px)...`);
         setProgress(10);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 min timeout
 
         const resp = await fetch('/api/print-render', {
           method: 'POST',
@@ -2131,34 +2143,50 @@ export default function Studio() {
             rows,
             tilePx: PRINT_TILE_PX,
           }),
+          signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
-        if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          throw new Error(`Server error: ${resp.status} – ${errText}`);
+        }
 
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
+        // Ensure we get a JPEG blob (not PDF)
+        const rawBlob = await resp.blob();
+        const jpegBlob = new Blob([rawBlob], { type: 'image/jpeg' });
+        const url = URL.createObjectURL(jpegBlob);
         const link = document.createElement('a');
-        link.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
+        link.download = `mosaicprint-${printOutW}x${printOutH}-druckbereit.jpg`;
         link.href = url;
+        document.body.appendChild(link);
         link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        setProgressMsg(`✓ Download gestartet (${printOutW}×${printOutH}px, ${PRINT_TILE_PX}px/Tile)`);
       } catch (e) {
-        console.error('[Print] Server render failed, falling back to canvas:', e);
-        // Fallback: scale existing canvas
-        outCtx.drawImage(canvas, 0, 0, outW, outH);
+        console.error('[Print] Server render failed:', e);
+        setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
+        // Fallback: scale existing canvas (lower quality but works offline)
         const jpegCanvas2 = document.createElement('canvas');
         jpegCanvas2.width = outW; jpegCanvas2.height = outH;
         const jCtx2 = jpegCanvas2.getContext('2d')!;
         jCtx2.fillStyle = '#ffffff'; jCtx2.fillRect(0, 0, outW, outH);
-        jCtx2.drawImage(outCanvas, 0, 0);
+        jCtx2.drawImage(canvas, 0, 0, outW, outH);
+        const fallbackBlob = await new Promise<Blob>((resolve) => {
+          jpegCanvas2.toBlob((b) => resolve(b!), 'image/jpeg', 0.92);
+        });
+        const url2 = URL.createObjectURL(fallbackBlob);
         const link2 = document.createElement('a');
         link2.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
-        link2.href = jpegCanvas2.toDataURL('image/jpeg', 0.92);
+        link2.href = url2;
+        document.body.appendChild(link2);
         link2.click();
+        document.body.removeChild(link2);
+        setTimeout(() => URL.revokeObjectURL(url2), 10000);
       } finally {
         setLoading(false);
-        setProgressMsg('');
-        setProgress(0);
+        setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
       }
       return; // early return for print mode
     }
