@@ -1798,7 +1798,7 @@ export default function Studio() {
             const isTileSkin = mf.lab[0] >= 40 && mf.lab[0] <= 80 && mf.lab[1] >= 5 && mf.lab[1] <= 25 && mf.lab[2] >= 10 && mf.lab[2] <= 35;
             if (isTargetSkin && isTileSkin) dist -= 12; // skin-tone bonus: prefer matching skin tiles
             // cheek/forehead: much stronger penalty for non-skin tiles in skin areas
-            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 100 : 50;
+            const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 40 : 20;
             if (isTargetSkin && !isTileSkin) dist += skinMismatchPenalty;
             // Subject-Penalty in skin areas (Schritt 1 aus Implementierungsplan):
             // Tiles that are NOT skin-friendly (high saturation, non-warm colors) get +50 penalty
@@ -1811,13 +1811,13 @@ export default function Studio() {
             {
               const tileIsWarm = mf.lab[1] > 0 && mf.lab[2] > 0; // a>0, b>0 = warm/skin-like
               const tileIsNeutral = tileSatC < 20; // low saturation = neutral/gray = OK for skin
-              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 25) {
-                // Tile is colorful (sat>25) AND not warm AND not neutral -> subject penalty
-                dist += 150; // STRONG: push non-skin-subject tiles far down in face ranking
+              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 35) {
+                // Tile is colorful (sat>35) AND not warm AND not neutral -> subject penalty
+                dist += 60; // moderate: push non-skin-subject tiles down in face ranking
               }
               // Extra penalty for cool/blue tiles in warm skin areas
-              if (isTargetSkin && mf.lab[1] < -5) {
-                dist += 120; // Blue/green tile in warm skin area -> very wrong
+              if (isTargetSkin && mf.lab[1] < -8) {
+                dist += 50; // Blue/green tile in warm skin area -> wrong
               }
             }
             // Low-saturation penalty (STRENGTHENED):
@@ -1828,14 +1828,14 @@ export default function Studio() {
               // Gray/neutral target area: strongly penalize colorful tiles (lowered threshold from 40)
               dist += (tileSatC - 35) / 100 * 6 * 100; // x6 multiplier (was x4)
             }
-            if (isTargetSkin && tileSatC < 18) {
-              // Skin area: penalize washed-out gray tiles (broadened threshold)
-              dist += (18 - tileSatC) / 18 * 8 * 100; // x8 multiplier (was x6)
+            if (isTargetSkin && tileSatC < 12) {
+              // Skin area: penalize very washed-out gray tiles
+              dist += (12 - tileSatC) / 12 * 3 * 100; // up to +300 for sat=0 in skin area
             }
-            // Penalize highly saturated tiles (sat>40) in ANY face region
+            // Penalize highly saturated tiles (sat>65) in ANY face region
             // These are the "rainbow noise" tiles that make faces look garish
-            if (tileSatC > 40) {
-              dist += (tileSatC - 40) / 60 * 12 * 100; // up to +1200 for sat=100 in face (was sat>60, x8)
+            if (tileSatC > 65) {
+              dist += (tileSatC - 65) / 35 * 5 * 100; // up to +500 for sat=100 in face
             }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
