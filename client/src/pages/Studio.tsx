@@ -2279,12 +2279,18 @@ export default function Studio() {
       // The print service scales down to the requested format (e.g. 30x30cm @ 300 DPI = 3543px)
       // but the source file at 20000px gives 300 DPI even at 170cm width.
       const { cols, rows } = mosaicParamsRef.current;
-      // Fixed 200px per tile: good balance of quality vs. server memory
-      // 100 cols x 200px = 20000px (fine), 50 cols x 200px = 10000px (fine)
-      const PRINT_TILE_PX = 200;
-      // Actual output dimensions
+      // Dynamic tile size: each tile = exactly 1cm x 1cm at 300 DPI in the chosen format
+      // Formula: tilePx = formatWidthCm / cols * (300 / 2.54)
+      // This ensures every tile is recognizable when printed at 1cm size
+      // Clamped to [118, 300]: min=1cm@300dpi, max=300px (server memory limit)
+      const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
+      const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
+      const PRINT_TILE_PX = Math.min(300, Math.max(118, Math.round(tileSizeCm * PX_PER_CM)));
+      // Actual output dimensions (= format at 300 DPI, aspect-ratio preserved)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
+      const actualTileCm = (PRINT_TILE_PX / PX_PER_CM).toFixed(2);
+      console.log(`[Print] Format: ${fmt.label}, cols: ${cols}, tileSizeCm: ${tileSizeCm.toFixed(2)}cm, PRINT_TILE_PX: ${PRINT_TILE_PX}px (${actualTileCm}cm@300dpi), output: ${printOutW}x${printOutH}px`);
 
       try {
         setLoading(true);
@@ -3209,14 +3215,36 @@ export default function Studio() {
             </div>
 
             {/* Printolino-Info-Box */}
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 text-xs text-blue-800">
-              <p className="font-bold mb-0.5">Printolino-konformes Format</p>
-              <p>
-                Dein Mosaik wird als RGB-PNG mit {PRINT_FORMATS[selectedFormat].dpi} dpi ausgegeben
-                ({PRINT_FORMATS[selectedFormat].pxW}x{PRINT_FORMATS[selectedFormat].pxH} px) -
-                optimiert fuer {PRINT_FORMATS[selectedFormat].label} Druck bei Printolino.
-              </p>
-            </div>
+            {(() => {
+              const fmt = PRINT_FORMATS[selectedFormat];
+              const cols = mosaicParamsRef.current?.cols ?? 60;
+              const rows = mosaicParamsRef.current?.rows ?? 80;
+              const PX_PER_CM = 300 / 2.54;
+              const tileSizeCm = fmt.widthCm / cols;
+              const printTilePx = Math.min(300, Math.max(118, Math.round(tileSizeCm * PX_PER_CM)));
+              const outW = cols * printTilePx;
+              const outH = rows * printTilePx;
+              const posterW = (cols * tileSizeCm).toFixed(0);
+              const posterH = (rows * tileSizeCm).toFixed(0);
+              return (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 text-xs text-blue-800">
+                  <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                    <span className="text-blue-600">Poster-Groesse:</span>
+                    <span className="font-semibold">{posterW} × {posterH} cm</span>
+                    <span className="text-blue-600">Kachel-Groesse:</span>
+                    <span className="font-semibold">{tileSizeCm.toFixed(1)} cm × {tileSizeCm.toFixed(1)} cm</span>
+                    <span className="text-blue-600">Kachel-Pixel:</span>
+                    <span className="font-semibold">{printTilePx} px ({fmt.dpi} dpi)</span>
+                    <span className="text-blue-600">Ausgabe-Pixel:</span>
+                    <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
+                    <span className="text-blue-600">Anzahl Kacheln:</span>
+                    <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
+                  </div>
+                  <p className="mt-1.5 text-blue-600">Optimiert fuer Printolino {fmt.label} Druck.</p>
+                </div>
+              );
+            })()}
 
             {/* Payment success banner */}
             {paymentSuccess && (
