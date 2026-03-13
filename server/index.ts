@@ -713,8 +713,8 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       await Promise.all(batch.map(async (id) => {
         const urls = urlMap[id];
         if (!urls) return;
-        // Check disk cache first (keyed by tile id)
-        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}.jpg`);
+        // Check disk cache first (keyed by tile id + size to avoid stale smaller tiles)
+        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.jpg`);
         if (fs.existsSync(cacheFile)) {
           try {
             tileBuffers[id] = fs.readFileSync(cacheFile);
