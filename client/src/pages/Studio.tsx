@@ -214,10 +214,10 @@ const PRINT_FORMATS = [
 ];
 
 const MATERIALS = [
-  { label: "Leinwand", surcharge: 0, icon: "??" },
-  { label: "Acrylglas", surcharge: 20, icon: "?" },
-  { label: "Alu-Dibond", surcharge: 15, icon: "?" },
-  { label: "Fotopapier", surcharge: -10, icon: "?" },
+  { label: "Leinwand", surcharge: 0, icon: "🖼️" },
+  { label: "Acrylglas", surcharge: 20, icon: "✨" },
+  { label: "Alu-Dibond", surcharge: 15, icon: "🔲" },
+  { label: "Fotopapier", surcharge: -10, icon: "📄" },
 ];
 
 export default function Studio() {
@@ -387,11 +387,16 @@ export default function Studio() {
     // zoom < 1.2 -> 64px tiles (preview, already loaded)
     // zoom 1.2-1.8 -> 128px tiles (medium zoom)
     // zoom > 1.8 -> 200px tiles (high zoom, crisp detail)
-    const HI_RES_THRESHOLD = 1.2;
-    const ULTRA_RES_THRESHOLD = 1.8;
+    // Mobile: höherer Threshold + kleinere Tiles = deutlich schneller
+    const _isMobileHR = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
+    const HI_RES_THRESHOLD = _isMobileHR ? 2.0 : 1.2;
+    const ULTRA_RES_THRESHOLD = _isMobileHR ? 3.5 : 1.8;
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // Determine which resolution tier to use
-    const hiResTileSize = zoom >= (ULTRA_RES_THRESHOLD) ? 200 : 128;
+    // Mobile: 64px (schnell) oder 128px (sehr hoher Zoom), Desktop: 128px oder 200px
+    const hiResTileSize = _isMobileHR
+      ? (zoom >= (ULTRA_RES_THRESHOLD) ? 128 : 64)
+      : (zoom >= (ULTRA_RES_THRESHOLD) ? 200 : 128);
     // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
     const hiResOpacity = showHiRes && hiResReady
       ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
@@ -420,6 +425,7 @@ export default function Studio() {
     // Only re-render if tile size tier changed (avoid redundant renders)
     if (hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
     const renderHiRes = async () => {
+      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
       setHiResLoading(true);
       const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
       const HIREZ_PX = hiResTileSize; // 128px at medium zoom, 200px at high zoom
@@ -435,7 +441,10 @@ export default function Studio() {
 
       // FIX A: Load only UNIQUE tile indices (deduplicate) - massive speedup
       // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
-      const uniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
+      const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
+      // Mobile: limit unique tiles to avoid loading too many images at once
+      const MAX_HIRES_TILES = isMobileDevice ? 300 : 2000;
+      const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
 
       // PERF: For DB tiles, fetch direct tile128_urls in one batch request
       // This avoids proxying each tile through the Railway server (saves 300-800ms per tile)
@@ -474,7 +483,7 @@ export default function Studio() {
 
       // Map: tile index -> loaded hi-res image
       const hiResImgMap = new Map<number, HTMLImageElement>();
-      const BATCH = 60; // larger batch for direct URLs (no proxy bottleneck)
+      const BATCH = isMobileDevice ? 20 : 60; // smaller batch on mobile to avoid memory pressure
       for (let i = 0; i < uniqueIndices.length; i += (BATCH)) {
         const batchIndices = uniqueIndices.slice(i, i + BATCH);
         const batchImgs = await Promise.all(
@@ -718,18 +727,18 @@ export default function Studio() {
 
             // Top 3 Themen nach Score, Mindest-Score 0.3
             const THEME_META: Record<string, {label: string; emoji: string}> = {
-              sunset: { label: 'Sunset', emoji: '?' },
-              ocean: { label: 'Ozean', emoji: '?' },
-              nature: { label: 'Natur', emoji: '?' },
-              urban: { label: 'Urban', emoji: '??' },
-              abstract: { label: 'Abstrakt', emoji: '?' },
-              winter: { label: 'Winter', emoji: '??' },
-              portrait: { label: 'Portrait', emoji: '?' },
-              food: { label: 'Food', emoji: '?' },
-              travel: { label: 'Reise', emoji: '??' },
-              animals: { label: 'Tiere', emoji: '?' },
-              flowers: { label: 'Blumen', emoji: '?' },
-              space: { label: 'Space', emoji: '?' },
+              sunset: { label: 'Sunset', emoji: '🌅' },
+              ocean: { label: 'Ozean', emoji: '🌊' },
+              nature: { label: 'Natur', emoji: '🌿' },
+              urban: { label: 'Urban', emoji: '🏙️' },
+              abstract: { label: 'Abstrakt', emoji: '🎨' },
+              winter: { label: 'Winter', emoji: '❄️' },
+              portrait: { label: 'Portrait', emoji: '👤' },
+              food: { label: 'Food', emoji: '🍕' },
+              travel: { label: 'Reise', emoji: '✈️' },
+              animals: { label: 'Tiere', emoji: '🐾' },
+              flowers: { label: 'Blumen', emoji: '🌸' },
+              space: { label: 'Space', emoji: '🌌' },
             };
             const sorted = Object.entries(themeScores)
               .filter(([, s]) => s > 0.3)
@@ -2466,19 +2475,19 @@ export default function Studio() {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Thema waehlen</p>
             <div className="flex flex-wrap gap-2 justify-center">
               {[
-                { key: 'alle', label: 'Alle', emoji: '?' },
-                { key: 'sunset', label: 'Sunset', emoji: '?' },
-                { key: 'nature', label: 'Natur', emoji: '?' },
-                { key: 'urban', label: 'Urban', emoji: '??' },
-                { key: 'portrait', label: 'Portrait', emoji: '?' },
-                { key: 'abstract', label: 'Abstrakt', emoji: '?' },
-                { key: 'food', label: 'Food', emoji: '?' },
-                { key: 'travel', label: 'Reise', emoji: '??' },
-                { key: 'ocean', label: 'Ozean', emoji: '?' },
-                { key: 'winter', label: 'Winter', emoji: '??' },
-                { key: 'animals', label: 'Tiere', emoji: '?' },
-                { key: 'flowers', label: 'Blumen', emoji: '?' },
-                { key: 'space', label: 'Space', emoji: '?' },
+                { key: 'alle', label: 'Alle', emoji: '🌈' },
+                { key: 'sunset', label: 'Sunset', emoji: '🌅' },
+                { key: 'nature', label: 'Natur', emoji: '🌿' },
+                { key: 'urban', label: 'Urban', emoji: '🏙️' },
+                { key: 'portrait', label: 'Portrait', emoji: '👤' },
+                { key: 'abstract', label: 'Abstrakt', emoji: '🎨' },
+                { key: 'food', label: 'Food', emoji: '🍕' },
+                { key: 'travel', label: 'Reise', emoji: '✈️' },
+                { key: 'ocean', label: 'Ozean', emoji: '🌊' },
+                { key: 'winter', label: 'Winter', emoji: '❄️' },
+                { key: 'animals', label: 'Tiere', emoji: '🐾' },
+                { key: 'flowers', label: 'Blumen', emoji: '🌸' },
+                { key: 'space', label: 'Space', emoji: '🌌' },
               ].map(({ key, label, emoji }) => (
                 <button
                   key={key}
