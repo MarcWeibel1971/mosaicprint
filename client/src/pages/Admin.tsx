@@ -2066,7 +2066,19 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       setRuns(rows)
       // Auto-refresh while any check is running
       const anyRunning = rows.some((r: QaRun) => r.status === 'running')
-      if (anyRunning) setTimeout(() => setLastRefresh(Date.now()), 2000)
+      if (anyRunning) setTimeout(() => setLastRefresh(Date.now()), 1500)
+      // Detect newly completed checks and notify
+      setRuns(prev => {
+        for (const newRun of rows) {
+          const old = prev.find(p => p.id === newRun.id)
+          if (old?.status === 'running' && (newRun.status === 'success' || newRun.status === 'warning' || newRun.status === 'error')) {
+            const dur = newRun.finishedAt ? Math.round((new Date(newRun.finishedAt).getTime() - new Date(newRun.startedAt).getTime()) / 1000) : 0
+            const emoji = newRun.status === 'success' ? '✅' : newRun.status === 'warning' ? '⚠️' : '❌'
+            onMessage({ text: `${emoji} ${newRun.checkType} abgeschlossen (${dur}s)`, type: newRun.status === 'error' ? 'error' : 'success' })
+          }
+        }
+        return rows
+      })
     } catch { /* ignore */ }
   }, [])
 
@@ -2318,16 +2330,34 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         {QA_CHECKS.map(check => {
           const lastRun = lastRunByType[check.id]
           const isRunning = runningChecks.has(check.id) || lastRun?.status === 'running'
+          const isDone = lastRun && !isRunning
+          const isSuccess = isDone && lastRun.status === 'success'
+          const isWarning = isDone && lastRun.status === 'warning'
+          const isError = isDone && lastRun.status === 'error'
+          const dur = lastRun?.finishedAt
+            ? Math.round((new Date(lastRun.finishedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000)
+            : null
+          const cardBorder = isRunning ? 'border-blue-300 shadow-blue-100 shadow-md'
+            : isSuccess ? 'border-green-300'
+            : isWarning ? 'border-amber-300'
+            : isError ? 'border-red-300'
+            : 'border-gray-200'
           return (
-            <div key={check.id} className="bg-white rounded-2xl p-5 border border-gray-200 flex flex-col gap-3">
+            <div key={check.id} className={`bg-white rounded-2xl p-5 border-2 flex flex-col gap-3 transition-all ${cardBorder}`}>
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-2xl">{check.icon}</span>
                   <div>
                     <h3 className="font-bold text-gray-900 text-sm">{check.label}</h3>
-                    {lastRun && (
-                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor(lastRun.status)}`}>
-                        {statusEmoji(lastRun.status)} {lastRun.status}
+                    {isRunning && (
+                      <span className="text-xs font-medium px-2 py-0.5 rounded-full text-blue-700 bg-blue-50 flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" /> Läuft...
+                      </span>
+                    )}
+                    {isDone && (
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColor(lastRun.status)}`}>
+                        {statusEmoji(lastRun.status)} {isSuccess ? 'Fertig' : isWarning ? 'Warnung' : 'Fehler'}
+                        {dur !== null && ` · ${dur}s`}
                       </span>
                     )}
                   </div>
@@ -2342,26 +2372,36 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                 </button>
               </div>
               <p className="text-xs text-gray-500">{check.desc}</p>
-              {lastRun && (
-                <div className="border-t border-gray-100 pt-3 mt-auto">
-                  <div className="text-xs text-gray-400 mb-2">
-                    Letzter Run: {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                    {lastRun.finishedAt && ` (${Math.round((new Date(lastRun.finishedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000)}s)`}
-                  </div>
-                  {lastRun.summary && (
-                    <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 font-mono">
-                      {Object.entries(lastRun.summary).slice(0, 4).map(([k, v]) => (
-                        <div key={k}>{k}: <span className="font-semibold">{String(v)}</span></div>
-                      ))}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setSelectedRun(selectedRun === lastRun.id ? null : lastRun.id)}
-                    className="mt-2 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                  >
-                    {selectedRun === lastRun.id ? '▲ Details ausblenden' : '▼ Details anzeigen'}
-                  </button>
+              {/* Fertig-Banner */}
+              {isSuccess && (
+                <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 font-medium">
+                  ✅ Abgeschlossen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
                 </div>
+              )}
+              {isWarning && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 font-medium">
+                  ⚠️ Mit Warnungen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
+                </div>
+              )}
+              {isError && (
+                <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 font-medium">
+                  ❌ Fehler · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
+                </div>
+              )}
+              {lastRun?.summary && (
+                <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 font-mono border-t border-gray-100">
+                  {Object.entries(lastRun.summary).slice(0, 4).map(([k, v]) => (
+                    <div key={k}>{k}: <span className="font-semibold">{String(v)}</span></div>
+                  ))}
+                </div>
+              )}
+              {lastRun && (
+                <button
+                  onClick={() => setSelectedRun(selectedRun === lastRun.id ? null : lastRun.id)}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium text-left"
+                >
+                  {selectedRun === lastRun.id ? '▲ Details ausblenden' : '▼ Details anzeigen'}
+                </button>
               )}
             </div>
           )
