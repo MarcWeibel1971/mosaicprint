@@ -191,7 +191,43 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_qc_items_run_id ON quality_check_items (run_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_qc_items_status ON quality_check_items (status)`);
 
-  console.log("[DB] Schema ensured (v2 with QA tables)");
+  // ── Image categories table ───────────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS image_categories (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL,
+      description TEXT,
+      parent_category TEXT DEFAULT NULL,
+      keywords TEXT[] DEFAULT '{}',
+      algo_settings JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Seed default categories
+  await pool.query(`
+    INSERT INTO image_categories (name, label, description, parent_category, keywords) VALUES
+      ('portrait_light_skin', 'Portrait – helle Haut', 'Helle Hauttöne, blondes/rotes Haar', 'portrait', ARRAY['portrait light skin', 'blonde woman', 'fair skin face', 'caucasian portrait']),
+      ('portrait_medium_skin', 'Portrait – mittlere Haut', 'Mittlere Hauttöne, braunes Haar', 'portrait', ARRAY['portrait medium skin', 'brown hair face', 'olive skin portrait']),
+      ('portrait_dark_skin', 'Portrait – dunkle Haut', 'Dunkle Hauttöne', 'portrait', ARRAY['dark skin portrait', 'african portrait', 'melanin skin face']),
+      ('portrait_grey_hair', 'Portrait – graues Haar / Brille', 'Ältere Person, graues Haar, Brille', 'portrait', ARRAY['elderly portrait glasses', 'grey hair face', 'senior portrait']),
+      ('portrait_child', 'Portrait – Kind / Baby', 'Kinderhaut, weiche Töne', 'portrait', ARRAY['child portrait', 'baby face', 'kid smile']),
+      ('portrait_group', 'Portrait – Gruppe', 'Mehrere Personen, verschiedene Hauttöne', 'portrait', ARRAY['group portrait', 'family photo', 'people together']),
+      ('nature_sunset', 'Natur – Sonnenuntergang', 'Warme Orangetöne, Himmel', 'nature', ARRAY['sunset orange sky', 'golden hour landscape', 'sunrise warm']),
+      ('nature_ocean', 'Natur – Ozean / Meer', 'Blaue kühle Töne, Wasser', 'nature', ARRAY['ocean blue water', 'sea waves', 'beach turquoise']),
+      ('nature_forest', 'Natur – Wald / Grün', 'Grüne Töne, Vegetation', 'nature', ARRAY['green forest trees', 'jungle foliage', 'meadow grass']),
+      ('nature_snow', 'Natur – Schnee / Winter', 'Helle kühle Töne, Weiss', 'nature', ARRAY['snow white winter', 'frost ice', 'mountain snow']),
+      ('nature_mountain', 'Natur – Berge', 'Fels, Schnee, Himmel', 'nature', ARRAY['mountain peaks', 'rocky landscape', 'alpine scenery']),
+      ('city_night', 'Stadt – Nacht / Skyline', 'Dunkle Töne, Lichter', 'city', ARRAY['city night lights', 'skyline neon', 'urban dark']),
+      ('city_architecture', 'Stadt – Architektur', 'Gebäude, Strukturen', 'city', ARRAY['architecture building', 'urban facade', 'city street']),
+      ('animal_warm', 'Tier – Erdtöne', 'Löwe, Hund, warme Töne', 'animal', ARRAY['lion fur warm', 'dog portrait', 'animal earth tones']),
+      ('animal_colorful', 'Tier – Bunt', 'Vogel, Fisch, bunte Töne', 'animal', ARRAY['colorful bird', 'tropical fish', 'parrot feathers']),
+      ('abstract_colorful', 'Abstrakt – Farbenreich', 'Breites Farbspektrum', 'abstract', ARRAY['colorful abstract', 'rainbow colors', 'vibrant spectrum'])
+    ON CONFLICT (name) DO NOTHING
+  `);
+
+  console.log("[DB] Schema ensured (v3 with image_categories)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
@@ -500,4 +536,45 @@ export async function getPoolLABStats(): Promise<Array<{avgL: number; avgA: numb
     avgB: Number(r.avgB),
     count: Number(r.count),
   }));
+}
+
+// ── Image Categories ──────────────────────────────────────────────────────────
+export async function getImageCategories(): Promise<any[]> {
+  const pool = getPool();
+  const res = await pool.query(`SELECT * FROM image_categories ORDER BY parent_category, name`);
+  return res.rows;
+}
+
+export async function getImageCategory(name: string): Promise<any | null> {
+  const pool = getPool();
+  const res = await pool.query(`SELECT * FROM image_categories WHERE name = $1`, [name]);
+  return res.rows[0] ?? null;
+}
+
+export async function saveImageCategoryAlgoSettings(name: string, algoSettings: object): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE image_categories SET algo_settings = $1, updated_at = NOW() WHERE name = $2`,
+    [JSON.stringify(algoSettings), name]
+  );
+}
+
+export async function upsertImageCategory(data: {
+  name: string; label: string; description?: string;
+  parentCategory?: string; keywords?: string[]; algoSettings?: object;
+}): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO image_categories (name, label, description, parent_category, keywords, algo_settings)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (name) DO UPDATE SET
+       label = $2, description = $3, parent_category = $4,
+       keywords = $5, algo_settings = $6, updated_at = NOW()`,
+    [
+      data.name, data.label, data.description ?? null,
+      data.parentCategory ?? null,
+      data.keywords ?? [],
+      JSON.stringify(data.algoSettings ?? {}),
+    ]
+  );
 }

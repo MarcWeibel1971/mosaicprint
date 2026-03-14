@@ -2147,6 +2147,68 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const [testImageFile, setTestImageFile] = useState<{ name: string; base64: string; preview: string } | null>(null)
   const [testAnalysis, setTestAnalysis] = useState<Record<string, unknown> | null>(null)
   const [testAnalyzing, setTestAnalyzing] = useState(false)
+  const [detectedCategory, setDetectedCategory] = useState<string | null>(null)
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [categories, setCategories] = useState<Array<{name: string; label: string; parent_category: string; keywords: string[]; algo_settings: Record<string, unknown>; description: string}>>([])  
+  const [showCategoryProfiles, setShowCategoryProfiles] = useState(false)
+  const [selectedCategoryProfile, setSelectedCategoryProfile] = useState<string | null>(null)
+
+  // Load categories from DB
+  const fetchCategories = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trpc/getImageCategories')
+      const data = await res.json()
+      const result = data.result?.data?.json ?? data.result?.data ?? data
+      if (Array.isArray(result)) setCategories(result)
+    } catch { /* ignore */ }
+  }, [])
+  useEffect(() => { fetchCategories() }, [fetchCategories])
+
+  // Detect category from LAB zones
+  const detectCategory = (labZones: Array<{L: number; a: number; b: number; count: number}>): string | null => {
+    if (!labZones || labZones.length === 0) return null
+    const avgL = labZones.reduce((s, z) => s + z.L * z.count, 0) / labZones.reduce((s, z) => s + z.count, 0)
+    const avgA = labZones.reduce((s, z) => s + z.a * z.count, 0) / labZones.reduce((s, z) => s + z.count, 0)
+    const avgB = labZones.reduce((s, z) => s + z.b * z.count, 0) / labZones.reduce((s, z) => s + z.count, 0)
+    // Skin tone detection: warm, medium L, low chroma
+    const chroma = Math.sqrt(avgA * avgA + avgB * avgB)
+    const isSkinTone = chroma < 30 && avgL > 35 && avgL < 85 && avgA > 0 && avgB > 0
+    if (isSkinTone) {
+      if (avgL > 70) return 'portrait_light_skin'
+      if (avgL > 55) return 'portrait_medium_skin'
+      return 'portrait_dark_skin'
+    }
+    // Blue/cool = ocean or sky
+    if (avgA < -5 && avgB < -5 && avgL > 40) return 'nature_ocean'
+    // Green = forest
+    if (avgA < -8 && avgB > 0) return 'nature_forest'
+    // Warm orange/red = sunset
+    if (avgA > 10 && avgB > 15 && avgL > 40 && avgL < 75) return 'nature_sunset'
+    // Very bright + cool = snow
+    if (avgL > 75 && chroma < 15) return 'nature_snow'
+    // Dark + low chroma = city night
+    if (avgL < 35 && chroma < 20) return 'city_night'
+    return null
+  }
+
+  const saveProfileForCategory = async (categoryName: string) => {
+    setSavingProfile(true)
+    try {
+      const currentSettings = loadSettings()
+      const res = await fetch('/api/trpc/saveImageCategoryAlgoSettings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categoryName, algoSettings: currentSettings }),
+      })
+      const data = await res.json()
+      if (data.result?.data?.json?.ok || data.result?.data?.ok) {
+        onMessage({ text: `✅ Algorithmus-Profil für "${categories.find(c => c.name === categoryName)?.label ?? categoryName}" gespeichert`, type: 'success' })
+        fetchCategories()
+      }
+    } catch (e) {
+      onMessage({ text: `Fehler beim Speichern: ${String(e)}`, type: 'error' })
+    } finally { setSavingProfile(false) }
+  }
 
   const downloadPdfReport = useCallback(async () => {
     setPdfGenerating(true)
@@ -2280,13 +2342,62 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     e.target.value = ''
   }, [onMessage])
 
+  // Client-side LAB computation via Canvas (no server-side image processing needed)
+  const computeLabZonesFromImage = useCallback((src: string): Promise<Array<{L: number; a: number; b: number; count: number}>> => {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        const SIZE = 64
+        const canvas = document.createElement('canvas')
+        canvas.width = SIZE; canvas.height = SIZE
+        const ctx = canvas.getContext('2d')!
+        ctx.drawImage(img, 0, 0, SIZE, SIZE)
+        const { data } = ctx.getImageData(0, 0, SIZE, SIZE)
+        const zones: Record<string, {L: number; a: number; b: number; count: number}> = {}
+        for (let i = 0; i < data.length; i += 4 * 2) { // sample every 2nd pixel
+          const r = data[i], g = data[i+1], b2 = data[i+2]
+          // sRGB -> linear
+          const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92 }
+          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b2)
+          // linear -> XYZ
+          const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047
+          const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000
+          const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883
+          const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116
+          const L = Math.round((116*f(y) - 16) / 8) * 8
+          const a = Math.round((500*(f(x)-f(y))) / 8) * 8
+          const bv = Math.round((200*(f(y)-f(z))) / 8) * 8
+          const key = `${L},${a},${bv}`
+          if (!zones[key]) zones[key] = { L, a, b: bv, count: 0 }
+          zones[key].count++
+        }
+        resolve(Object.values(zones).sort((a, b) => b.count - a.count).slice(0, 30))
+      }
+      img.onerror = () => resolve([])
+      img.src = src
+    })
+  }, [])
+
   const runTestAnalysis = useCallback(async () => {
     if (!testImageUrl.trim() && !testImageFile) return
     setTestAnalyzing(true); setTestAnalysis(null)
     try {
-      const body = testImageFile
-        ? { imageBase64: testImageFile.base64 }
-        : { imageUrl: testImageUrl.trim() }
+      // Compute LAB zones client-side (no sharp needed on server)
+      let labZones: Array<{L: number; a: number; b: number; count: number}> = []
+      let imageError = ''
+      const imageSrc = testImageFile ? testImageFile.base64 : testImageUrl.trim()
+      try {
+        labZones = await computeLabZonesFromImage(imageSrc)
+        if (labZones.length === 0) imageError = 'Canvas konnte Bild nicht lesen'
+      } catch (e) {
+        imageError = String(e)
+      }
+      const body = {
+        imageUrl: testImageFile ? undefined : testImageUrl.trim(),
+        labZones,
+        imageError: imageError || undefined,
+      }
       const res = await fetch('/api/trpc/analyzeTestImage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2295,10 +2406,15 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       const data = await res.json()
       const result = data.result?.data?.json ?? data.result?.data
       setTestAnalysis(result)
+      // Auto-detect category from LAB zones
+      if (labZones.length > 0) {
+        const cat = detectCategory(labZones)
+        setDetectedCategory(cat)
+      }
     } catch (e) {
       onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
     } finally { setTestAnalyzing(false) }
-  }, [testImageUrl, testImageFile, onMessage])
+  }, [testImageUrl, testImageFile, computeLabZonesFromImage, onMessage])
 
   return (
     <div className="space-y-8">

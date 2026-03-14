@@ -602,6 +602,7 @@ function rgbPixelsToLab(px: Buffer, pixelCount: number): { L: number; a: number;
 
 // Compute global LAB + 4-quadrant LAB from a URL (fetches image once, resizes to 8x8)
 // Returns global + TL/TR/BL/BR quadrant LAB values
+// Uses Jimp (pure JS, no native binaries) instead of sharp for Railway compatibility
 async function computeLabFull(url: string): Promise<{
   L: number; a: number; b: number;
   tlL: number; tlA: number; tlB: number;
@@ -610,24 +611,34 @@ async function computeLabFull(url: string): Promise<{
   brL: number; brA: number; brB: number;
 } | null> {
   try {
-    const sharp = (await import("sharp")).default;
-    let buf: Buffer;
+    const { Jimp } = await import("jimp");
+    let image: InstanceType<typeof Jimp>;
     if (url.startsWith("data:")) {
-      // data URL: decode base64 directly
       const b64 = url.split(",")[1];
-      buf = Buffer.from(b64, "base64");
+      const buf = Buffer.from(b64, "base64");
+      image = await Jimp.fromBuffer(buf);
     } else {
       const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!resp.ok) return null;
-      buf = Buffer.from(await resp.arrayBuffer());
+      const buf = Buffer.from(await resp.arrayBuffer());
+      image = await Jimp.fromBuffer(buf);
     }
     // Resize to 8x8 for global + quadrant extraction
-    // 8x8 = 64 pixels, quadrants = 4x4 each (TL, TR, BL, BR)
-    const { data: px } = await sharp(buf).resize(8, 8, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    image.resize({ w: 8, h: 8 });
+    // Extract raw RGB pixels from 8x8 image
+    const px = Buffer.allocUnsafe(8 * 8 * 3);
+    let pi = 0;
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const rgba = image.getPixelColor(x, y);
+        px[pi++] = (rgba >> 24) & 0xff; // R
+        px[pi++] = (rgba >> 16) & 0xff; // G
+        px[pi++] = (rgba >> 8)  & 0xff; // B
+      }
+    }
     // Global LAB (all 64 pixels)
     const global = rgbPixelsToLab(px, 64);
     // Extract quadrant pixels: 8x8 image, each quadrant is 4x4 = 16 pixels
-    // Row-major: pixel(x,y) = px[(y*8 + x) * 3]
     const extractQuadrant = (startX: number, startY: number): Buffer => {
       const qpx = Buffer.allocUnsafe(16 * 3);
       let qi = 0;
@@ -639,10 +650,10 @@ async function computeLabFull(url: string): Promise<{
       }
       return qpx;
     };
-    const tl = rgbPixelsToLab(extractQuadrant(0, 0), 16); // top-left
-    const tr = rgbPixelsToLab(extractQuadrant(4, 0), 16); // top-right
-    const bl = rgbPixelsToLab(extractQuadrant(0, 4), 16); // bottom-left
-    const br = rgbPixelsToLab(extractQuadrant(4, 4), 16); // bottom-right
+    const tl = rgbPixelsToLab(extractQuadrant(0, 0), 16);
+    const tr = rgbPixelsToLab(extractQuadrant(4, 0), 16);
+    const bl = rgbPixelsToLab(extractQuadrant(0, 4), 16);
+    const br = rgbPixelsToLab(extractQuadrant(4, 4), 16);
     return {
       L: global.L, a: global.a, b: global.b,
       tlL: tl.L, tlA: tl.a, tlB: tl.b,
@@ -686,48 +697,50 @@ type QualityResult = {
 async function checkTileQuality(url: string): Promise<QualityResult> {
   const defaultPass: QualityResult = { saturation: 0, edgeEnergy: 0, hasBrightBand: false, rejected: false, reason: '' };
   try {
-    const sharp = (await import('sharp')).default;
+    const { Jimp } = await import('jimp');
     let buf: Buffer;
     if (url.startsWith('data:')) {
       buf = Buffer.from(url.split(',')[1], 'base64');
     } else {
       const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      if (!resp.ok) return defaultPass; // can't fetch → don't reject
+      if (!resp.ok) return defaultPass;
       buf = Buffer.from(await resp.arrayBuffer());
     }
 
+    const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+
     // ── 1. Saturation check (16×16 pixels, LAB chroma) ──
     const SIZE = 16;
-    const { data: px16 } = await sharp(buf)
-      .resize(SIZE, SIZE, { fit: 'fill' })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
+    const img16 = await Jimp.fromBuffer(buf);
+    img16.resize({ w: SIZE, h: SIZE });
     let chromaSum = 0;
-    const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
-    for (let i = 0; i < px16.length; i += 3) {
-      const rl = toLinear(px16[i]), gl = toLinear(px16[i + 1]), bl = toLinear(px16[i + 2]);
-      const X = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
-      const Y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750;
-      const Z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041;
-      const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
-      const labA = 500 * (f(X / 0.95047) - f(Y));
-      const labB = 200 * (f(Y) - f(Z / 1.08883));
-      chromaSum += Math.sqrt(labA * labA + labB * labB);
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        const rgba = img16.getPixelColor(x, y);
+        const rl = toLinear((rgba >> 24) & 0xff);
+        const gl = toLinear((rgba >> 16) & 0xff);
+        const bl = toLinear((rgba >> 8) & 0xff);
+        const X = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
+        const Y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750;
+        const Z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041;
+        const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+        const labA = 500 * (f(X / 0.95047) - f(Y));
+        const labB = 200 * (f(Y) - f(Z / 1.08883));
+        chromaSum += Math.sqrt(labA * labA + labB * labB);
+      }
     }
-    const avgChroma = chromaSum / (SIZE * SIZE);
-    // Max LAB chroma ≈ 180 (vivid red/green). Normalise to 0-1.
-    const saturation = Math.min(1, avgChroma / 100);
+    const saturation = Math.min(1, (chromaSum / (SIZE * SIZE)) / 100);
 
     // ── 2. Edge energy check (Sobel on grayscale, 32×32 pixels) ──
     const ESIZE = 32;
-    const { data: gray } = await sharp(buf)
-      .resize(ESIZE, ESIZE, { fit: 'fill' })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
+    const imgE = await Jimp.fromBuffer(buf);
+    imgE.resize({ w: ESIZE, h: ESIZE }).greyscale();
+    const gray = new Uint8Array(ESIZE * ESIZE);
+    for (let y = 0; y < ESIZE; y++) {
+      for (let x = 0; x < ESIZE; x++) {
+        gray[y * ESIZE + x] = (imgE.getPixelColor(x, y) >> 24) & 0xff;
+      }
+    }
     let edgeSum = 0;
     for (let y = 1; y < ESIZE - 1; y++) {
       for (let x = 1; x < ESIZE - 1; x++) {
@@ -737,22 +750,17 @@ async function checkTileQuality(url: string): Promise<QualityResult> {
         edgeSum += Math.sqrt(gx * gx + gy * gy);
       }
     }
-    // Max Sobel per pixel ≈ 1442 (255*4*sqrt(2)). Normalise to 0-1.
     const edgeEnergy = Math.min(1, edgeSum / ((ESIZE - 2) * (ESIZE - 2) * 400));
 
     // ── 3. Bright-band watermark detection (Shutterstock-style) ──
-    // Check bottom 15% of image for a horizontal stripe of very bright pixels
     const WSIZE = 64;
-    const { data: wPx } = await sharp(buf)
-      .resize(WSIZE, WSIZE, { fit: 'fill' })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    const bandStart = Math.floor(WSIZE * 0.80); // bottom 20%
+    const imgW = await Jimp.fromBuffer(buf);
+    imgW.resize({ w: WSIZE, h: WSIZE }).greyscale();
+    const bandStart = Math.floor(WSIZE * 0.80);
     let brightCount = 0, totalBandPx = 0;
     for (let y = bandStart; y < WSIZE; y++) {
       for (let x = 0; x < WSIZE; x++) {
-        if (wPx[y * WSIZE + x] > 230) brightCount++;
+        if (((imgW.getPixelColor(x, y) >> 24) & 0xff) > 230) brightCount++;
         totalBandPx++;
       }
     }
@@ -1644,9 +1652,11 @@ export const appRouter = router({
   uploadTileImage: publicProcedure
     .input(z.object({ base64: z.string(), mimeType: z.string().default("image/jpeg") }))
     .mutation(async ({ input }) => {
-      const sharp = (await import("sharp")).default;
+      const { Jimp } = await import("jimp");
       const buf = Buffer.from(input.base64, "base64");
-      const thumb = await sharp(buf).resize(128, 128, { fit: "cover" }).jpeg({ quality: 85 }).toBuffer();
+      const img = await Jimp.fromBuffer(buf);
+      img.resize({ w: 128, h: 128 });
+      const thumb = await img.getBuffer("image/jpeg", { quality: 85 });
       const tile128Url = "data:image/jpeg;base64," + thumb.toString("base64");
       const lab = await computeLabFull(tile128Url).catch(() => null);
       await db.insertMosaicImage({ sourceUrl: tile128Url, tile128Url,
@@ -1737,83 +1747,49 @@ export const appRouter = router({
       });
     }),
 
-  // ── Analyse Testbild gegen Pool ───────────────────────────────────────────
+  // ── Image Categories ────────────────────────────────────────────────────────────
+  getImageCategories: publicProcedure
+    .query(async () => {
+      return await db.getImageCategories();
+    }),
+
+  saveImageCategoryAlgoSettings: publicProcedure
+    .input(z.object({
+      categoryName: z.string(),
+      algoSettings: z.record(z.unknown()),
+    }))
+    .mutation(async ({ input }) => {
+      await db.saveImageCategoryAlgoSettings(input.categoryName, input.algoSettings);
+      return { ok: true };
+    }),
+
+  upsertImageCategory: publicProcedure
+    .input(z.object({
+      name: z.string(),
+      label: z.string(),
+      description: z.string().optional(),
+      parentCategory: z.string().optional(),
+      keywords: z.array(z.string()).optional(),
+      algoSettings: z.record(z.unknown()).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      await db.upsertImageCategory(input);
+      return { ok: true };
+    }),
+
+  // ── Analyse Testbild gegen Pool ─────────────────────────────────────────────────────
   analyzeTestImage: publicProcedure
     .input(z.object({
-      imageUrl: z.string().url().optional(),
-      imageBase64: z.string().optional(), // base64-encoded image (data URI or raw base64)
-    }).refine(d => d.imageUrl || d.imageBase64, { message: 'imageUrl or imageBase64 required' }))
+      imageUrl: z.string().optional(), // kept for display only
+      // LAB zones pre-computed by client-side Canvas (avoids server-side image processing)
+      labZones: z.array(z.object({
+        L: z.number(), a: z.number(), b: z.number(), count: z.number()
+      })).optional(),
+      imageError: z.string().optional(),
+    }))
     .mutation(async ({ input }) => {
-      // Fetch image and compute average LAB via pixel sampling (using sharp)
-      const https = await import('https');
-      const http = await import('http');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let sharp: any = null;
-      try { sharp = require('sharp'); } catch { /* sharp not available */ }
-
-      // Helper: RGB -> LAB
-      const rgbToLab = (r: number, g: number, b: number) => {
-        let rr = r / 255, gg = g / 255, bb = b / 255;
-        rr = rr > 0.04045 ? Math.pow((rr + 0.055) / 1.055, 2.4) : rr / 12.92;
-        gg = gg > 0.04045 ? Math.pow((gg + 0.055) / 1.055, 2.4) : gg / 12.92;
-        bb = bb > 0.04045 ? Math.pow((bb + 0.055) / 1.055, 2.4) : bb / 12.92;
-        const x = (rr * 0.4124 + gg * 0.3576 + bb * 0.1805) / 0.95047;
-        const y = (rr * 0.2126 + gg * 0.7152 + bb * 0.0722) / 1.00000;
-        const z = (rr * 0.0193 + gg * 0.1192 + bb * 0.9505) / 1.08883;
-        const fx = x > 0.008856 ? Math.cbrt(x) : 7.787 * x + 16/116;
-        const fy = y > 0.008856 ? Math.cbrt(y) : 7.787 * y + 16/116;
-        const fz = z > 0.008856 ? Math.cbrt(z) : 7.787 * z + 16/116;
-        return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
-      };
-
-      // Fetch image buffer
-      const fetchBuffer = (url: string): Promise<Buffer> => new Promise((resolve, reject) => {
-        const mod = url.startsWith('https') ? https : http;
-        (mod as typeof https).get(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' } }, (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => resolve(Buffer.concat(chunks)));
-          res.on('error', reject);
-        }).on('error', reject);
-      });
-
-      // Analyse image LAB distribution using sharp
-      let imageLABZones: Array<{L: number; a: number; b: number; count: number}> = [];
-      let imageError = '';
-
-      try {
-        if (!sharp) throw new Error('sharp not available');
-        let buf: Buffer;
-        if (input.imageBase64) {
-          // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
-          const b64 = input.imageBase64.includes(',') ? input.imageBase64.split(',')[1] : input.imageBase64;
-          buf = Buffer.from(b64, 'base64');
-        } else {
-          buf = await fetchBuffer(input.imageUrl!);
-        }
-        // Resize to 64x64 and get raw RGB pixels via sharp
-        const { data, info } = await sharp(buf)
-          .resize(64, 64, { fit: 'fill' })
-          .removeAlpha()
-          .raw()
-          .toBuffer({ resolveWithObject: true });
-        const pixels = data as Buffer;
-        const channels = info.channels; // should be 3 (RGB)
-        const zones: Record<string, {L: number; a: number; b: number; count: number}> = {};
-        for (let i = 0; i < pixels.length; i += channels * 4) { // sample every 4th pixel
-          const r = pixels[i], g = pixels[i+1], b2 = pixels[i+2];
-          const lab = rgbToLab(r, g, b2);
-          const zL = Math.round(lab.L / 8) * 8;
-          const zA = Math.round(lab.a / 8) * 8;
-          const zB = Math.round(lab.b / 8) * 8;
-          const key = `${zL},${zA},${zB}`;
-          if (!zones[key]) zones[key] = { L: zL, a: zA, b: zB, count: 0 };
-          zones[key].count++;
-        }
-        imageLABZones = Object.values(zones).sort((a, b) => b.count - a.count).slice(0, 30);
-      } catch (e) {
-        imageError = String(e);
-      }
+      const imageLABZones: Array<{L: number; a: number; b: number; count: number}> = input.labZones ?? [];
+      const imageError = input.imageError ?? (imageLABZones.length === 0 ? 'Keine LAB-Zonen vom Client empfangen' : '');
 
       // Get pool LAB distribution
       const poolStats = await db.getPoolLABStats();
@@ -1864,7 +1840,7 @@ export const appRouter = router({
 
       return {
         imageUrl: input.imageUrl ?? '(uploaded file)',
-        imageError,
+        imageError: imageError,
         dominantZones: imageLABZones.slice(0, 10),
         gapZones: gapZones.slice(0, 10),
         keywordSuggestions: uniqueKeywords.slice(0, 12),
