@@ -466,3 +466,27 @@ export async function markMosaicOrderPaid(stripeSessionId: string, exportUrl?: s
     [exportUrl ?? null, stripeSessionId]
   );
 }
+
+// ── Pool LAB Stats (für Testbild-Analyse) ────────────────────────────────────
+export async function getPoolLABStats(): Promise<Array<{avgL: number; avgA: number; avgB: number; count: number}>> {
+  const pool = getPool();
+  // Quantize LAB values to 8-unit grid and count tiles per zone
+  const res = await pool.query(`
+    SELECT
+      ROUND(avg_l / 8) * 8 AS "avgL",
+      ROUND(avg_a / 8) * 8 AS "avgA",
+      ROUND(avg_b / 8) * 8 AS "avgB",
+      COUNT(*) AS count
+    FROM mosaic_images
+    WHERE avg_l IS NOT NULL AND lab_indexed = true
+    GROUP BY 1, 2, 3
+    ORDER BY count DESC
+    LIMIT 500
+  `);
+  return res.rows.map((r: {avgL: string; avgA: string; avgB: string; count: string}) => ({
+    avgL: Number(r.avgL),
+    avgA: Number(r.avgA),
+    avgB: Number(r.avgB),
+    count: Number(r.count),
+  }));
+}

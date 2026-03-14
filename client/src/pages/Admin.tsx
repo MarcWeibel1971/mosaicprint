@@ -961,6 +961,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const [pdfExporting, setPdfExporting] = useState(false)
+  const [importedSince, setImportedSince] = useState('alle')
+  const [qualityStatusFilter, setQualityStatusFilter] = useState('alle')
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -978,8 +982,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
+      if (importedSince !== 'alle') params.importedSince = importedSince
+      if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
-      const res = await fetch(`/api/trpc/getAdminImages?input=${encoded}`)
+      const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`)
       const data = await res.json()
       const parsed = data.result?.data ?? data
       setImages(parsed.images ?? [])
@@ -987,7 +993,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -1209,7 +1215,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 
   const handleDelete = async (id: number) => {
     try {
-      await fetch('/api/trpc/deleteImage', {
+      await fetch('/api/trpc/deleteMosaicImage', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
       })
       setImages(prev => prev.filter(img => img.id !== id))
@@ -1217,6 +1223,35 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setSelectedImage(null)
       fetchDbStats()
     } catch { onMessage({ text: 'Fehler beim Löschen', type: 'error' }) }
+  }
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return
+    if (!confirm(`${selectedIds.size} Bilder unwiderruflich löschen?`)) return
+    setBulkDeleting(true)
+    let deleted = 0
+    for (const id of Array.from(selectedIds)) {
+      try {
+        await fetch('/api/trpc/deleteMosaicImage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+        })
+        deleted++
+      } catch { /* continue */ }
+    }
+    setSelectedIds(new Set())
+    setBulkDeleting(false)
+    onMessage({ text: `✅ ${deleted} Bilder gelöscht`, type: 'success' })
+    fetchImages(page)
+    fetchDbStats()
+  }
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const n = new Set(prev)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
+      return n
+    })
   }
 
   const totalPages = Math.ceil(total / LIMIT)
@@ -1556,6 +1591,37 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         </div>
       </div>
 
+      {/* Import & Quality Filter Bar */}
+      <div className="bg-white rounded-2xl p-4 border border-gray-200 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Import-Zeitraum:</span>
+          {['alle', '24h', '7d', '30d'].map(v => (
+            <button key={v} onClick={() => { setImportedSince(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                importedSince === v ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>
+              {v === 'alle' ? 'Alle' : v === '24h' ? 'Letzte 24h' : v === '7d' ? 'Letzte 7 Tage' : 'Letzte 30 Tage'}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Qualität:</span>
+          {['alle', 'pending', 'pass', 'warn', 'fail'].map(v => (
+            <button key={v} onClick={() => { setQualityStatusFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                qualityStatusFilter === v
+                  ? v === 'pass' ? 'bg-green-600 text-white'
+                  : v === 'warn' ? 'bg-amber-500 text-white'
+                  : v === 'fail' ? 'bg-red-600 text-white'
+                  : 'bg-gray-700 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>
+              {v === 'alle' ? 'Alle' : v === 'pending' ? '⏳ Ausstehend' : v === 'pass' ? '✅ Pass' : v === 'warn' ? '⚠️ Warn' : '❌ Fail'}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Filter Bar */}
       <div className="bg-white rounded-2xl p-4 border border-gray-200 flex flex-wrap items-center gap-3">
         <Filter className="w-4 h-4 text-gray-400 shrink-0" />
@@ -1576,11 +1642,30 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             Helligkeit: {brightnessFilter} <button onClick={() => setBrightnessFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle') }}
-            className="text-xs text-red-500 hover:text-red-700 ml-auto">Alle Filter zurücksetzen</button>
+        {importedSince !== 'alle' && (
+          <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs px-2 py-1 rounded-full">
+            Import: {importedSince === '24h' ? 'Letzte 24h' : importedSince === '7d' ? 'Letzte 7 Tage' : 'Letzter Import'}
+            <button onClick={() => setImportedSince('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {qualityStatusFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded-full">
+            Qualität: {qualityStatusFilter}
+            <button onClick={() => setQualityStatusFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle') }}
+            className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>
+        {selectedIds.size > 0 && (
+          <button onClick={handleBulkDelete} disabled={bulkDeleting}
+            className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+            <Trash2 className="w-3 h-3" />
+            {bulkDeleting ? 'Lösche...' : `${selectedIds.size} löschen`}
+          </button>
+        )}
       </div>
 
       {/* Image Grid */}
@@ -1596,33 +1681,46 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       ) : (
         <div className="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-12 gap-1.5">
           {images.map(img => (
-            <button key={img.id} onClick={() => setSelectedImage(img)}
-              className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200 hover:border-indigo-400 hover:scale-105 transition-all">
-              <img
-                src={`/api/tile/${img.id}?size=64`}
-                alt=""
-                className="w-full h-full object-cover"
-                loading="lazy"
-                onError={(e) => {
-                  // Fallback: try tile128Url directly, then sourceUrl, then placeholder
-                  const t = e.target as HTMLImageElement;
-                  if (!t.dataset.fallback1 && img.tile128Url) {
-                    t.dataset.fallback1 = '1';
-                    t.src = img.tile128Url;
-                  } else if (!t.dataset.fallback2 && img.sourceUrl) {
-                    t.dataset.fallback2 = '1';
-                    t.src = img.sourceUrl;
-                  } else {
-                    t.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect fill="%23e5e7eb" width="64" height="64"/></svg>';
-                  }
-                }}
-              />
-              {/* Color dot */}
-              {img.colorCategory && COLOR_LABELS[img.colorCategory] && (
-                <div className="absolute bottom-0.5 right-0.5 w-2 h-2 rounded-full border border-white"
-                  style={{ backgroundColor: COLOR_LABELS[img.colorCategory].color }} />
-              )}
-            </button>
+            <div key={img.id} className="relative group aspect-square">
+              <button onClick={() => setSelectedImage(img)}
+                className={`w-full h-full rounded-lg overflow-hidden border transition-all ${
+                  selectedIds.has(img.id) ? 'border-red-500 ring-2 ring-red-400' : 'border-gray-200 hover:border-indigo-400 hover:scale-105'
+                }`}>
+                <img
+                  src={`/api/tile/${img.id}?size=64`}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  loading="lazy"
+                  onError={(e) => {
+                    const t = e.target as HTMLImageElement;
+                    if (!t.dataset.fallback1 && img.tile128Url) {
+                      t.dataset.fallback1 = '1';
+                      t.src = img.tile128Url;
+                    } else if (!t.dataset.fallback2 && img.sourceUrl) {
+                      t.dataset.fallback2 = '1';
+                      t.src = img.sourceUrl;
+                    } else {
+                      t.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect fill="%23e5e7eb" width="64" height="64"/></svg>';
+                    }
+                  }}
+                />
+                {img.colorCategory && COLOR_LABELS[img.colorCategory] && (
+                  <div className="absolute bottom-0.5 right-0.5 w-2 h-2 rounded-full border border-white"
+                    style={{ backgroundColor: COLOR_LABELS[img.colorCategory].color }} />
+                )}
+              </button>
+              {/* Checkbox for bulk select */}
+              <button
+                onClick={(e) => { e.stopPropagation(); toggleSelect(img.id) }}
+                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded border text-xs flex items-center justify-center transition-all ${
+                  selectedIds.has(img.id)
+                    ? 'bg-red-500 border-red-500 text-white opacity-100'
+                    : 'bg-white/80 border-gray-300 opacity-0 group-hover:opacity-100'
+                }`}
+              >
+                {selectedIds.has(img.id) ? '✓' : ''}
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -1955,6 +2053,122 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     }
   }
 
+  const [pdfGenerating, setPdfGenerating] = useState(false)
+  const [testImageUrl, setTestImageUrl] = useState('')
+  const [testAnalysis, setTestAnalysis] = useState<Record<string, unknown> | null>(null)
+  const [testAnalyzing, setTestAnalyzing] = useState(false)
+
+  const downloadPdfReport = useCallback(async () => {
+    setPdfGenerating(true)
+    try {
+      const { jsPDF } = await import('jspdf')
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+      const now = new Date().toLocaleString('de-CH')
+      const pageW = 210; const margin = 14; const colW = pageW - 2 * margin
+
+      // Title
+      doc.setFontSize(20); doc.setFont('helvetica', 'bold')
+      doc.setTextColor(30, 30, 30)
+      doc.text('MosaicPrint QA-Report', margin, 22)
+      doc.setFontSize(10); doc.setFont('helvetica', 'normal')
+      doc.setTextColor(100, 100, 100)
+      doc.text(`Erstellt: ${now}`, margin, 30)
+      doc.setDrawColor(200, 200, 200); doc.line(margin, 34, pageW - margin, 34)
+
+      let y = 42
+      const addSection = (title: string) => {
+        if (y > 260) { doc.addPage(); y = 20 }
+        doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(50, 50, 200)
+        doc.text(title, margin, y); y += 7
+        doc.setFont('helvetica', 'normal'); doc.setTextColor(50, 50, 50)
+      }
+      const addRow = (label: string, value: string, indent = 0) => {
+        if (y > 270) { doc.addPage(); y = 20 }
+        doc.setFontSize(9)
+        doc.setFont('helvetica', 'bold'); doc.text(label, margin + indent, y)
+        doc.setFont('helvetica', 'normal'); doc.text(value, margin + indent + 55, y)
+        y += 5.5
+      }
+      const addText = (text: string) => {
+        if (y > 270) { doc.addPage(); y = 20 }
+        doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(80, 80, 80)
+        const lines = doc.splitTextToSize(text, colW)
+        doc.text(lines, margin, y); y += lines.length * 5 + 2
+        doc.setTextColor(50, 50, 50)
+      }
+
+      // Summary of last runs
+      addSection('1. Check-Übersicht')
+      if (runs.length === 0) {
+        addText('Noch keine Checks ausgeführt.')
+      } else {
+        for (const [checkType, run] of Object.entries(lastRunByType)) {
+          const dur = run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : 'laufend'
+          addRow(checkType, `${run.status.toUpperCase()} | ${new Date(run.startedAt).toLocaleString('de-CH')} | Dauer: ${dur}`)
+          if (run.summary) {
+            for (const [k, v] of Object.entries(run.summary).slice(0, 6)) {
+              addRow('', `${k}: ${String(v)}`, 8)
+            }
+          }
+          y += 2
+        }
+      }
+
+      // Run history
+      y += 4
+      addSection('2. Run-Verlauf (letzte 20)')
+      const recent = runs.slice(0, 20)
+      for (const run of recent) {
+        const dur = run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'
+        addRow(`#${run.id} ${run.checkType}`, `${run.status} | ${new Date(run.startedAt).toLocaleString('de-CH')} | ${dur}`)
+      }
+
+      // Recommendations
+      y += 4
+      addSection('3. Empfehlungen')
+      const failedChecks = Object.entries(lastRunByType).filter(([, r]) => r.status === 'error' || r.status === 'warning')
+      if (failedChecks.length === 0) {
+        addText('✅ Alle Checks bestanden. Keine Massnahmen erforderlich.')
+      } else {
+        for (const [checkType, run] of failedChecks) {
+          addText(`⚠️ ${checkType}: ${run.status.toUpperCase()} – Details im Check-Tab prüfen.`)
+        }
+      }
+
+      // Footer
+      const pageCount = doc.getNumberOfPages()
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i)
+        doc.setFontSize(8); doc.setTextColor(150, 150, 150)
+        doc.text(`MosaicPrint QA-Report | Seite ${i} / ${pageCount} | ${now}`, margin, 290)
+      }
+
+      doc.save(`mosaicprint-qa-report-${new Date().toISOString().slice(0, 10)}.pdf`)
+      onMessage({ text: 'PDF-Report heruntergeladen', type: 'success' })
+    } catch (e) {
+      onMessage({ text: `PDF-Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setPdfGenerating(false)
+    }
+  }, [runs, lastRunByType, onMessage])
+
+  const runTestAnalysis = useCallback(async () => {
+    if (!testImageUrl.trim()) return
+    setTestAnalyzing(true); setTestAnalysis(null)
+    try {
+      const res = await fetch('/api/trpc/analyzeTestImage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl: testImageUrl.trim() }),
+      })
+      const data = await res.json()
+      const result = data.result?.data?.json ?? data.result?.data
+      setTestAnalysis(result)
+    } catch (e) {
+      onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
+    } finally { setTestAnalyzing(false) }
+  }, [testImageUrl, onMessage])
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -1964,6 +2178,11 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
           <p className="text-sm text-gray-500 mt-1">Manuelle und automatische Checks für Tile-Pool, Import-Pipeline und Algorithmus</p>
         </div>
         <div className="flex gap-3">
+          <button onClick={downloadPdfReport} disabled={pdfGenerating}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors">
+            {pdfGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+            {pdfGenerating ? 'Generiere...' : 'PDF-Report'}
+          </button>
           <button onClick={fetchRuns} className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl text-sm transition-colors">
             <RefreshCw className="w-4 h-4" />
             Aktualisieren
@@ -2058,6 +2277,82 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
           )}
         </div>
       )}
+
+      {/* Test-Analyse */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <h3 className="font-bold text-gray-900 mb-1">🧪 Testbild-Analyse</h3>
+        <p className="text-sm text-gray-500 mb-4">Analysiert ein Bild gegen den Tile-Pool und zeigt fehlende Farbbereiche + Keyword-Vorschläge für Smart-Import.</p>
+        <div className="flex gap-3 mb-4">
+          <input
+            type="url"
+            value={testImageUrl}
+            onChange={e => setTestImageUrl(e.target.value)}
+            placeholder="Bild-URL eingeben (z.B. https://images.unsplash.com/...)"
+            className="flex-1 border border-gray-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+          />
+          <button onClick={runTestAnalysis} disabled={testAnalyzing || !testImageUrl.trim()}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors">
+            {testAnalyzing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            {testAnalyzing ? 'Analysiere...' : 'Analysieren'}
+          </button>
+        </div>
+        {/* Preset-Buttons */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          <span className="text-xs text-gray-400 self-center">Presets:</span>
+          {[
+            { label: '👤 Portrait', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400' },
+            { label: '🌅 Landschaft', url: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400' },
+            { label: '🏙️ Stadt', url: 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400' },
+            { label: '🐶 Tier', url: 'https://images.unsplash.com/photo-1587300003388-59208cc962cb?w=400' },
+          ].map(p => (
+            <button key={p.label} onClick={() => setTestImageUrl(p.url)}
+              className="px-3 py-1 rounded-full text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {testAnalysis && (
+          <div className="space-y-4">
+            {/* LAB Gap Analysis */}
+            {(testAnalysis.gapZones as unknown[])?.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <h4 className="text-sm font-bold text-amber-800 mb-2">⚠️ Fehlende Farbbereiche im Pool</h4>
+                <div className="space-y-1">
+                  {(testAnalysis.gapZones as Array<{zone: string; needed: number; available: number; deficit: number}>).map((z, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-amber-700 font-medium">{z.zone}</span>
+                      <span className="text-amber-600">{z.available} vorhanden / {z.needed} benötigt (Defizit: {z.deficit})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Keyword Suggestions */}
+            {(testAnalysis.keywordSuggestions as unknown[])?.length > 0 && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                <h4 className="text-sm font-bold text-indigo-800 mb-3">💡 Empfohlene Import-Keywords</h4>
+                <div className="flex flex-wrap gap-2">
+                  {(testAnalysis.keywordSuggestions as Array<{keyword: string; reason: string; priority: string}>).map((s, i) => (
+                    <div key={i} className={`px-3 py-1.5 rounded-full text-xs font-medium border ${
+                      s.priority === 'high' ? 'bg-red-50 border-red-200 text-red-700' :
+                      s.priority === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                      'bg-gray-50 border-gray-200 text-gray-600'
+                    }`}>
+                      {s.keyword}
+                      <span className="ml-1 opacity-60">– {s.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Raw summary */}
+            <details className="text-xs">
+              <summary className="cursor-pointer text-gray-400 hover:text-gray-600">Rohdaten anzeigen</summary>
+              <pre className="mt-2 bg-gray-50 rounded-lg p-3 overflow-auto text-gray-600 max-h-48">{JSON.stringify(testAnalysis, null, 2)}</pre>
+            </details>
+          </div>
+        )}
+      </div>
 
       {/* Run History */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">

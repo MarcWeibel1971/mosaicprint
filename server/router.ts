@@ -1712,6 +1712,130 @@ export const appRouter = router({
         qualityStatus: input.qualityStatus,
       });
     }),
+
+  // ── Analyse Testbild gegen Pool ───────────────────────────────────────────
+  analyzeTestImage: publicProcedure
+    .input(z.object({ imageUrl: z.string().url() }))
+    .mutation(async ({ input }) => {
+      // Fetch image and compute average LAB via pixel sampling
+      const https = await import('https');
+      const http = await import('http');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let createCanvas: any = null, loadImage: any = null;
+      try { const m = require('canvas'); createCanvas = m.createCanvas; loadImage = m.loadImage; } catch { /* canvas not available */ }
+
+      // Helper: RGB -> LAB
+      const rgbToLab = (r: number, g: number, b: number) => {
+        let rr = r / 255, gg = g / 255, bb = b / 255;
+        rr = rr > 0.04045 ? Math.pow((rr + 0.055) / 1.055, 2.4) : rr / 12.92;
+        gg = gg > 0.04045 ? Math.pow((gg + 0.055) / 1.055, 2.4) : gg / 12.92;
+        bb = bb > 0.04045 ? Math.pow((bb + 0.055) / 1.055, 2.4) : bb / 12.92;
+        const x = (rr * 0.4124 + gg * 0.3576 + bb * 0.1805) / 0.95047;
+        const y = (rr * 0.2126 + gg * 0.7152 + bb * 0.0722) / 1.00000;
+        const z = (rr * 0.0193 + gg * 0.1192 + bb * 0.9505) / 1.08883;
+        const fx = x > 0.008856 ? Math.cbrt(x) : 7.787 * x + 16/116;
+        const fy = y > 0.008856 ? Math.cbrt(y) : 7.787 * y + 16/116;
+        const fz = z > 0.008856 ? Math.cbrt(z) : 7.787 * z + 16/116;
+        return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
+      };
+
+      // Fetch image buffer
+      const fetchBuffer = (url: string): Promise<Buffer> => new Promise((resolve, reject) => {
+        const mod = url.startsWith('https') ? https : http;
+        (mod as typeof https).get(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' } }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks)));
+          res.on('error', reject);
+        }).on('error', reject);
+      });
+
+      // Analyse image LAB distribution
+      let imageLABZones: Array<{L: number; a: number; b: number; count: number}> = [];
+      let imageError = '';
+
+      try {
+        if (!createCanvas || !loadImage) throw new Error('canvas not available');
+        const buf = await fetchBuffer(input.imageUrl);
+        const img = await (loadImage as (b: Buffer) => Promise<{width: number; height: number}>)(buf);
+        const canvas = (createCanvas as (w: number, h: number) => {getContext: (t: string) => CanvasRenderingContext2D})(64, 64);
+        const ctx = canvas.getContext('2d');
+        (ctx as unknown as {drawImage: (img: unknown, x: number, y: number, w: number, h: number) => void}).drawImage(img, 0, 0, 64, 64);
+        const imageData = ctx.getImageData(0, 0, 64, 64);
+        const data = imageData.data;
+        // Sample every 4th pixel
+        const zones: Record<string, {L: number; a: number; b: number; count: number}> = {};
+        for (let i = 0; i < data.length; i += 16) {
+          const lab = rgbToLab(data[i], data[i+1], data[i+2]);
+          // Quantize to 8-unit LAB zones
+          const zL = Math.round(lab.L / 8) * 8;
+          const zA = Math.round(lab.a / 8) * 8;
+          const zB = Math.round(lab.b / 8) * 8;
+          const key = `${zL},${zA},${zB}`;
+          if (!zones[key]) zones[key] = { L: zL, a: zA, b: zB, count: 0 };
+          zones[key].count++;
+        }
+        imageLABZones = Object.values(zones).sort((a, b) => b.count - a.count).slice(0, 30);
+      } catch (e) {
+        imageError = String(e);
+      }
+
+      // Get pool LAB distribution
+      const poolStats = await db.getPoolLABStats();
+
+      // Find gaps: image zones with insufficient pool coverage
+      const gapZones: Array<{zone: string; needed: number; available: number; deficit: number}> = [];
+      const keywordSuggestions: Array<{keyword: string; reason: string; priority: string}> = [];
+
+      if (imageLABZones.length > 0) {
+        for (const zone of imageLABZones.slice(0, 15)) {
+          // Find pool tiles within LAB distance 12 of this zone
+          const nearby = poolStats.filter((p: {avgL: number; avgA: number; avgB: number}) => {
+            const dL = p.avgL - zone.L, dA = p.avgA - zone.a, dB = p.avgB - zone.b;
+            return Math.sqrt(dL*dL + dA*dA + dB*dB) < 12;
+          });
+          const needed = Math.max(50, zone.count * 10);
+          const available = nearby.reduce((s: number, p: {count: number}) => s + p.count, 0);
+          if (available < needed) {
+            const deficit = needed - available;
+            // Describe the zone
+            const warmth = zone.b > 8 ? 'warm' : zone.b < -5 ? 'cool' : 'neutral';
+            const brightness = zone.L > 70 ? 'bright' : zone.L < 35 ? 'dark' : 'mid';
+            const saturation = Math.sqrt(zone.a*zone.a + zone.b*zone.b) > 20 ? 'saturated' : 'muted';
+            const desc = `${brightness} ${warmth} ${saturation} (L=${zone.L} a=${zone.a} b=${zone.b})`;
+            gapZones.push({ zone: desc, needed, available, deficit });
+
+            // Generate keyword suggestions
+            const priority = deficit > 200 ? 'high' : deficit > 80 ? 'medium' : 'low';
+            if (zone.L > 70 && zone.b < 0) keywordSuggestions.push({ keyword: 'overcast sky muted', reason: 'helle kühle Zone fehlt', priority });
+            else if (zone.L > 70 && Math.abs(zone.a) < 5 && Math.abs(zone.b) < 5) keywordSuggestions.push({ keyword: 'white paper texture minimal', reason: 'helle neutrale Zone fehlt', priority });
+            else if (zone.L < 35 && zone.b < 0) keywordSuggestions.push({ keyword: 'dark ocean water night', reason: 'dunkle kühle Zone fehlt', priority });
+            else if (zone.L < 35 && zone.b > 5) keywordSuggestions.push({ keyword: 'dark wood texture warm', reason: 'dunkle warme Zone fehlt', priority });
+            else if (zone.b < -5 && zone.L > 40 && zone.L < 70) keywordSuggestions.push({ keyword: 'blue gray fog misty', reason: 'mittlere kühle Zone fehlt', priority });
+            else if (zone.b > 10 && zone.a > 5) keywordSuggestions.push({ keyword: 'autumn leaves warm golden', reason: 'warme Sättigungs-Zone fehlt', priority });
+            else if (zone.a > 8 && zone.L > 50) keywordSuggestions.push({ keyword: 'skin tone portrait warm light', reason: 'Hautton-Zone fehlt', priority });
+            else if (saturation === 'muted' && brightness === 'mid') keywordSuggestions.push({ keyword: 'neutral gray texture stone', reason: 'mittlere neutrale Zone fehlt', priority });
+            else keywordSuggestions.push({ keyword: `${brightness} ${warmth} ${saturation} texture`, reason: `Lücke bei L=${zone.L}`, priority });
+          }
+        }
+      }
+
+      // Deduplicate keyword suggestions
+      const seenKw = new Set<string>();
+      const uniqueKeywords = keywordSuggestions.filter(k => {
+        if (seenKw.has(k.keyword)) return false;
+        seenKw.add(k.keyword); return true;
+      });
+
+      return {
+        imageUrl: input.imageUrl,
+        imageError,
+        dominantZones: imageLABZones.slice(0, 10),
+        gapZones: gapZones.slice(0, 10),
+        keywordSuggestions: uniqueKeywords.slice(0, 12),
+        poolSize: poolStats.reduce((s: number, p: {count: number}) => s + p.count, 0),
+      };
+    }),
 });
 
 // ── Quality Check Async Runner ─────────────────────────────────────────────────
