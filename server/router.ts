@@ -609,6 +609,7 @@ async function computeLabFull(url: string): Promise<{
   trL: number; trA: number; trB: number;
   blL: number; blA: number; blB: number;
   brL: number; brA: number; brB: number;
+  tileType: 'calm' | 'medium' | 'busy';
 } | null> {
   try {
     const { Jimp } = await import("jimp");
@@ -654,12 +655,25 @@ async function computeLabFull(url: string): Promise<{
     const tr = rgbPixelsToLab(extractQuadrant(4, 0), 16);
     const bl = rgbPixelsToLab(extractQuadrant(0, 4), 16);
     const br = rgbPixelsToLab(extractQuadrant(4, 4), 16);
+    // Compute tileType from quadrant LAB variance (texture complexity)
+    const quadrantLs = [tl.L, tr.L, bl.L, br.L];
+    const meanL = quadrantLs.reduce((s, v) => s + v, 0) / 4;
+    const varianceL = quadrantLs.reduce((s, v) => s + (v - meanL) ** 2, 0) / 4;
+    const quadrantAs = [tl.a, tr.a, bl.a, br.a];
+    const quadrantBs = [tl.b, tr.b, bl.b, br.b];
+    const meanA = quadrantAs.reduce((s, v) => s + v, 0) / 4;
+    const meanB = quadrantBs.reduce((s, v) => s + v, 0) / 4;
+    const varianceA = quadrantAs.reduce((s, v) => s + (v - meanA) ** 2, 0) / 4;
+    const varianceB = quadrantBs.reduce((s, v) => s + (v - meanB) ** 2, 0) / 4;
+    const totalVariance = varianceL + varianceA + varianceB;
+    const tileType: 'calm' | 'medium' | 'busy' = totalVariance < 80 ? 'calm' : totalVariance > 400 ? 'busy' : 'medium';
     return {
       L: global.L, a: global.a, b: global.b,
       tlL: tl.L, tlA: tl.a, tlB: tl.b,
       trL: tr.L, trA: tr.a, trB: tr.b,
       blL: bl.L, blA: bl.a, blB: bl.b,
       brL: br.L, brA: br.a, brB: br.b,
+      tileType,
     };
   } catch {
     return null;
@@ -971,7 +985,7 @@ export const appRouter = router({
 
   // Admin: Import from source (Pexels/Unsplash/Pixabay)
   importFromSource: publicProcedure
-    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay"]), count: z.number().min(1).max(5000).default(500) }))
+    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay"]), count: z.number().min(1).max(5000).default(500), category: z.string().optional() }))
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
       if (status.running) return { started: false, message: "Import läuft bereits" };
@@ -984,13 +998,24 @@ export const appRouter = router({
             : process.env.PIXABAY_API_KEY;
           if (!apiKey) { status.error = `${input.source} API key missing`; return; }
           let imported = 0;
-          // Use gap-based keyword ordering: fill most-needed color buckets first
-          // Falls back to random shuffle from all keywords for variety
-          const gapTasks = await analyzeDbGaps(200);
-          const gapKeywords = gapTasks.map(t => t.query);
-          const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
-          const extraKeywords = allKeywords.filter(k => !gapKeywords.includes(k)).sort(() => Math.random() - 0.5);
-          const orderedKeywords = [...gapKeywords, ...extraKeywords];
+          // If category is specified, use its keywords preferentially
+          let orderedKeywords: string[];
+          if (input.category) {
+            const pool = db.getPool();
+            const catRow = await pool.query(`SELECT keywords FROM image_categories WHERE name = $1`, [input.category]);
+            const catKeywords: string[] = catRow.rows[0]?.keywords ?? [];
+            const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
+            const extra = allKeywords.filter(k => !catKeywords.includes(k)).sort(() => Math.random() - 0.5);
+            orderedKeywords = [...catKeywords, ...extra];
+            log(`📂 Kategorie-Import: ${input.category} (${catKeywords.length} Kategorie-Keywords)`);
+          } else {
+            // Use gap-based keyword ordering: fill most-needed color buckets first
+            const gapTasks = await analyzeDbGaps(200);
+            const gapKeywords = gapTasks.map(t => t.query);
+            const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
+            const extra = allKeywords.filter(k => !gapKeywords.includes(k)).sort(() => Math.random() - 0.5);
+            orderedKeywords = [...gapKeywords, ...extra];
+          }
           const perPage = input.source === "pexels" ? 80 : input.source === "pixabay" ? 200 : 30;
           const CONCURRENCY = 5;
           let kwIdx = 0;
@@ -1046,6 +1071,7 @@ export const appRouter = router({
                       brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                       sourceProvider: input.source,
                       importQuery: keyword,
+                      tileType: lab?.tileType,
                     });
                     if (inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
@@ -1162,6 +1188,7 @@ export const appRouter = router({
                       subject: task.subject ?? 'general',
                       sourceProvider: input.sourceId,
                       importQuery: task.query,
+                      tileType: lab?.tileType,
                     });
                     if (inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
@@ -1637,6 +1664,7 @@ export const appRouter = router({
                   trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
                   blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
                   brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                  tileType: lab?.tileType,
                 });
               } catch { /* skip duplicates / errors */ }
             }));
@@ -1666,6 +1694,7 @@ export const appRouter = router({
         blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
         brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
         sourceProvider: 'upload',
+        tileType: lab?.tileType,
       });
       return { ok: true };
     }),

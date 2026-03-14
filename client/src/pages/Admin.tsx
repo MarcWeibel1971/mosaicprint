@@ -166,6 +166,7 @@ export default function Admin() {
   const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels' | 'pixabay'>('pexels')
   const [importAllBatch, setImportAllBatch] = useState(500)
   const [importAllRunning, setImportAllRunning] = useState(false)
+  const [importCategory, setImportCategory] = useState<string>('')  // selected category for targeted import
   // Gezielte Importe (Empfehlungen)
   interface ImportRecommendation { query: string; label: string; priority: number; deficit: number; subject: string }
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
@@ -395,7 +396,7 @@ export default function Admin() {
       await fetch('/api/trpc/importFromSource', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: sourceId as 'pexels' | 'unsplash' | 'pixabay', count: batchSize }),
+        body: JSON.stringify({ source: sourceId as 'pexels' | 'unsplash' | 'pixabay', count: batchSize, ...(importCategory ? { category: importCategory } : {}) }),
       })
     } catch {
       setActiveJob(null)
@@ -779,6 +780,51 @@ export default function Admin() {
                   </div>
                 )
               })}
+
+              {/* Kategorie-Auswahl für gezielten Import */}
+              <div className="mb-4 p-4 bg-amber-50 rounded-xl border border-amber-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-semibold text-amber-900">🎯 Kategorie-Import (optional)</span>
+                  <span className="text-xs text-amber-600">Wähle eine Bildkategorie um gezielt Keywords für diese Kategorie zu importieren</span>
+                </div>
+                <select
+                  value={importCategory}
+                  onChange={e => setImportCategory(e.target.value)}
+                  className="w-full text-sm border border-amber-300 rounded-lg px-3 py-2 bg-white text-gray-800"
+                >
+                  <option value="">— Kein Kategorie-Filter (Standard: Gap-basiert) —</option>
+                  <optgroup label="Portraits">
+                    <option value="portrait_light_skin">👤 Portrait – Helle Haut / Blond</option>
+                    <option value="portrait_medium_skin">👤 Portrait – Mittlere Haut / Braun</option>
+                    <option value="portrait_dark_skin">👤 Portrait – Dunkle Haut</option>
+                    <option value="portrait_olive_skin">👤 Portrait – Olive / Dunkles Haar</option>
+                    <option value="portrait_glasses">👓 Portrait – Brille / Graues Haar</option>
+                    <option value="portrait_red_hair">🦰 Portrait – Rotes Haar</option>
+                    <option value="portrait_child">👶 Portrait – Kind / Baby</option>
+                    <option value="portrait_elderly">👴 Portrait – Ältere Person</option>
+                    <option value="portrait_backlight">🌅 Portrait – Gegenlicht / Silhouette</option>
+                    <option value="portrait_group">👥 Portrait – Gruppe / Mehrere Personen</option>
+                  </optgroup>
+                  <optgroup label="Natur">
+                    <option value="nature_sunset">🌅 Natur – Sonnenuntergang</option>
+                    <option value="nature_ocean">🌊 Natur – Ozean / Meer</option>
+                    <option value="nature_forest">🌲 Natur – Wald / Grün</option>
+                    <option value="nature_snow">❄️ Natur – Schnee / Winter</option>
+                    <option value="nature_mountains">⛰️ Natur – Berge</option>
+                  </optgroup>
+                  <optgroup label="Stadt">
+                    <option value="city_night">🌃 Stadt – Skyline Nacht</option>
+                    <option value="city_architecture">🏛️ Stadt – Architektur</option>
+                  </optgroup>
+                  <optgroup label="Tiere">
+                    <option value="animal_warm">🦁 Tiere – Erdtöne (Löwe etc.)</option>
+                    <option value="animal_colorful">🦜 Tiere – Bunt (Vögel etc.)</option>
+                  </optgroup>
+                </select>
+                {importCategory && (
+                  <p className="mt-1 text-xs text-amber-700">✅ Import wird mit Kategorie-Keywords für <strong>{importCategory}</strong> priorisiert</p>
+                )}
+              </div>
 
               {/* Alle gleichzeitig */}
               <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
@@ -2342,8 +2388,23 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     e.target.value = ''
   }, [onMessage])
 
-  // Client-side LAB computation via Canvas (no server-side image processing needed)
-  const computeLabZonesFromImage = useCallback((src: string): Promise<Array<{L: number; a: number; b: number; count: number}>> => {
+  // Client-side LAB computation + Feature Vector via Canvas (no server-side image processing needed)
+  const computeLabZonesFromImage = useCallback((src: string): Promise<{
+    labZones: Array<{L: number; a: number; b: number; count: number}>;
+    featureVector: {
+      sceneType: string;        // portrait | landscape | cityscape | abstract | unknown
+      textureLevel: string;     // low | medium | high
+      edgeDensity: number;      // 0-1
+      brightnessRange: string;  // narrow | medium | wide
+      avgL: number;             // 0-100
+      avgChroma: number;        // 0-100
+      dominantColors: string[]; // e.g. ['warm', 'blue', 'green']
+      facesDetected: boolean;   // heuristic: skin tones present
+      skyDetected: boolean;     // heuristic: bright blue/grey top region
+      waterDetected: boolean;   // heuristic: blue/teal mid region
+      tileType: string;         // calm | medium | busy
+    };
+  }> => {
     return new Promise((resolve) => {
       const img = new Image()
       img.crossOrigin = 'anonymous'
@@ -2354,27 +2415,113 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         const ctx = canvas.getContext('2d')!
         ctx.drawImage(img, 0, 0, SIZE, SIZE)
         const { data } = ctx.getImageData(0, 0, SIZE, SIZE)
-        const zones: Record<string, {L: number; a: number; b: number; count: number}> = {}
-        for (let i = 0; i < data.length; i += 4 * 2) { // sample every 2nd pixel
-          const r = data[i], g = data[i+1], b2 = data[i+2]
-          // sRGB -> linear
-          const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92 }
-          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b2)
-          // linear -> XYZ
+
+        const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92 }
+        const rgbToLab = (r: number, g: number, b: number) => {
+          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b)
           const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047
           const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000
           const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883
           const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116
-          const L = Math.round((116*f(y) - 16) / 8) * 8
-          const a = Math.round((500*(f(x)-f(y))) / 8) * 8
-          const bv = Math.round((200*(f(y)-f(z))) / 8) * 8
+          return { L: 116*f(y) - 16, a: 500*(f(x)-f(y)), b: 200*(f(y)-f(z)) }
+        }
+
+        // ── 1. LAB zones (for pool comparison) ──
+        const zones: Record<string, {L: number; a: number; b: number; count: number}> = {}
+        const allLab: Array<{L: number; a: number; b: number}> = []
+        for (let i = 0; i < data.length; i += 4) {
+          const lab = rgbToLab(data[i], data[i+1], data[i+2])
+          allLab.push(lab)
+          const L = Math.round(lab.L / 8) * 8
+          const a = Math.round(lab.a / 8) * 8
+          const bv = Math.round(lab.b / 8) * 8
           const key = `${L},${a},${bv}`
           if (!zones[key]) zones[key] = { L, a, b: bv, count: 0 }
           zones[key].count++
         }
-        resolve(Object.values(zones).sort((a, b) => b.count - a.count).slice(0, 30))
+        const labZones = Object.values(zones).sort((a, b) => b.count - a.count).slice(0, 30)
+
+        // ── 2. Global averages ──
+        const totalPx = allLab.length
+        const avgL = allLab.reduce((s, p) => s + p.L, 0) / totalPx
+        const avgA = allLab.reduce((s, p) => s + p.a, 0) / totalPx
+        const avgB = allLab.reduce((s, p) => s + p.b, 0) / totalPx
+        const avgChroma = allLab.reduce((s, p) => s + Math.sqrt(p.a*p.a + p.b*p.b), 0) / totalPx
+
+        // ── 3. Brightness range (std dev of L) ──
+        const lStdDev = Math.sqrt(allLab.reduce((s, p) => s + Math.pow(p.L - avgL, 2), 0) / totalPx)
+        const brightnessRange = lStdDev < 15 ? 'narrow' : lStdDev < 30 ? 'medium' : 'wide'
+
+        // ── 4. Edge density (Sobel on grayscale) ──
+        const gray = new Float32Array(SIZE * SIZE)
+        for (let i = 0; i < totalPx; i++) gray[i] = allLab[i].L / 100
+        let edgeSum = 0
+        for (let y = 1; y < SIZE - 1; y++) {
+          for (let x = 1; x < SIZE - 1; x++) {
+            const idx = (r: number, c: number) => gray[r * SIZE + c]
+            const gx = -idx(y-1,x-1) + idx(y-1,x+1) - 2*idx(y,x-1) + 2*idx(y,x+1) - idx(y+1,x-1) + idx(y+1,x+1)
+            const gy = -idx(y-1,x-1) - 2*idx(y-1,x) - idx(y-1,x+1) + idx(y+1,x-1) + 2*idx(y+1,x) + idx(y+1,x+1)
+            edgeSum += Math.sqrt(gx*gx + gy*gy)
+          }
+        }
+        const edgeDensity = Math.min(1, edgeSum / ((SIZE-2)*(SIZE-2) * 2))
+        const textureLevel = edgeDensity < 0.15 ? 'low' : edgeDensity < 0.35 ? 'medium' : 'high'
+
+        // ── 5. Tile type (calm/medium/busy) ──
+        const chromaVariance = allLab.reduce((s, p) => s + Math.pow(Math.sqrt(p.a*p.a+p.b*p.b) - avgChroma, 2), 0) / totalPx
+        const tileType = edgeDensity < 0.12 && chromaVariance < 100 ? 'calm'
+          : edgeDensity > 0.30 || chromaVariance > 400 ? 'busy' : 'medium'
+
+        // ── 6. Dominant color hues ──
+        const dominantColors: string[] = []
+        if (avgL > 70 && avgChroma < 15) dominantColors.push('white/neutral')
+        else if (avgL < 30 && avgChroma < 15) dominantColors.push('dark/black')
+        if (avgA > 8 && avgB > 8) dominantColors.push('warm/orange')
+        if (avgA > 12 && avgB < 5) dominantColors.push('red')
+        if (avgA < -8 && avgB > 8) dominantColors.push('green')
+        if (avgA < -5 && avgB < -5) dominantColors.push('blue/cool')
+        if (avgB > 15 && avgA > 0) dominantColors.push('yellow/golden')
+        if (avgChroma > 40) dominantColors.push('saturated')
+        if (dominantColors.length === 0) dominantColors.push('neutral')
+
+        // ── 7. Heuristic scene detection ──
+        // Skin tones: warm, medium L, low-medium chroma
+        const skinPixels = allLab.filter(p => p.a > 3 && p.b > 5 && p.L > 30 && p.L < 85 && Math.sqrt(p.a*p.a+p.b*p.b) < 45).length
+        const facesDetected = skinPixels / totalPx > 0.12
+
+        // Sky: top 25% of image, bright + blue/neutral
+        const topQuarter = allLab.slice(0, Math.floor(totalPx * 0.25))
+        const skyPixels = topQuarter.filter(p => p.L > 55 && p.a > -15 && p.a < 5 && p.b < 5).length
+        const skyDetected = skyPixels / topQuarter.length > 0.3
+
+        // Water: mid region, blue/teal
+        const midRegion = allLab.slice(Math.floor(totalPx * 0.25), Math.floor(totalPx * 0.75))
+        const waterPixels = midRegion.filter(p => p.a < -2 && p.b < 0 && p.L > 25 && p.L < 75).length
+        const waterDetected = waterPixels / midRegion.length > 0.2
+
+        // ── 8. Scene type ──
+        let sceneType = 'unknown'
+        if (facesDetected && skinPixels / totalPx > 0.2) sceneType = 'portrait'
+        else if (skyDetected && waterDetected) sceneType = 'seascape'
+        else if (skyDetected && avgA < -5) sceneType = 'landscape'
+        else if (avgL < 35 && avgChroma < 20) sceneType = 'cityscape_night'
+        else if (edgeDensity > 0.35 && !facesDetected) sceneType = 'architecture'
+        else if (avgA < -10 && avgB > 5) sceneType = 'nature_green'
+        else if (avgA > 8 && avgB > 10 && avgL > 40) sceneType = 'nature_warm'
+        else if (avgL > 72 && avgChroma < 12) sceneType = 'nature_snow'
+        else if (avgChroma > 45) sceneType = 'abstract_colorful'
+        else if (facesDetected) sceneType = 'portrait'
+
+        resolve({
+          labZones,
+          featureVector: {
+            sceneType, textureLevel, edgeDensity: Math.round(edgeDensity * 100) / 100,
+            brightnessRange, avgL: Math.round(avgL), avgChroma: Math.round(avgChroma),
+            dominantColors, facesDetected, skyDetected, waterDetected, tileType
+          }
+        })
       }
-      img.onerror = () => resolve([])
+      img.onerror = () => resolve({ labZones: [], featureVector: { sceneType: 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: false, skyDetected: false, waterDetected: false, tileType: 'medium' } })
       img.src = src
     })
   }, [])
@@ -2383,15 +2530,19 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     if (!testImageUrl.trim() && !testImageFile) return
     setTestAnalyzing(true); setTestAnalysis(null)
     try {
-      // Compute LAB zones client-side (no sharp needed on server)
+      // Compute LAB zones + Feature Vector client-side via Canvas
       let labZones: Array<{L: number; a: number; b: number; count: number}> = []
+      let featureVector: ReturnType<typeof computeLabZonesFromImage> extends Promise<infer T> ? T['featureVector'] : never
       let imageError = ''
       const imageSrc = testImageFile ? testImageFile.base64 : testImageUrl.trim()
       try {
-        labZones = await computeLabZonesFromImage(imageSrc)
-        if (labZones.length === 0) imageError = 'Canvas konnte Bild nicht lesen'
+        const result = await computeLabZonesFromImage(imageSrc)
+        labZones = result.labZones
+        featureVector = result.featureVector
+        if (labZones.length === 0) imageError = 'Canvas konnte Bild nicht lesen (CORS?)'
       } catch (e) {
         imageError = String(e)
+        featureVector = { sceneType: 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: false, skyDetected: false, waterDetected: false, tileType: 'medium' }
       }
       const body = {
         imageUrl: testImageFile ? undefined : testImageUrl.trim(),
@@ -2404,17 +2555,17 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         body: JSON.stringify(body),
       })
       const data = await res.json()
-      const result = data.result?.data?.json ?? data.result?.data
-      setTestAnalysis(result)
-      // Auto-detect category from LAB zones
+      const serverResult = data.result?.data?.json ?? data.result?.data
+      // Merge feature vector into result
+      setTestAnalysis({ ...serverResult, featureVector, imageError: imageError || serverResult?.imageError })
+      // Auto-detect category from feature vector
       if (labZones.length > 0) {
-        const cat = detectCategory(labZones)
-        setDetectedCategory(cat)
+        setDetectedCategory(featureVector.sceneType !== 'unknown' ? featureVector.sceneType : detectCategory(labZones))
       }
     } catch (e) {
       onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
     } finally { setTestAnalyzing(false) }
-  }, [testImageUrl, testImageFile, computeLabZonesFromImage, onMessage])
+  }, [testImageUrl, testImageFile, computeLabZonesFromImage, detectCategory, onMessage])
 
   return (
     <div className="space-y-8">
@@ -2639,6 +2790,55 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         </div>
         {testAnalysis && (
           <div className="space-y-4">
+            {/* Feature Vector */}
+            {testAnalysis.featureVector && (
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                <h4 className="text-sm font-bold text-blue-800 mb-3">🔬 Bild-Analyse (Feature-Vektor)</h4>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Szenentyp</span>
+                    <span className="text-blue-900 font-semibold capitalize">{(testAnalysis.featureVector as {sceneType: string}).sceneType.replace(/_/g, ' ')}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Tile-Typ</span>
+                    <span className={`font-semibold ${
+                      (testAnalysis.featureVector as {tileType: string}).tileType === 'calm' ? 'text-green-700' :
+                      (testAnalysis.featureVector as {tileType: string}).tileType === 'busy' ? 'text-red-700' : 'text-amber-700'
+                    }`}>{(testAnalysis.featureVector as {tileType: string}).tileType}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Textur</span>
+                    <span className="text-blue-900">{(testAnalysis.featureVector as {textureLevel: string}).textureLevel} (Kanten: {(testAnalysis.featureVector as {edgeDensity: number}).edgeDensity})</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Helligkeit</span>
+                    <span className="text-blue-900">L={( testAnalysis.featureVector as {avgL: number}).avgL} · {(testAnalysis.featureVector as {brightnessRange: string}).brightnessRange}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Chroma</span>
+                    <span className="text-blue-900">{(testAnalysis.featureVector as {avgChroma: number}).avgChroma}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-blue-600 font-medium">Erkannt</span>
+                    <span className="text-blue-900">
+                      {(testAnalysis.featureVector as {facesDetected: boolean}).facesDetected && '👤 Gesicht '}
+                      {(testAnalysis.featureVector as {skyDetected: boolean}).skyDetected && '☁️ Himmel '}
+                      {(testAnalysis.featureVector as {waterDetected: boolean}).waterDetected && '🌊 Wasser '}
+                      {!(testAnalysis.featureVector as {facesDetected: boolean; skyDetected: boolean; waterDetected: boolean}).facesDetected &&
+                       !(testAnalysis.featureVector as {skyDetected: boolean}).skyDetected &&
+                       !(testAnalysis.featureVector as {waterDetected: boolean}).waterDetected && '—'}
+                    </span>
+                  </div>
+                </div>
+                {(testAnalysis.featureVector as {dominantColors: string[]}).dominantColors?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {(testAnalysis.featureVector as {dominantColors: string[]}).dominantColors.map((c: string) => (
+                      <span key={c} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">{c}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {/* LAB Gap Analysis */}
             {(testAnalysis.gapZones as unknown[])?.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
