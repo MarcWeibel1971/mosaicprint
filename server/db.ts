@@ -489,7 +489,7 @@ export async function getPoolLABStats(): Promise<Array<{avgL: number; avgA: numb
       ROUND(avg_b / 8) * 8 AS "avgB",
       COUNT(*) AS count
     FROM mosaic_images
-    WHERE avg_l IS NOT NULL AND lab_indexed = true
+    WHERE avg_l IS NOT NULL AND NOT (avg_l = 50 AND avg_a = 0 AND avg_b = 0)
     GROUP BY 1, 2, 3
     ORDER BY count DESC
     LIMIT 500
