@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { jsPDF } from 'jspdf'
+// jsPDF loaded dynamically to avoid chunk initialization errors at module load time
 import {
   Database, RefreshCw, Upload, Image, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle
@@ -100,6 +100,77 @@ interface AlgoSettings {
   mobileMaxTiles: number  // max unique tiles loaded on mobile (default 1500)
   blurOpacity: number      // blur-overlay opacity 0–0.30 (default 0.08 = 8%)
 }
+// ── Preset Profiles ──────────────────────────────────────────────────────────
+interface Profile {
+  id: string
+  label: string
+  icon: string
+  description: string
+  settings: Partial<AlgoSettings>
+}
+const PRESET_PROFILES: Profile[] = [
+  {
+    id: 'portrait',
+    label: 'Portrait',
+    icon: '👤',
+    description: 'Optimiert für Gesichter: feineres Raster, stärkere Helligkeits-Gewichtung, Haut-Ton-Boost.',
+    settings: {
+      baseTiles: 120, tilePx: 8, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.55, labWeight: 0.15, textureWeight: 0.12, edgeWeight: 0.18,
+      contrastBoost: 1.25, histogramBlend: 0.08, overlayMode: 'none', enableRotation: true,
+      neighborRadius: 5, neighborPenalty: 180,
+    }
+  },
+  {
+    id: 'landscape',
+    label: 'Landschaft',
+    icon: '🏔️',
+    description: 'Optimiert für Landschaften: breites Raster, starke Farb-Gewichtung, Farb-Transfer aktiv.',
+    settings: {
+      baseTiles: 80, tilePx: 10, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.35, labWeight: 0.30, textureWeight: 0.20, edgeWeight: 0.15,
+      contrastBoost: 1.15, histogramBlend: 0.10, overlayMode: 'none', enableRotation: true,
+      neighborRadius: 8, neighborPenalty: 150,
+    }
+  },
+  {
+    id: 'night',
+    label: 'Nacht / Skyline',
+    icon: '🌃',
+    description: 'Optimiert für dunkle Szenen: Kontrast-Boost, Textur-Gewichtung erhöht.',
+    settings: {
+      baseTiles: 90, tilePx: 9, baseOverlay: 0.05, edgeBoost: 0.12,
+      brightnessWeight: 0.40, labWeight: 0.20, textureWeight: 0.25, edgeWeight: 0.15,
+      contrastBoost: 1.40, histogramBlend: 0.05, overlayMode: 'softlight', enableRotation: true,
+      neighborRadius: 6, neighborPenalty: 200,
+    }
+  },
+  {
+    id: 'colorful',
+    label: 'Farbenreich',
+    icon: '🎨',
+    description: 'Maximale Farbvielfalt: starker Farb-Transfer, hohe Sättigungs-Gewichtung.',
+    settings: {
+      baseTiles: 100, tilePx: 8, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.30, labWeight: 0.35, textureWeight: 0.15, edgeWeight: 0.20,
+      contrastBoost: 1.20, histogramBlend: 0.12, overlayMode: 'none', enableRotation: true,
+      neighborRadius: 6, neighborPenalty: 200,
+    }
+  },
+  {
+    id: 'highres',
+    label: 'Hochauflösend',
+    icon: '🔬',
+    description: 'Maximale Detailschärfe: sehr feines Raster, minimale Überlagerung.',
+    settings: {
+      baseTiles: 150, tilePx: 6, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.50, labWeight: 0.15, textureWeight: 0.15, edgeWeight: 0.20,
+      contrastBoost: 1.20, histogramBlend: 0.0, overlayMode: 'none', enableRotation: true,
+      neighborRadius: 4, neighborPenalty: 250,
+    }
+  },
+]
+
 const DEFAULT_SETTINGS: AlgoSettings = {
   baseTiles: 100,     // 100 columns = fine detail (matches reference quality)
   tilePx: 8,          // 8px display tiles = fine detail
@@ -1139,6 +1210,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     setPdfExporting(true)
     onMessage({ text: 'PDF wird generiert – Bilder werden geladen...', type: 'info' })
     try {
+      const { jsPDF } = await import('jspdf')
       // Fetch ALL images via dedicated PDF endpoint (no pagination limit)
       const params: Record<string, string> = {}
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
@@ -2114,9 +2186,129 @@ function CategoryProfilesPanel() {
   )
 }
 
+// ── Profile Popup ─────────────────────────────────────────────────────────────
+function ProfilePopup({ profile, onClose, onApply }: {
+  profile: Profile
+  onClose: () => void
+  onApply: (settings: Partial<AlgoSettings>) => void
+}) {
+  const [editedSettings, setEditedSettings] = useState<Partial<AlgoSettings>>({ ...profile.settings })
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  const updateSetting = (key: keyof AlgoSettings, value: number | string | boolean) => {
+    setEditedSettings(prev => ({ ...prev, [key]: value }))
+  }
+
+  const handleApply = () => {
+    onApply(editedSettings)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const handleSaveToDb = async () => {
+    setSaving(true)
+    try {
+      await fetch('/api/trpc/saveImageCategoryAlgoSettings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categoryName: profile.id, settings: editedSettings })
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  const numField = (key: keyof AlgoSettings, label: string, min: number, max: number, step: number, fmt?: (v: number) => string) => {
+    const val = editedSettings[key] as number ?? 0
+    return (
+      <div key={key} className="flex items-center gap-3 py-2 border-b border-gray-100 last:border-0">
+        <div className="w-40 shrink-0">
+          <div className="text-xs font-medium text-gray-700">{label}</div>
+        </div>
+        <input type="range" min={min} max={max} step={step} value={val}
+          onChange={e => updateSetting(key, Number(e.target.value))}
+          className="flex-1 accent-indigo-600 h-1.5" />
+        <span className="w-14 text-right font-mono text-xs font-bold text-indigo-700">
+          {fmt ? fmt(val) : val}
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b border-gray-100">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">{profile.icon}</span>
+            <div>
+              <h3 className="font-bold text-gray-900">{profile.label}</h3>
+              <p className="text-xs text-gray-500">{profile.description}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-5 space-y-1">
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Kachel-Raster</p>
+          {numField('baseTiles', 'Anzahl Kacheln', 20, 150, 1)}
+          {numField('tilePx', 'Kachel-Grösse (px)', 4, 32, 1)}
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Matching-Gewichte</p>
+          {numField('brightnessWeight', 'Helligkeit', 0, 1, 0.05, v => (v*100).toFixed(0)+'%')}
+          {numField('labWeight', 'LAB-Farbe', 0, 1, 0.05, v => (v*100).toFixed(0)+'%')}
+          {numField('textureWeight', 'Textur', 0, 1, 0.05, v => (v*100).toFixed(0)+'%')}
+          {numField('edgeWeight', 'Kanten', 0, 1, 0.05, v => (v*100).toFixed(0)+'%')}
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Farb-Korrektur</p>
+          {numField('contrastBoost', 'Kontrast-Boost', 1.0, 1.8, 0.05, v => v.toFixed(2)+'×')}
+          {numField('histogramBlend', 'Farb-Transfer', 0, 0.15, 0.01, v => Math.round(v*650)+'%')}
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Anti-Repetition</p>
+          {numField('neighborRadius', 'Radius', 1, 20, 1)}
+          {numField('neighborPenalty', 'Penalty', 0, 500, 10)}
+          <div className="flex items-center justify-between py-2 border-b border-gray-100">
+            <span className="text-xs font-medium text-gray-700">Overlay-Modus</span>
+            <div className="flex gap-1">
+              {(['none', 'softlight', 'alpha'] as const).map(mode => (
+                <button key={mode} onClick={() => updateSetting('overlayMode', mode)}
+                  className={`px-2 py-1 rounded text-xs font-semibold transition-colors ${
+                    editedSettings.overlayMode === mode ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}>
+                  {mode === 'none' ? 'Kein' : mode === 'softlight' ? 'Soft' : 'Alpha'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <span className="text-xs font-medium text-gray-700">Kachel-Rotation</span>
+            <button onClick={() => updateSetting('enableRotation', !editedSettings.enableRotation)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${editedSettings.enableRotation ? 'bg-indigo-600' : 'bg-gray-200'}`}>
+              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${editedSettings.enableRotation ? 'translate-x-5' : 'translate-x-0.5'}`} />
+            </button>
+          </div>
+        </div>
+        <div className="p-5 border-t border-gray-100 flex gap-3">
+          <button onClick={handleApply}
+            className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2.5 rounded-xl text-sm transition-colors">
+            <Zap className="w-4 h-4" />
+            {saved ? 'Angewendet ✓' : 'Jetzt anwenden'}
+          </button>
+          <button onClick={handleSaveToDb} disabled={saving}
+            className="flex items-center gap-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-medium px-4 py-2.5 rounded-xl text-sm transition-colors disabled:opacity-50">
+            <Save className="w-4 h-4" />
+            {saving ? 'Speichert...' : 'In DB speichern'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AlgorithmSettings() {
   const [settings, setSettings] = useState<AlgoSettings>(loadSettings)
   const [saved, setSaved] = useState(false)
+  const [activeProfile, setActiveProfile] = useState<Profile | null>(null)
 
   const update = (key: keyof AlgoSettings, value: number | string | boolean) => {
     setSettings(prev => ({ ...prev, [key]: value }))
@@ -2134,6 +2326,14 @@ function AlgorithmSettings() {
     saveSettings({ ...DEFAULT_SETTINGS })
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
+  }
+  const applyProfileSettings = (profileSettings: Partial<AlgoSettings>) => {
+    const merged = { ...settings, ...profileSettings }
+    setSettings(merged)
+    saveSettings(merged)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+    setActiveProfile(null)
   }
 
   type NumericSettingKey = { [K in keyof AlgoSettings]: AlgoSettings[K] extends number ? K : never }[keyof AlgoSettings];
@@ -2157,11 +2357,39 @@ function AlgorithmSettings() {
 
   return (
     <div className="space-y-6">
+      {/* Profile Popup */}
+      {activeProfile && (
+        <ProfilePopup
+          profile={activeProfile}
+          onClose={() => setActiveProfile(null)}
+          onApply={applyProfileSettings}
+        />
+      )}
+      {/* Preset Profile Buttons */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-5">
+        <h2 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
+          <span className="text-lg">🎯</span> Schnell-Profile
+        </h2>
+        <p className="text-sm text-gray-500 mb-4">Klicke auf ein Profil um die Einstellungen zu sehen und anzupassen. Änderungen werden sofort im Studio angewendet.</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {PRESET_PROFILES.map(profile => (
+            <button
+              key={profile.id}
+              onClick={() => setActiveProfile(profile)}
+              className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all group"
+            >
+              <span className="text-3xl group-hover:scale-110 transition-transform">{profile.icon}</span>
+              <span className="text-sm font-semibold text-gray-700 group-hover:text-indigo-700">{profile.label}</span>
+              <span className="text-xs text-gray-400 text-center leading-tight">{profile.description.split(':')[0]}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div className="p-6 border-b border-gray-100">
           <h2 className="font-bold text-gray-900 flex items-center gap-2 mb-1">
             <Settings className="w-5 h-5 text-indigo-500" />
-            Algorithmus-Parameter
+            Algorithmus-Parameter (Feintuning)
           </h2>
           <p className="text-sm text-gray-500">Diese Werte steuern den Mosaic-Algorithmus im Studio. Änderungen werden sofort beim nächsten Mosaik-Rendering angewendet.</p>
         </div>
@@ -2252,6 +2480,183 @@ function AlgorithmSettings() {
 
       {/* Kategorie-Profile-Übersicht */}
       <CategoryProfilesPanel />
+    </div>
+  )
+}
+
+// ── Last Mosaic Quality Panel ────────────────────────────────────────────────
+function LastMosaicQualityPanel() {
+  const [data, setData] = useState<Record<string, unknown> | null>(null)
+  const [open, setOpen] = useState(true)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('mosaicprint_last_debug_report')
+      if (raw) setData(JSON.parse(raw))
+    } catch { /* ignore */ }
+    const handler = () => {
+      try {
+        const raw = localStorage.getItem('mosaicprint_last_debug_report')
+        if (raw) setData(JSON.parse(raw))
+      } catch { /* ignore */ }
+    }
+    window.addEventListener('mosaicDebugReportUpdated', handler)
+    return () => window.removeEventListener('mosaicDebugReportUpdated', handler)
+  }, [])
+
+  if (!data) {
+    return (
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <h3 className="font-bold text-gray-900 mb-1 flex items-center gap-2"><span>📊</span> Letztes Mosaik – Qualitätsanalyse</h3>
+        <p className="text-sm text-gray-400 mt-2">Noch kein Mosaik generiert in dieser Browser-Sitzung. Erstelle ein Mosaik im Studio, dann erscheint hier die Analyse.</p>
+      </div>
+    )
+  }
+
+  const pool = data.pool as Record<string, unknown> | undefined
+  const grid = data.grid as Record<string, unknown> | undefined
+  const weights = data.weights as Record<string, number> | undefined
+  const colorTransfer = data.colorTransfer as Record<string, unknown> | undefined
+  const overlay = data.overlay as Record<string, unknown> | undefined
+  const quality = data.quality as Record<string, unknown> | undefined
+  const suggestions = data.suggestions as string[] | undefined
+  const renderTime = data.renderTimeMs as number | undefined
+
+  const deltaE = quality?.avgDeltaE as number | undefined
+  const uniqueTiles = quality?.uniqueTiles as number | undefined
+  const totalTiles = quality?.totalTiles as number | undefined
+  const diversityPct = uniqueTiles && totalTiles ? Math.round((uniqueTiles / totalTiles) * 100) : undefined
+  const deltaEColor = !deltaE ? 'text-gray-400' : deltaE < 15 ? 'text-green-600' : deltaE < 25 ? 'text-orange-500' : 'text-red-600'
+  const deltaELabel = !deltaE ? '?' : deltaE < 15 ? '✅ Gut' : deltaE < 25 ? '⚠️ Mittel' : '❌ Niedrig'
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors">
+        <div className="flex items-center gap-3">
+          <span className="text-xl">📊</span>
+          <div className="text-left">
+            <h3 className="font-bold text-gray-900">Letztes Mosaik – Qualitätsanalyse</h3>
+            <p className="text-xs text-gray-500">
+              {renderTime ? `Renderzeit: ${(renderTime/1000).toFixed(1)}s` : ''}
+              {pool ? ` · ${(pool.loaded as number)?.toLocaleString('de-CH')} Tiles geladen` : ''}
+              {deltaE ? ` · ΔE ${deltaE.toFixed(1)}` : ''}
+            </p>
+          </div>
+        </div>
+        <span className="text-gray-400 text-sm">{open ? '▲ Einklappen' : '▼ Anzeigen'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-gray-100 p-5 space-y-5">
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-gray-50 rounded-xl p-4 text-center">
+              <div className="text-xs text-gray-500 mb-1">Ø Farb-Abstand</div>
+              <div className={`text-2xl font-bold ${deltaEColor}`}>{deltaE?.toFixed(1) ?? '?'}</div>
+              <div className="text-xs text-gray-400">DeltaE (LAB)</div>
+              <div className={`text-xs font-semibold mt-1 ${deltaEColor}`}>{deltaELabel}</div>
+            </div>
+            <div className="bg-gray-50 rounded-xl p-4 text-center">
+              <div className="text-xs text-gray-500 mb-1">Einzigartige Fotos</div>
+              <div className="text-2xl font-bold text-gray-900">{uniqueTiles?.toLocaleString('de-CH') ?? '?'}</div>
+              <div className="text-xs text-gray-400">von {totalTiles?.toLocaleString('de-CH') ?? '?'}</div>
+              {diversityPct !== undefined && (
+                <div className={`text-xs font-semibold mt-1 ${diversityPct > 50 ? 'text-green-600' : diversityPct > 30 ? 'text-orange-500' : 'text-red-600'}`}>{diversityPct}% Diversität</div>
+              )}
+            </div>
+            <div className="bg-gray-50 rounded-xl p-4 text-center">
+              <div className="text-xs text-gray-500 mb-1">Matching-Modus</div>
+              <div className="text-lg font-bold text-indigo-600">{pool?.matchingMode as string ?? '?'}</div>
+              <div className="text-xs text-gray-400">Top-K = {pool?.topK as number ?? '?'}</div>
+            </div>
+          </div>
+          {pool && (
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">1. Tile-Pool</h4>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {[
+                  { label: 'DB-Index (gesamt)', value: (pool.dbTotal as number)?.toLocaleString('de-CH'), sub: '15D Feature-Vektor' },
+                  { label: 'Geladen', value: (pool.loaded as number)?.toLocaleString('de-CH'), sub: 'Bilder im Speicher' },
+                  { label: 'Nach Filter', value: (pool.afterFilter as number)?.toLocaleString('de-CH'), sub: pool.filterNote as string },
+                  { label: 'Matching-Modus', value: pool.matchingMode as string, sub: `Top-K = ${pool.topK ?? '?'}`, valueClass: 'text-green-600' },
+                ].map(item => (
+                  <div key={item.label} className="bg-white rounded-lg p-3">
+                    <div className="text-xs text-gray-400">{item.label}</div>
+                    <div className={`text-lg font-bold ${(item as {valueClass?: string}).valueClass ?? 'text-gray-900'}`}>{item.value ?? '?'}</div>
+                    {item.sub && <div className="text-xs text-gray-400 mt-0.5">{item.sub}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {grid && (
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">2. Gitter & Matching</h4>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+                {[
+                  { label: 'Spalten', value: grid.cols },
+                  { label: 'Zeilen', value: grid.rows },
+                  { label: 'Kacheln', value: (grid.total as number)?.toLocaleString('de-CH') },
+                  { label: 'Tile-Px', value: `${grid.tilePx}px` },
+                  { label: 'Max-Reuse', value: grid.maxReuse },
+                  { label: 'Rotation', value: grid.rotation ? 'Ja' : 'Nein' },
+                ].map(item => (
+                  <div key={item.label} className="bg-white rounded-lg p-3 text-center">
+                    <div className="text-xs text-gray-400">{item.label}</div>
+                    <div className="text-base font-bold text-gray-900">{String(item.value ?? '?')}</div>
+                  </div>
+                ))}
+              </div>
+              {grid.antiRepeat && <div className="mt-2 text-xs text-gray-500">Anti-Repetitions-Radius: {(grid.antiRepeat as Record<string,unknown>).radius as number} Kacheln · Penalty {(grid.antiRepeat as Record<string,unknown>).penalty as number}</div>}
+              {grid.faceDetection && <div className="mt-1 text-xs text-gray-500">Gesichtserkennung: {(grid.faceDetection as Record<string,unknown>).count as number} Gesicht · {(grid.faceDetection as Record<string,unknown>).pct as number}% Kacheln</div>}
+            </div>
+          )}
+          {weights && (
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">3. Scoring-Gewichte</h4>
+              <div className="space-y-2">
+                {Object.entries(weights).map(([key, val]) => (
+                  <div key={key} className="flex items-center gap-3">
+                    <div className="w-44 text-xs text-gray-600 shrink-0">{key}</div>
+                    <div className="flex-1 bg-gray-200 rounded-full h-2"><div className="bg-indigo-500 h-2 rounded-full" style={{ width: `${Math.min(100, val * 100)}%` }} /></div>
+                    <div className="w-10 text-right text-xs font-bold text-gray-700">{Math.round(val * 100)}%</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {colorTransfer && (
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">4. Farb-Transfer (Reinhard-Stil)</h4>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+                {Object.entries(colorTransfer).map(([key, val]) => (
+                  <div key={key} className="bg-white rounded-lg p-3 text-center">
+                    <div className="text-xs text-gray-400">{key}</div>
+                    <div className="text-base font-bold text-gray-900">{String(val)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {overlay && (
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">5. Overlay</h4>
+              <div className="grid grid-cols-3 gap-3">
+                {Object.entries(overlay).map(([key, val]) => (
+                  <div key={key} className="bg-white rounded-lg p-3 text-center">
+                    <div className="text-xs text-gray-400">{key}</div>
+                    <div className="text-base font-bold text-gray-900">{String(val)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {suggestions && suggestions.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+              <h4 className="text-xs font-bold text-amber-700 uppercase tracking-wider mb-2">💡 Wie verbessere ich das Ergebnis?</h4>
+              <ul className="space-y-1">{suggestions.map((s, i) => <li key={i} className="text-xs text-amber-700 flex items-start gap-1.5"><span className="mt-0.5 shrink-0">•</span> {s}</li>)}</ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -2372,6 +2777,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const [autoLearnSteps, setAutoLearnSteps] = useState<Array<{step: string; status: string; message: string; ts: string}>>([])
   const [autoLearnRuns, setAutoLearnRuns] = useState<Array<{id: number; status: string; started_at: string; finished_at: string | null; steps_json: unknown}>>([])
   const [autoLearnExpandedRun, setAutoLearnExpandedRun] = useState<number | null>(null)
+  const [autoLearnRunsExpanded, setAutoLearnRunsExpanded] = useState(false)
   const fetchAutoLearnRuns = useCallback(async () => {
     try {
       const res = await fetch('/api/trpc/getAutoLearnRuns')
@@ -2487,6 +2893,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const downloadPdfReport = useCallback(async () => {
     setPdfGenerating(true)
     try {
+      const { jsPDF } = await import('jspdf')
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       const now = new Date().toLocaleString('de-CH')
       const pageW = 210; const margin = 14; const colW = pageW - 2 * margin
@@ -2932,7 +3339,9 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         </div>
       )}
 
-      {/* Test-Analyse */}
+      {/* Letztes Mosaik – Qualitätsanalyse */}
+      <LastMosaicQualityPanel />
+            {/* Test-Analyse */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <h3 className="font-bold text-gray-900 mb-1">🧪 Testbild-Analyse</h3>
         <p className="text-sm text-gray-500 mb-4">Analysiert ein Bild gegen den Tile-Pool und zeigt fehlende Farbbereiche + Keyword-Vorschläge für Smart-Import.</p>
@@ -3251,56 +3660,72 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
             ))}
           </div>
         )}
-        {/* Recent runs */}
+        {/* Recent runs - collapsible */}
         {autoLearnRuns.length > 0 && (
           <div>
-            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Letzte Zyklen</h4>
-            <div className="space-y-1">
-              {autoLearnRuns.slice(0, 5).map(run => (
-                <div key={run.id} className="flex items-center gap-3 text-xs px-3 py-2 bg-gray-50 rounded-lg">
-                  <span className="font-mono text-gray-400">#{run.id}</span>
-                  <span className={`font-medium px-2 py-0.5 rounded-full ${
-                    run.status === 'success' ? 'bg-green-100 text-green-700' :
-                    run.status === 'running' ? 'bg-blue-100 text-blue-700' :
-                    run.status === 'error' ? 'bg-red-100 text-red-700' :
-                    'bg-gray-100 text-gray-600'
-                  }`}>
-                    {run.status === 'success' ? '✅' : run.status === 'running' ? '⏳' : run.status === 'error' ? '❌' : '⚠️'} {run.status}
-                  </span>
-                  <span className="text-gray-500">{new Date(run.started_at).toLocaleString('de-CH')}</span>
-                  {run.finished_at && (
-                    <span className="text-gray-400">
-                      {Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
-                    </span>
-                  )}
-                  <button
-                    onClick={() => setAutoLearnExpandedRun(autoLearnExpandedRun === run.id ? null : run.id)}
-                    className="ml-auto text-indigo-500 hover:text-indigo-700"
-                  >
-                    {autoLearnExpandedRun === run.id ? '▲' : '▼'}
-                  </button>
-                </div>
-              ))}
-            </div>
-            {autoLearnExpandedRun !== null && (() => {
-              const run = autoLearnRuns.find(r => r.id === autoLearnExpandedRun)
-              if (!run || !run.steps_json) return null
-              const steps = Array.isArray(run.steps_json) ? run.steps_json : []
-              return (
-                <div className="mt-2 space-y-1 pl-4">
-                  {steps.map((step: {step: string; status: string; message: string; ts: string}, i: number) => (
-                    <div key={i} className={`text-xs px-3 py-1.5 rounded-lg ${
-                      step.status === 'done' ? 'bg-green-50 text-green-700' :
-                      step.status === 'running' ? 'bg-blue-50 text-blue-700' :
-                      step.status === 'error' ? 'bg-red-50 text-red-700' :
-                      'bg-gray-50 text-gray-500'
+            <button
+              onClick={() => setAutoLearnRunsExpanded(e => !e)}
+              className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 hover:text-gray-700"
+            >
+              {autoLearnRunsExpanded ? '▲' : '▼'} Letzte Zyklen ({autoLearnRuns.length})
+            </button>
+            {!autoLearnRunsExpanded && autoLearnRuns[0] && (
+              <div className="flex items-center gap-2 text-xs px-3 py-2 bg-gray-50 rounded-lg">
+                <span className="font-mono text-gray-400">#{autoLearnRuns[0].id}</span>
+                <span className={`font-medium px-2 py-0.5 rounded-full ${autoLearnRuns[0].status === 'success' ? 'bg-green-100 text-green-700' : autoLearnRuns[0].status === 'running' ? 'bg-blue-100 text-blue-700' : autoLearnRuns[0].status === 'error' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                  {autoLearnRuns[0].status === 'success' ? '✅' : autoLearnRuns[0].status === 'running' ? '⏳' : autoLearnRuns[0].status === 'error' ? '❌' : '⚠️'} {autoLearnRuns[0].status}
+                </span>
+                <span className="text-gray-400">{new Date(autoLearnRuns[0].started_at).toLocaleString('de-CH')}</span>
+              </div>
+            )}
+            {autoLearnRunsExpanded && (
+              <div className="space-y-1">
+                {autoLearnRuns.slice(0, 5).map(run => (
+                  <div key={run.id} className="flex items-center gap-3 text-xs px-3 py-2 bg-gray-50 rounded-lg">
+                    <span className="font-mono text-gray-400">#{run.id}</span>
+                    <span className={`font-medium px-2 py-0.5 rounded-full ${
+                      run.status === 'success' ? 'bg-green-100 text-green-700' :
+                      run.status === 'running' ? 'bg-blue-100 text-blue-700' :
+                      run.status === 'error' ? 'bg-red-100 text-red-700' :
+                      'bg-gray-100 text-gray-600'
                     }`}>
-                      {step.status === 'done' ? '✅' : step.status === 'running' ? '⏳' : step.status === 'error' ? '❌' : '⏭️'} {step.message}
+                      {run.status === 'success' ? '\u2705' : run.status === 'running' ? '\u23f3' : run.status === 'error' ? '\u274c' : '\u26a0\ufe0f'} {run.status}
+                    </span>
+                    <span className="text-gray-500">{new Date(run.started_at).toLocaleString('de-CH')}</span>
+                    {run.finished_at && (
+                      <span className="text-gray-400">
+                        {Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
+                      </span>
+                    )}
+                    <button
+                      onClick={() => setAutoLearnExpandedRun(autoLearnExpandedRun === run.id ? null : run.id)}
+                      className="ml-auto text-indigo-500 hover:text-indigo-700"
+                    >
+                      {autoLearnExpandedRun === run.id ? '\u25b2' : '\u25bc'}
+                    </button>
+                  </div>
+                ))}
+                {autoLearnExpandedRun !== null && (() => {
+                  const run = autoLearnRuns.find(r => r.id === autoLearnExpandedRun)
+                  if (!run || !run.steps_json) return null
+                  const steps = Array.isArray(run.steps_json) ? run.steps_json : []
+                  return (
+                    <div className="mt-2 space-y-1 pl-4">
+                      {steps.map((step: {step: string; status: string; message: string; ts: string}, i: number) => (
+                        <div key={i} className={`text-xs px-3 py-1.5 rounded-lg ${
+                          step.status === 'done' ? 'bg-green-50 text-green-700' :
+                          step.status === 'running' ? 'bg-blue-50 text-blue-700' :
+                          step.status === 'error' ? 'bg-red-50 text-red-700' :
+                          'bg-gray-50 text-gray-500'
+                        }`}>
+                          {step.status === 'done' ? '\u2705' : step.status === 'running' ? '\u23f3' : step.status === 'error' ? '\u274c' : '\u23ed\ufe0f'} {step.message}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              )
-            })()}
+                  )
+                })()}
+              </div>
+            )}
           </div>
         )}
       </div>

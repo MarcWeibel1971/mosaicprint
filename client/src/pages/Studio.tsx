@@ -2113,6 +2113,52 @@ export default function Studio() {
         // Timing
         generationMs: performance.now() - _debugStartMs,
       });
+      // Save debug report to localStorage so Admin panel can read it
+      try {
+        const reportForAdmin = {
+          pool: {
+            dbTotal: TOTAL_DB_TILES,
+            loaded: filteredValidImgs.length + (imgFeatures.length - filteredImgFeatures.length),
+            afterFilter: filteredValidImgs.length,
+            filterNote: `${imgFeatures.length - filteredImgFeatures.length} gefiltert`,
+            matchingMode: USE_2STAGE ? '2-Stage k-NN' : 'k-NN',
+            topK: TOP_K,
+          },
+          grid: {
+            cols: COLS, rows: ROWS, total: TOTAL_TILES, tilePx: TILE_PX,
+            maxReuse: MAX_REUSE, rotation: ENABLE_ROTATION,
+            antiRepeat: { radius: NEIGHBOR_RADIUS, penalty: NEIGHBOR_PENALTY },
+            faceDetection: { count: _debugFacesDetected, pct: Math.round((faceMask.filter(Boolean).length / TOTAL_TILES) * 100) },
+          },
+          weights: {
+            'Helligkeit (L)': savedSettings.brightnessWeight ?? 0.40,
+            'Farbe (LAB)': savedSettings.labWeight ?? 0.15,
+            'Textur': savedSettings.textureWeight ?? 0.08,
+            'Sättigung': savedSettings.saturationWeight ?? 0.25,
+            'Kanten': savedSettings.edgeWeight ?? 0.12,
+          },
+          colorTransfer: {
+            'L-Blend': (0.20 + 0.50 * Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10)).toFixed(2),
+            'AB-Blend': (0.10 + 0.20 * Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10)).toFixed(2),
+            'Kontrast-Boost': savedSettings.contrastBoost ?? 1.30,
+            'Histogram-Blend': savedSettings.histogramBlend ?? 0.0,
+          },
+          overlay: {
+            'Modus': savedSettings.overlayMode ?? 'none',
+            'Basis-Opacity': savedSettings.baseOverlay ?? 0.0,
+            'Edge-Boost': savedSettings.edgeBoost ?? 0.0,
+          },
+          quality: {
+            avgDeltaE: null as number | null,
+            uniqueTiles: null as number | null,
+            totalTiles: TOTAL_TILES,
+          },
+          renderTimeMs: performance.now() - _debugStartMs,
+          suggestions: [] as string[],
+        };
+        localStorage.setItem('mosaicprint_last_debug_report', JSON.stringify(reportForAdmin));
+        window.dispatchEvent(new Event('mosaicDebugReportUpdated'));
+      } catch { /* ignore */ }
     } catch { /* metrics are optional */ }
 
     // Step 5: Render with tile rotation and contrast boost
