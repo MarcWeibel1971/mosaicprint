@@ -21,13 +21,13 @@ async function getFaceLandmarker(): Promise<FaceLandmarkerInstance | null> {
   _faceLandmarkerLoading = true;
   try {
     const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision');
-    const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm'
-    );
+    // Use local WASM files (copied to public/mediapipe-wasm/) to avoid CDN version mismatch
+    const wasmPath = '/mediapipe-wasm';
+    const vision = await FilesetResolver.forVisionTasks(wasmPath);
     _faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-        delegate: 'GPU',
+        delegate: 'CPU', // Use CPU to avoid WebGL context issues on some servers
       },
       runningMode: 'IMAGE',
       numFaces: 3,
@@ -35,6 +35,7 @@ async function getFaceLandmarker(): Promise<FaceLandmarkerInstance | null> {
     return _faceLandmarker;
   } catch (e) {
     console.warn('[MediaPipe] FaceLandmarker load failed:', e);
+    _faceLandmarkerLoading = false; // Reset so retry is possible
     return null;
   }
 }
