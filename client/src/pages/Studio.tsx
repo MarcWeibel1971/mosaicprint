@@ -248,7 +248,7 @@ export default function Studio() {
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
-  const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number}>>([]);
+  const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number; profileSettings?: Record<string, unknown>}>>([]);
   // Owner mode: activated by secret URL param ?owner=2b98c0bb3c8e7b17868d22ac8e157bfe
   // Once activated, stored permanently in localStorage
   const [isAdminMode] = useState<boolean>(() => {
@@ -726,42 +726,61 @@ export default function Studio() {
             const darkRatio = darkPixels / totalPx;
             const brightRatio = brightPixels / totalPx;
 
-            // Theme-Scoring basierend auf Farbpalette
-            const themeScores: Record<string, number> = {
-              sunset: warmRatio * 3.0 + darkRatio * 0.5,           // warm + some dark
-              ocean: coolRatio * 2.5 + brightRatio * 0.5,          // cool + bright
-              nature: greenRatio * 2.5 + brightRatio * 0.3,        // green dominant
-              urban: darkRatio * 1.5 + (1 - warmRatio) * 0.5,     // dark, less warm
-              abstract: purpleRatio * 2.0 + (warmRatio + coolRatio) * 0.5, // mixed/vivid
-              winter: coolRatio * 2.0 + brightRatio * 1.5,         // cool + very bright
-              portrait: (imageType === 'portrait') ? 2.0 : 0.5,    // boost if face detected
-              food: warmRatio * 1.5 + brightRatio * 1.0,           // warm + bright
-              travel: (warmRatio + greenRatio) * 1.2,              // warm or green
-              animals: greenRatio * 1.0 + warmRatio * 0.8,         // varied (nature + warm)
-              flowers: (warmRatio + purpleRatio) * 1.5 + brightRatio * 0.8, // colorful + bright
-              space: darkRatio * 2.0 + purpleRatio * 1.5 + coolRatio * 0.5, // dark + purple/blue
-            };
+            // Profile-Scoring basierend auf Farbpalette – mappt auf die 9 Admin-Profile
+            // Jedes Profil hat einen Score basierend auf Bildmerkmalen
+            const PROFILE_SCORES: Array<{key: string; label: string; emoji: string; score: number; profileSettings: Record<string, unknown>}> = [
+              {
+                key: 'portrait', label: 'Portrait', emoji: '👤',
+                score: (imageType === 'portrait') ? 3.0 : warmRatio * 0.8 + brightRatio * 0.5,
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.30, textureWeight: 0.12, edgeWeight: 0.13, contrastBoost: 1.28, histogramBlend: 0.08, overlayMode: 'softlight', enableRotation: false, neighborRadius: 5, neighborPenalty: 240 }
+              },
+              {
+                key: 'portrait_dark', label: 'Portrait dunkel', emoji: '🧑🏿',
+                score: (imageType === 'portrait' && darkRatio > 0.35) ? 2.5 : 0,
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.18, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.35, textureWeight: 0.10, edgeWeight: 0.10, contrastBoost: 1.15, histogramBlend: 0.09, overlayMode: 'softlight', enableRotation: false, neighborRadius: 5, neighborPenalty: 220 }
+              },
+              {
+                key: 'white_hair', label: 'Weiße Haare', emoji: '👴',
+                score: (imageType === 'portrait' && brightRatio > 0.40) ? 2.0 : 0,
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.60, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, contrastBoost: 1.20, histogramBlend: 0.07, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 350 }
+              },
+              {
+                key: 'landscape', label: 'Landschaft', emoji: '🏔️',
+                score: greenRatio * 2.5 + (imageType !== 'portrait' ? brightRatio * 0.8 : 0),
+                profileSettings: { baseTiles: 80, tilePx: 10, baseOverlay: 0.0, edgeBoost: 0.0, brightnessWeight: 0.28, labWeight: 0.40, textureWeight: 0.20, edgeWeight: 0.12, contrastBoost: 1.45, histogramBlend: 0.12, overlayMode: 'none', enableRotation: true, neighborRadius: 8, neighborPenalty: 150 }
+              },
+              {
+                key: 'night', label: 'Nacht / Skyline', emoji: '🌃',
+                score: darkRatio * 2.5 + coolRatio * 0.8,
+                profileSettings: { baseTiles: 90, tilePx: 9, baseOverlay: 0.05, edgeBoost: 0.15, brightnessWeight: 0.35, labWeight: 0.25, textureWeight: 0.30, edgeWeight: 0.10, contrastBoost: 1.65, histogramBlend: 0.05, overlayMode: 'softlight', enableRotation: true, neighborRadius: 6, neighborPenalty: 200 }
+              },
+              {
+                key: 'colorful', label: 'Farbenreich', emoji: '🎨',
+                score: (warmRatio + purpleRatio) * 2.0 + brightRatio * 1.0,
+                profileSettings: { baseTiles: 100, tilePx: 8, baseOverlay: 0.0, edgeBoost: 0.0, brightnessWeight: 0.25, labWeight: 0.45, textureWeight: 0.15, edgeWeight: 0.15, contrastBoost: 1.40, histogramBlend: 0.13, overlayMode: 'none', enableRotation: true, neighborRadius: 6, neighborPenalty: 200 }
+              },
+              {
+                key: 'abstract_art', label: 'Abstrakt / Kunst', emoji: '🖼️',
+                score: purpleRatio * 2.0 + (warmRatio + coolRatio) * 0.8,
+                profileSettings: { baseTiles: 100, tilePx: 9, baseOverlay: 0.0, edgeBoost: 0.0, brightnessWeight: 0.20, labWeight: 0.50, textureWeight: 0.15, edgeWeight: 0.15, contrastBoost: 1.40, histogramBlend: 0.13, overlayMode: 'none', enableRotation: true, neighborRadius: 5, neighborPenalty: 180 }
+              },
+              {
+                key: 'highres', label: 'Hochauflösend', emoji: '🔬',
+                score: 0.5, // always available as option
+                profileSettings: { baseTiles: 150, tilePx: 6, baseOverlay: 0.0, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.25, textureWeight: 0.15, edgeWeight: 0.15, contrastBoost: 1.15, histogramBlend: 0.05, overlayMode: 'none', enableRotation: false, neighborRadius: 4, neighborPenalty: 310 }
+              },
+              {
+                key: 'minimal', label: 'Minimalistisch', emoji: '⬜',
+                score: brightRatio * 1.5 + (1 - warmRatio) * 0.5,
+                profileSettings: { baseTiles: 140, tilePx: 7, baseOverlay: 0.0, edgeBoost: 0.0, brightnessWeight: 0.35, labWeight: 0.40, textureWeight: 0.15, edgeWeight: 0.10, contrastBoost: 1.10, histogramBlend: 0.06, overlayMode: 'none', enableRotation: false, neighborRadius: 5, neighborPenalty: 200 }
+              },
+            ];
 
-            // Top 3 Themen nach Score, Mindest-Score 0.3
-            const THEME_META: Record<string, {label: string; emoji: string}> = {
-              sunset: { label: 'Sunset', emoji: '🌅' },
-              ocean: { label: 'Ozean', emoji: '🌊' },
-              nature: { label: 'Natur', emoji: '🌿' },
-              urban: { label: 'Urban', emoji: '🏙️' },
-              abstract: { label: 'Abstrakt', emoji: '🎨' },
-              winter: { label: 'Winter', emoji: '❄️' },
-              portrait: { label: 'Portrait', emoji: '👤' },
-              food: { label: 'Food', emoji: '🍕' },
-              travel: { label: 'Reise', emoji: '✈️' },
-              animals: { label: 'Tiere', emoji: '🐾' },
-              flowers: { label: 'Blumen', emoji: '🌸' },
-              space: { label: 'Space', emoji: '🌌' },
-            };
-            const sorted = Object.entries(themeScores)
-              .filter(([, s]) => s > 0.3)
-              .sort(([, a], [, b]) => b - a)
-              .slice(0, 3)
-              .map(([key, score]) => ({ key, score, ...THEME_META[key] }));
+            // Top 3 Profile nach Score, Mindest-Score 0.4
+            const sorted = PROFILE_SCORES
+              .filter(p => p.score > 0.4)
+              .sort((a, b) => b.score - a.score)
+              .slice(0, 3);
             setSuggestedThemes(sorted);
           } catch (e) {
             console.warn('[Studio] Theme analysis failed:', e);
@@ -1213,8 +1232,8 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
       const neededArray = Array.from(neededTileIds);
-      const ATLAS_CHUNK = isMobileOrSlow ? 800 : 1500; // max tiles per atlas request
-      const ATLAS_TIMEOUT = isMobileOrSlow ? 45000 : 90000;
+      const ATLAS_CHUNK = isMobileOrSlow ? 300 : 500; // max tiles per atlas request (Railway 60s timeout)
+      const ATLAS_TIMEOUT = isMobileOrSlow ? 40000 : 55000; // stay under Railway's 60s limit
 
       // Helper: fetch one atlas chunk and extract tiles into tileImgMap
       const fetchAtlasChunk = async (chunkIds: number[], progressStart: number, progressEnd: number): Promise<boolean> => {
@@ -2894,16 +2913,22 @@ export default function Studio() {
           <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-sm">🤖</span>
-              <span className="text-xs font-semibold text-amber-800">KI-Themen-Vorschlaege basierend auf deinem Foto</span>
+              <span className="text-xs font-semibold text-amber-800">KI-Profil-Empfehlungen – Klick lädt optimale Einstellungen</span>
             </div>
             <div className="flex flex-wrap gap-2">
-              {suggestedThemes.map(({ key, label, emoji, score }) => (
+              {suggestedThemes.map(({ key, label, emoji, score, profileSettings }) => (
                 <button
                   key={key}
                   onClick={() => {
-                    setSelectedTheme(key);
-                    selectedThemeRef.current = key;
-                    // Trigger re-render with new theme
+                    // Apply profile settings to mosaicSettings (same as Admin applyProfile)
+                    if (profileSettings) {
+                      try {
+                        const existing = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
+                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existing, ...profileSettings }));
+                        window.dispatchEvent(new Event('mosaicSettingsChanged'));
+                      } catch { /* ignore */ }
+                    }
+                    // Trigger re-render with new settings
                     setTimeout(() => {
                       const evt = new CustomEvent('mosaicprint:rerender');
                       window.dispatchEvent(evt);
@@ -2911,14 +2936,14 @@ export default function Studio() {
                   }}
                   style={{ opacity: 1 }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
-                    selectedTheme === key
+                    autoPresetApplied === key
                       ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
                       : 'bg-white text-amber-700 border-amber-300 hover:border-amber-500 hover:bg-amber-100'
                   }`}
                 >
                   <span>{emoji}</span>
                   <span>{label}</span>
-                  {score > 1.2 && <span className="text-xs opacity-70">?</span>}
+                  {score > 1.5 && <span className="text-xs opacity-70 ml-0.5">✓</span>}
                 </button>
               ))}
               <button
