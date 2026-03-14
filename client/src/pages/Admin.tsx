@@ -2929,8 +2929,84 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         doc.setTextColor(50, 50, 50)
       }
 
-      // Summary of last runs
-      addSection('1. Check-Übersicht')
+      // ── Section 1: Letztes Mosaik – Qualitäts-Score ──────────────────────────
+      addSection('1. Letztes Mosaik – Qualitäts-Score')
+      let lastReport: Record<string, unknown> | null = null
+      try { lastReport = JSON.parse(localStorage.getItem('mosaicprint_last_debug_report') || 'null') } catch {}
+      if (!lastReport) {
+        addText('Noch kein Mosaik generiert. Erstelle ein Mosaik im Studio, dann erscheint hier die Analyse.')
+      } else {
+        const q = lastReport.quality as Record<string, unknown> | undefined
+        const p = lastReport.pool as Record<string, unknown> | undefined
+        const g = lastReport.grid as Record<string, unknown> | undefined
+        const w = lastReport.weights as Record<string, number> | undefined
+        const ct = lastReport.colorTransfer as Record<string, unknown> | undefined
+        const ov = lastReport.overlay as Record<string, unknown> | undefined
+        const renderMs = lastReport.renderTimeMs as number | undefined
+
+        if (q) {
+          const dE = q.avgDeltaE as number | undefined
+          const uTiles = q.uniqueTiles as number | undefined
+          const tTiles = q.totalTiles as number | undefined
+          const dELabel = !dE ? 'n/a' : dE < 15 ? 'GUT' : dE < 25 ? 'MITTEL' : 'NIEDRIG'
+          addRow('Ø Farb-Abstand (DeltaE)', dE ? `${dE.toFixed(1)} (${dELabel})` : 'n/a')
+          addRow('Einzigartige Fotos', uTiles ? `${uTiles.toLocaleString('de-CH')} von ${tTiles?.toLocaleString('de-CH') ?? '?'} Kacheln (${uTiles && tTiles ? Math.round(uTiles/tTiles*100) : '?'}% Diversität)` : 'n/a')
+          if (q.satLow !== undefined) addRow('Sättigungs-Verteilung', `Grau/Neutral: ${q.satLow}%  |  Mittel: ${q.satMid}%  |  Sättigt: ${q.satHigh}%`)
+          if (renderMs) addRow('Renderzeit', `${(renderMs / 1000).toFixed(1)}s`)
+        }
+        y += 3
+        if (p) {
+          addRow('Tile-Pool (DB)', `${(p.dbTotal as number)?.toLocaleString('de-CH') ?? '?'} Tiles im 15D-Index`)
+          addRow('Geladen / Nach Filter', `${(p.loaded as number)?.toLocaleString('de-CH') ?? '?'} / ${(p.afterFilter as number)?.toLocaleString('de-CH') ?? '?'}`)
+          addRow('Matching-Modus', `${p.matchingMode ?? '?'} | Top-K = ${p.topK ?? '?'}`)
+        }
+        if (g) {
+          y += 3
+          addRow('Gitter', `${g.cols} x ${g.rows} = ${(g.total as number)?.toLocaleString('de-CH')} Kacheln | ${g.tilePx}px pro Tile`)
+          addRow('Anti-Repetition', `Radius ${(g.antiRepeat as Record<string,unknown>)?.radius ?? '?'} | Penalty ${(g.antiRepeat as Record<string,unknown>)?.penalty ?? '?'}`)
+          addRow('Gesichtserkennung', `${(g.faceDetection as Record<string,unknown>)?.count ?? 0} Gesichter | ${(g.faceDetection as Record<string,unknown>)?.pct ?? 0}% Kacheln`)
+        }
+        if (w) {
+          y += 3
+          doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(50, 50, 50)
+          doc.text('Scoring-Gewichte:', margin, y); y += 5
+          doc.setFont('helvetica', 'normal')
+          for (const [key, val] of Object.entries(w)) {
+            const barW = Math.round(val * 80)
+            doc.setFillColor(99, 102, 241)
+            doc.rect(margin + 55, y - 3.5, barW, 3.5, 'F')
+            doc.setFontSize(8)
+            doc.text(key, margin, y)
+            doc.text(`${Math.round(val * 100)}%`, margin + 55 + barW + 2, y)
+            y += 5
+          }
+        }
+        if (ct) {
+          y += 3
+          addRow('Farb-Transfer', Object.entries(ct).map(([k, v]) => `${k}: ${v}`).join('  |  '))
+        }
+        if (ov) {
+          addRow('Overlay', Object.entries(ov).map(([k, v]) => `${k}: ${v}`).join('  |  '))
+        }
+        // Suggestions
+        const suggestions = lastReport.suggestions as string[] | undefined
+        if (suggestions && suggestions.length > 0) {
+          y += 4
+          doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(180, 100, 0)
+          doc.text('Verbesserungshinweise:', margin, y); y += 6
+          doc.setFont('helvetica', 'normal'); doc.setTextColor(80, 60, 0)
+          for (const s of suggestions) {
+            if (y > 270) { doc.addPage(); y = 20 }
+            const lines = doc.splitTextToSize(`• ${s}`, colW - 4)
+            doc.setFontSize(9); doc.text(lines, margin + 2, y); y += lines.length * 5 + 2
+          }
+          doc.setTextColor(50, 50, 50)
+        }
+      }
+
+      // ── Section 2: Check-Übersicht ─────────────────────────────────────────────
+      y += 6
+      addSection('2. QA-Check-Übersicht')
       if (runs.length === 0) {
         addText('Noch keine Checks ausgeführt.')
       } else {
@@ -2946,24 +3022,24 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         }
       }
 
-      // Run history
+      // ── Section 3: Run-Verlauf ────────────────────────────────────────────────
       y += 4
-      addSection('2. Run-Verlauf (letzte 20)')
+      addSection('3. Run-Verlauf (letzte 20)')
       const recent = runs.slice(0, 20)
       for (const run of recent) {
         const dur = run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'
         addRow(`#${run.id} ${run.checkType}`, `${run.status} | ${new Date(run.startedAt).toLocaleString('de-CH')} | ${dur}`)
       }
 
-      // Recommendations
+      // ── Section 4: Empfehlungen ───────────────────────────────────────────────
       y += 4
-      addSection('3. Empfehlungen')
+      addSection('4. Empfehlungen')
       const failedChecks = Object.entries(lastRunByType).filter(([, r]) => r.status === 'error' || r.status === 'warning')
       if (failedChecks.length === 0) {
-        addText('✅ Alle Checks bestanden. Keine Massnahmen erforderlich.')
+        addText('Alle Checks bestanden. Keine Massnahmen erforderlich.')
       } else {
         for (const [checkType, run] of failedChecks) {
-          addText(`⚠️ ${checkType}: ${run.status.toUpperCase()} – Details im Check-Tab prüfen.`)
+          addText(`${checkType}: ${run.status.toUpperCase()} - Details im Check-Tab pruefen.`)
         }
       }
 
@@ -3730,6 +3806,152 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
+      {/* ── Semantic Auto-Tagger ──────────────────────────────────────────────────────────── */}
+      <SemanticTaggerPanel onMessage={onMessage} />
+
+    </div>
+  )
+}
+
+// ── Semantic Tagger Panel ────────────────────────────────────────────────
+function SemanticTaggerPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const [running, setRunning] = useState(false)
+  const [forceRetag, setForceRetag] = useState(false)
+  const [result, setResult] = useState<{ tagged: number; skipped: number } | null>(null)
+  const [stats, setStats] = useState<Array<{ theme: string; count: number; pct: number }> | null>(null)
+  const [open, setOpen] = useState(true)
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trpc/getSemanticThemeStats')
+      const data = await res.json()
+      const rows = data.result?.data?.json ?? data.result?.data ?? []
+      setStats(rows)
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { fetchStats() }, [fetchStats])
+
+  const runTagger = useCallback(async () => {
+    if (!forceRetag && !confirm('Alle Tiles ohne Semantic-Tag automatisch klassifizieren? (Kann bei 22.000+ Tiles 1-2 Minuten dauern)')) return
+    if (forceRetag && !confirm('ALLE Tiles (auch bereits getaggte) neu klassifizieren? (Dauert bei 22.000+ Tiles 2-3 Minuten)')) return
+    setRunning(true); setResult(null)
+    try {
+      const res = await fetch('/api/trpc/runSemanticTagger', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forceRetag })
+      })
+      const data = await res.json()
+      const r = data.result?.data?.json ?? data.result?.data ?? {}
+      setResult({ tagged: r.tagged ?? 0, skipped: r.skipped ?? 0 })
+      onMessage({ text: `✅ Semantic-Tagger: ${r.tagged ?? 0} Tiles getaggt`, type: 'success' })
+      fetchStats()
+    } catch (e) {
+      onMessage({ text: `❌ Tagger-Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setRunning(false)
+    }
+  }, [forceRetag, onMessage, fetchStats])
+
+  const THEME_COLORS: Record<string, string> = {
+    portrait: '#f97316', nature_forest: '#22c55e', nature_ocean: '#06b6d4',
+    nature_sunset: '#f59e0b', city_night: '#6366f1', abstract_colorful: '#ec4899',
+    abstract_dark: '#374151', abstract_light: '#d1d5db', nature_snow: '#bfdbfe',
+    nature_warm: '#fbbf24', untagged: '#9ca3af',
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors">
+        <div className="flex items-center gap-3">
+          <span className="text-xl">🏷️</span>
+          <div className="text-left">
+            <h3 className="font-bold text-gray-900">Semantic Auto-Tagger</h3>
+            <p className="text-xs text-gray-500">
+              Klassifiziert Tiles automatisch nach Thema (Portrait, Natur, Nacht, etc.) anhand der LAB-Farbwerte.
+              {stats && ` · ${stats.find(s => s.theme === 'untagged')?.count?.toLocaleString('de-CH') ?? 0} ungetaggt`}
+            </p>
+          </div>
+        </div>
+        <span className="text-gray-400 text-sm">{open ? '▲ Einklappen' : '▼ Anzeigen'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-gray-100 p-5 space-y-5">
+          {/* Controls */}
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              onClick={runTagger}
+              disabled={running}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition-colors"
+            >
+              {running ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🏷️</span>}
+              {running ? 'Tagge Tiles...' : (forceRetag ? 'Alle neu taggen' : 'Ungetaggte taggen')}
+            </button>
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={forceRetag}
+                onChange={e => setForceRetag(e.target.checked)}
+                className="w-4 h-4 rounded"
+              />
+              Alle Tiles neu klassifizieren (Force-Retag)
+            </label>
+            <button onClick={fetchStats} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1">
+              <RefreshCw className="w-3 h-3" /> Statistik aktualisieren
+            </button>
+          </div>
+
+          {/* Result */}
+          {result && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
+              <span className="text-2xl">✅</span>
+              <div>
+                <div className="font-semibold text-green-800">{result.tagged.toLocaleString('de-CH')} Tiles getaggt</div>
+                <div className="text-xs text-green-600">{result.skipped.toLocaleString('de-CH')} übersprungen (bereits getaggt)</div>
+              </div>
+            </div>
+          )}
+
+          {/* Theme Distribution */}
+          {stats && stats.length > 0 && (
+            <div>
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Themen-Verteilung</h4>
+              <div className="space-y-2">
+                {stats.map(s => (
+                  <div key={s.theme} className="flex items-center gap-3">
+                    <div
+                      className="w-3 h-3 rounded-full shrink-0"
+                      style={{ backgroundColor: THEME_COLORS[s.theme] ?? '#9ca3af' }}
+                    />
+                    <div className="w-40 text-xs text-gray-700 shrink-0 truncate">{s.theme}</div>
+                    <div className="flex-1 bg-gray-100 rounded-full h-2">
+                      <div
+                        className="h-2 rounded-full transition-all"
+                        style={{ width: `${Math.min(100, s.pct)}%`, backgroundColor: THEME_COLORS[s.theme] ?? '#9ca3af' }}
+                      />
+                    </div>
+                    <div className="w-20 text-right text-xs text-gray-500">{s.count.toLocaleString('de-CH')} ({s.pct}%)</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 text-xs text-gray-400">
+                Gesamt: {stats.reduce((s, r) => s + r.count, 0).toLocaleString('de-CH')} Tiles
+              </div>
+            </div>
+          )}
+
+          {/* Info Box */}
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+            <h4 className="text-xs font-bold text-blue-700 uppercase tracking-wider mb-2">Wie funktioniert der Tagger?</h4>
+            <p className="text-xs text-blue-700">
+              Der Tagger analysiert die LAB-Farbwerte jedes Tiles (kein Bild-Download nötig) und klassifiziert es in eine von 10+ Kategorien:
+              Portrait (Hauttöne), Natur-Wald (Grün), Natur-Ozean (Blau/Cyan), Natur-Sonnenuntergang (Orange/Rot),
+              Nacht/Skyline (Dunkel), Abstrakt-Bunt (hohe Sättigung), Abstrakt-Hell, Abstrakt-Dunkel, Natur-Schnee (Hell/Neutral), Natur-Warm.
+              Diese Tags ermöglichen thematisches Filtering im Studio und gezielteres Smart-Import.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

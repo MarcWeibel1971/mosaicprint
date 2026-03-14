@@ -2149,12 +2149,25 @@ export default function Studio() {
             'Edge-Boost': savedSettings.edgeBoost ?? 0.0,
           },
           quality: {
-            avgDeltaE: null as number | null,
-            uniqueTiles: null as number | null,
+            avgDeltaE: Math.round((deltaESum / validCount) * 10) / 10,
+            uniqueTiles: uniqueUsed.size,
             totalTiles: TOTAL_TILES,
+            satLow: Math.round((satLowCount / validCount) * 100),
+            satMid: Math.round((satMidCount / validCount) * 100),
+            satHigh: Math.round((satHighCount / validCount) * 100),
           },
           renderTimeMs: performance.now() - _debugStartMs,
-          suggestions: [] as string[],
+          suggestions: (() => {
+            const s: string[] = [];
+            const avgDE = deltaESum / validCount;
+            const div = uniqueUsed.size / filteredValidImgs.length;
+            if (avgDE > 25) s.push('Farb-Abstand sehr hoch (ΔE > 25): Mehr Tiles importieren (Smart-Import) in unterrepräsentierten Farbbereichen.');
+            if (avgDE > 15) s.push('Farb-Transfer aktivieren (Histogram-Blend > 0.05) für bessere Farbgenauigkeit.');
+            if (div < 0.3) s.push('Tile-Diversität niedrig (< 30%): Max-Reuse erhöhen oder mehr Tiles importieren.');
+            if (TOTAL_TILES > 5000 && uniqueUsed.size / TOTAL_TILES < 0.5) s.push('Für grosse Mosaike (> 5000 Kacheln) mindestens 10.000 Tiles im Pool empfohlen.');
+            if (avgDE < 10) s.push('Sehr gute Farbgenauigkeit! Overlay kann auf 0 reduziert werden für reines Tile-Rendering.');
+            return s;
+          })(),
         };
         localStorage.setItem('mosaicprint_last_debug_report', JSON.stringify(reportForAdmin));
         window.dispatchEvent(new Event('mosaicDebugReportUpdated'));
