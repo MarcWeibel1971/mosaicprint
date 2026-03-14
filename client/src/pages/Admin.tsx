@@ -3305,22 +3305,50 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     if (!testImageUrl.trim() && !testImageFile) return
     setTestAnalyzing(true); setTestAnalysis(null)
     try {
-      // Compute LAB zones + Feature Vector client-side via Canvas
+      // Step 1: fal.ai Vision Analysis (Florence-2)
+      let falResult: {
+        ok: boolean; description?: string; sceneType?: string; hasFace?: boolean;
+        faceCount?: number; attributes?: Record<string, boolean>;
+        keywordSuggestions?: Array<{keyword: string; reason: string; priority: string}>;
+        imageUrl?: string; error?: string;
+      } | null = null
+
+      if (testImageFile) {
+        // Upload base64 to server for fal.ai analysis
+        const falRes = await fetch('/api/analyze-image-fal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64: testImageFile.base64.replace(/^data:[^;]+;base64,/, ''), mimeType: 'image/jpeg' }),
+          signal: AbortSignal.timeout(45000),
+        })
+        falResult = await falRes.json()
+        console.log('[Admin] fal.ai result:', falResult)
+      } else if (testImageUrl.trim()) {
+        // For URL: use Florence-2 directly via server proxy
+        const falRes = await fetch('/api/analyze-image-fal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageUrl: testImageUrl.trim() }),
+          signal: AbortSignal.timeout(45000),
+        })
+        falResult = await falRes.json()
+      }
+
+      // Step 2: Also compute LAB zones client-side for pool gap analysis
       let labZones: Array<{L: number; a: number; b: number; count: number}> = []
-      let featureVector: ReturnType<typeof computeLabZonesFromImage> extends Promise<infer T> ? T['featureVector'] : never
-      let imageError = ''
+      let featureVector = { sceneType: falResult?.sceneType ?? 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: falResult?.hasFace ?? false, skyDetected: false, waterDetected: false, tileType: 'medium' }
+      let imageError = falResult?.error ?? ''
       const imageSrc = testImageFile ? testImageFile.base64 : testImageUrl.trim()
       try {
         const result = await computeLabZonesFromImage(imageSrc)
         labZones = result.labZones
-        featureVector = result.featureVector
-        if (labZones.length === 0) imageError = 'Canvas konnte Bild nicht lesen (CORS?)'
+        featureVector = { ...result.featureVector, sceneType: falResult?.sceneType ?? result.featureVector.sceneType, facesDetected: falResult?.hasFace ?? result.featureVector.facesDetected }
       } catch (e) {
-        const err = e as Error
-        imageError = `${err?.name ?? 'Error'}: ${err?.message ?? String(e)} | stack: ${err?.stack?.split('\n').slice(0,3).join(' | ') ?? 'n/a'}`
-        console.error('[Admin] computeLabZonesFromImage failed:', e)
-        featureVector = { sceneType: 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: false, skyDetected: false, waterDetected: false, tileType: 'medium' }
+        console.warn('[Admin] Canvas LAB analysis failed (non-critical):', e)
+        // Not fatal – fal.ai result is the primary source
       }
+
+      // Step 3: Server pool gap analysis
       const body = {
         imageUrl: testImageFile ? undefined : testImageUrl.trim(),
         labZones,
@@ -3333,12 +3361,23 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       })
       const data = await res.json()
       const serverResult = data.result?.data?.json ?? data.result?.data
-      // Merge feature vector into result
-      setTestAnalysis({ ...serverResult, featureVector, imageError: imageError || serverResult?.imageError })
-      // Auto-detect category from feature vector
-      if (labZones.length > 0) {
-        setDetectedCategory(featureVector.sceneType !== 'unknown' ? featureVector.sceneType : detectCategory(labZones))
-      }
+
+      // Merge fal.ai + LAB + server results
+      const mergedKeywords = [
+        ...(falResult?.keywordSuggestions ?? []),
+        ...(serverResult?.keywordSuggestions ?? []),
+      ].filter((k, i, arr) => arr.findIndex(x => x.keyword === k.keyword) === i).slice(0, 15)
+
+      setTestAnalysis({
+        ...serverResult,
+        featureVector,
+        imageError: imageError || serverResult?.imageError,
+        falDescription: falResult?.description,
+        falSceneType: falResult?.sceneType,
+        falAttributes: falResult?.attributes,
+        keywordSuggestions: mergedKeywords,
+      })
+      setDetectedCategory(falResult?.sceneType ?? (featureVector.sceneType !== 'unknown' ? featureVector.sceneType : detectCategory(labZones)))
     } catch (e) {
       onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
     } finally { setTestAnalyzing(false) }
@@ -3569,6 +3608,24 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         </div>
         {testAnalysis && (
           <div className="space-y-4">
+            {/* fal.ai Florence-2 Description */}
+            {(testAnalysis as {falDescription?: string}).falDescription && (
+              <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
+                <h4 className="text-sm font-bold text-violet-800 mb-2">🤖 KI-Bildbeschreibung (Florence-2)</h4>
+                <p className="text-xs text-violet-900 leading-relaxed">{(testAnalysis as {falDescription: string}).falDescription}</p>
+                {(testAnalysis as {falAttributes?: Record<string, boolean>}).falAttributes && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {Object.entries((testAnalysis as {falAttributes: Record<string, boolean>}).falAttributes)
+                      .filter(([, v]) => v)
+                      .map(([k]) => (
+                        <span key={k} className="px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full text-xs font-medium">
+                          {k === 'hasBeard' ? '🧔 Bart' : k === 'hasGlasses' ? '👓 Brille' : k === 'hasWhiteHair' ? '👴 Weißes Haar' : k === 'isNight' ? '🌃 Nacht' : k === 'isNature' ? '🌿 Natur' : k === 'isColorful' ? '🎨 Farbenreich' : k === 'isArchitecture' ? '🏛️ Architektur' : k}
+                        </span>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
             {/* Feature Vector */}
             {testAnalysis.featureVector && (<>
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">

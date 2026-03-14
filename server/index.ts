@@ -508,6 +508,105 @@ app.post("/api/admin/remove-shutterstock", async (_req, res) => {
   }
 });
 
+// ── fal.ai Image Analysis ────────────────────────────────────────────────────
+// POST /api/analyze-image-fal
+// Body: { imageBase64: string, mimeType?: string }
+// Returns: { description, sceneType, attributes, keywordSuggestions, hasFace, faceCount }
+app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, res) => {
+  try {
+    const FAL_KEY = process.env.FAL_AI_KEY || '3895037d-8203-4913-bb33-8be7665771e4:29c49fc075b096e60783b291fc7467c9';
+    const { imageBase64, imageUrl: directUrl, mimeType = 'image/jpeg' } = req.body ?? {};
+    if (!imageBase64 && !directUrl) return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
+
+    let file_url: string;
+
+    if (directUrl) {
+      // Use URL directly for Florence-2
+      file_url = directUrl;
+    } else {
+      // Step 1: Upload image to fal.ai storage
+      const imgBuf = Buffer.from(imageBase64, 'base64');
+      const ext = mimeType.includes('png') ? 'png' : 'jpg';
+      const initResp = await fetch('https://rest.alpha.fal.ai/storage/upload/initiate', {
+        method: 'POST',
+        headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: `analysis.${ext}`, content_type: mimeType }),
+      });
+      if (!initResp.ok) throw new Error(`fal.ai storage initiate failed: ${initResp.status}`);
+      const { file_url: furl, upload_url } = await initResp.json() as { file_url: string; upload_url: string };
+      file_url = furl;
+
+      // Step 2: Upload the actual image bytes
+      const uploadResp = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': mimeType },
+        body: imgBuf,
+      });
+      if (!uploadResp.ok) throw new Error(`fal.ai storage upload failed: ${uploadResp.status}`);
+    }
+
+    // Step 3: Run Florence-2 for detailed caption
+    const captionResp = await fetch('https://fal.run/fal-ai/florence-2-large/more-detailed-caption', {
+      method: 'POST',
+      headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_url: file_url }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!captionResp.ok) throw new Error(`Florence-2 failed: ${captionResp.status}`);
+    const captionData = await captionResp.json() as { results?: string };
+    const description = captionData.results ?? '';
+
+    // Step 4: Parse description into structured attributes
+    const lower = description.toLowerCase();
+    const hasFace = /\bface\b|\bperson\b|\bman\b|\bwoman\b|\bportrait\b|\bgirl\b|\bboy\b|\bchild\b|\bpeople\b/.test(lower);
+    const hasBeard = /\bbeard\b|\bstubble\b|\bmustache\b/.test(lower);
+    const hasGlasses = /\bglasses\b|\bspectacles\b|\beyeglasses\b/.test(lower);
+    const hasWhiteHair = /\bwhite hair\b|\bgray hair\b|\bgrey hair\b|\bsilver hair\b/.test(lower);
+    const isNight = /\bnight\b|\bdark sky\b|\bskyline\b|\bneon\b|\bcity lights\b/.test(lower);
+    const isNature = /\bforest\b|\btrees\b|\bmountain\b|\bocean\b|\bsea\b|\bbeach\b|\briver\b|\blandscape\b/.test(lower);
+    const isColorful = /\bcolorful\b|\bvibrant\b|\bbright colors\b|\brainbow\b/.test(lower);
+    const isArchitecture = /\bbuilding\b|\barchitecture\b|\bbridge\b|\bstreet\b|\bcity\b/.test(lower);
+
+    // Determine scene type
+    let sceneType = 'unknown';
+    if (hasFace && hasWhiteHair) sceneType = 'portrait_white_hair';
+    else if (hasFace) sceneType = 'portrait';
+    else if (isNight) sceneType = 'night_skyline';
+    else if (isNature) sceneType = 'nature';
+    else if (isArchitecture) sceneType = 'architecture';
+    else if (isColorful) sceneType = 'colorful';
+
+    // Generate keyword suggestions for tile import
+    const keywordSuggestions: Array<{keyword: string; reason: string; priority: string}> = [];
+    if (hasFace) {
+      keywordSuggestions.push({ keyword: 'portrait face skin tone warm', reason: 'Gesicht erkannt – Hautton-Tiles benötigt', priority: 'high' });
+      if (hasBeard) keywordSuggestions.push({ keyword: 'beard stubble dark texture', reason: 'Bart erkannt', priority: 'medium' });
+      if (hasGlasses) keywordSuggestions.push({ keyword: 'glasses reflection lens', reason: 'Brille erkannt', priority: 'medium' });
+      if (hasWhiteHair) keywordSuggestions.push({ keyword: 'white gray silver texture light', reason: 'Weißes/graues Haar erkannt', priority: 'high' });
+    }
+    if (isNight) keywordSuggestions.push({ keyword: 'night city lights dark blue', reason: 'Nacht-Szene erkannt', priority: 'high' });
+    if (isNature) keywordSuggestions.push({ keyword: 'nature green forest landscape', reason: 'Natur-Szene erkannt', priority: 'medium' });
+    if (isColorful) keywordSuggestions.push({ keyword: 'colorful vibrant abstract', reason: 'Farbige Szene erkannt', priority: 'medium' });
+
+    console.log(`[fal.ai] Analysis: sceneType=${sceneType} hasFace=${hasFace} beard=${hasBeard} glasses=${hasGlasses}`);
+    console.log(`[fal.ai] Description: ${description.substring(0, 100)}...`);
+
+    return res.json({
+      ok: true,
+      description,
+      sceneType,
+      hasFace,
+      faceCount: hasFace ? 1 : 0,
+      attributes: { hasBeard, hasGlasses, hasWhiteHair, isNight, isNature, isColorful, isArchitecture },
+      keywordSuggestions,
+      imageUrl: file_url,
+    });
+  } catch (e: any) {
+    console.error('[fal.ai analyze] Error:', e);
+    return res.status(500).json({ ok: false, error: e.message ?? String(e) });
+  }
+});
+
 // ── Texture Atlas ──────────────────────────────────────────────────────────────
 // GET /api/tile-atlas?theme=&tileSize=64&maxTiles=3000
 // Returns a single sprite-sheet JPEG containing all tiles (or a subset).
@@ -914,31 +1013,44 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         }
       }
 
-      // Build strip using Jimp
-      const stripAtlas = new Jimp({ width: outW, height: stripH, color: 0xb4b4b4ff });
-      for (const ci of compositeInputs) {
-        try {
-          const tile = await Jimp.fromBuffer(ci.buf);
-          stripAtlas.composite(tile, ci.left, ci.top);
-        } catch { /* skip */ }
-      }
-      const stripJpeg = await stripAtlas.getBuffer(JimpMime.jpeg);
+      // Build strip using Sharp composite
+      const sharpCompositeInputs = compositeInputs.map(ci => ({
+        input: ci.buf,
+        top: ci.top,
+        left: ci.left,
+      }));
+      const stripJpeg = await sharp({
+        create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      })
+        .composite(sharpCompositeInputs)
+        .jpeg({ quality: 92 })
+        .toBuffer();
       stripBuffers.push(stripJpeg);
       console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
     }
-    // Join strips vertically using Jimp
+    // Join strips vertically using Sharp
     let mosaicJpeg: Buffer;
     if (stripBuffers.length === 1) {
       mosaicJpeg = stripBuffers[0];
     } else {
-      const fullAtlas = new Jimp({ width: outW, height: outH, color: 0xb4b4b4ff });
-      let yOffset = 0;
-      for (const stripBuf of stripBuffers) {
-        const stripImg = await Jimp.fromBuffer(stripBuf);
-        fullAtlas.composite(stripImg, 0, yOffset);
-        yOffset += stripImg.height;
+      const stripImages = await Promise.all(stripBuffers.map(async (buf, i) => {
+        const meta = await sharp(buf).metadata();
+        return { input: buf, top: i * (meta.height ?? 0), left: 0 };
+      }));
+      // Calculate cumulative offsets
+      let yOff = 0;
+      const compositeStrips = [];
+      for (const buf of stripBuffers) {
+        const meta = await sharp(buf).metadata();
+        compositeStrips.push({ input: buf, top: yOff, left: 0 });
+        yOff += meta.height ?? 0;
       }
-      mosaicJpeg = await fullAtlas.getBuffer(JimpMime.jpeg);
+      mosaicJpeg = await sharp({
+        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      })
+        .composite(compositeStrips)
+        .jpeg({ quality: 92 })
+        .toBuffer();
     }
     console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
 
