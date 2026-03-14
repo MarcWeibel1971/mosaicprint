@@ -550,6 +550,7 @@ export default function Studio() {
           const isVertical = aspectRatio < 0.85;
 
           // Step 2: Try browser FaceDetector API
+          // STRICT: require face area >= 3% of image (prevents false positives on landscapes)
           let hasFace = false;
           if ('FaceDetector' in window) {
             try {
@@ -561,12 +562,19 @@ export default function Studio() {
               const sCtx = smallCanvas.getContext('2d')!;
               sCtx.drawImage(img, 0, 0, smallCanvas.width, smallCanvas.height);
               const faces = await faceDetector.detect(smallCanvas);
-              hasFace = faces.length > 0;
+              // STRICT: face must cover at least 3% of image area to count as portrait
+              // This prevents landscape/mountain/sky photos from triggering portrait mode
+              const imgArea = smallCanvas.width * smallCanvas.height;
+              const significantFaces = faces.filter((f: any) => {
+                const faceArea = (f.boundingBox?.width ?? 0) * (f.boundingBox?.height ?? 0);
+                return faceArea / imgArea >= 0.03; // face must be >= 3% of image
+              });
+              hasFace = significantFaces.length > 0;
             } catch { /* FaceDetector not available */ }
           }
 
           // Step 3: Skin-tone heuristic (center region analysis)
-          // Portrait photos typically have skin tones in the center
+          // STRICT: raised threshold from 15% to 28% to avoid false positives on warm landscapes
           if (!hasFace) {
             const sampleCanvas = document.createElement('canvas');
             sampleCanvas.width = 32; sampleCanvas.height = 32;
@@ -577,14 +585,23 @@ export default function Studio() {
             for (let pi = 0; pi < pixels.length; pi += 4) {
               const r = pixels[pi], g = pixels[pi+1], b = pixels[pi+2];
               // Skin tone detection: r > 95, g > 40, b > 20, r > g, r > b, |r-g| > 15
-              if (r > 95 && g > 40 && b > 20 && r > g && r > b && Math.abs(r - g) > 15) skinPixels++;
+              // ALSO require b < 200 to exclude sky-blue/purple haze (common in sunsets)
+              if (r > 95 && g > 40 && b > 20 && b < 200 && r > g && r > b && Math.abs(r - g) > 15) skinPixels++;
               totalPixels++;
             }
-            hasFace = skinPixels / totalPixels > 0.15; // >15% skin pixels in center
+            // STRICT: raised from 15% to 28% - warm landscapes often have 15-25% skin-like pixels
+            hasFace = skinPixels / totalPixels > 0.28;
           }
 
-          if (hasFace || isVertical) {
-            imageType = 'portrait';
+          // Portrait mode requires BOTH face detection AND vertical orientation
+          // (or very strong face detection alone)
+          // This prevents landscape photos (horizontal, no clear face) from triggering portrait mode
+          const strongFaceSignal = hasFace; // FaceDetector or strong skin heuristic
+          if (strongFaceSignal && isVertical) {
+            imageType = 'portrait';  // both signals required
+          } else if (strongFaceSignal && !isVertical) {
+            // Horizontal photo with face: could be group photo - use landscape preset
+            imageType = 'landscape';
           } else if (aspectRatio > 1.3) {
             imageType = 'landscape';
           }
@@ -1921,6 +1938,46 @@ export default function Studio() {
           if (targetBr > 70 && tileBr < 15) {
             dist += (15 - tileBr) / 15 * (targetBr - 70) / 30 * 2 * 100; // up to +200 for near-black tile in very bright area
           }
+
+          // FIX 2: SMOOTH-REGION → CALM-TILES RULE
+          // If target cell is smooth (low edgeEnergy), only allow calm tiles
+          // This prevents busy/detailed tiles from appearing in sky, water, fog, haze
+          const cellEdgeEnergy = edgeMap[ci]; // 0-1: how much edge/detail in target cell
+          const tileEdgeEnergy = mf.edgeEnergy; // 0-1: how much edge/detail in tile
+          if (cellEdgeEnergy < 0.15) {
+            // Very smooth target (sky, fog, calm water): strongly penalize busy tiles
+            if (tileEdgeEnergy > 0.35) {
+              dist += (tileEdgeEnergy - 0.35) * 600; // up to +390 for very busy tile in smooth area
+            }
+          } else if (cellEdgeEnergy < 0.30) {
+            // Moderately smooth target: penalize very busy tiles
+            if (tileEdgeEnergy > 0.55) {
+              dist += (tileEdgeEnergy - 0.55) * 300; // up to +135 for very busy tile
+            }
+          }
+
+          // FIX 3: EDGE-MISMATCH PENALTY (stronger than current edgeWeight)
+          // The existing edgeWeight term is adaptive (0.05-0.50) but not enough for smooth regions
+          // Add an explicit mismatch penalty: if cell is smooth but tile is detailed, penalize hard
+          if (cellEdgeEnergy < 0.20 && tileEdgeEnergy > 0.50) {
+            // Smooth cell + busy tile = very bad match
+            dist += (tileEdgeEnergy - 0.50) * (0.20 - cellEdgeEnergy) * 1000;
+          }
+
+          // FIX 4: DARK-REGION PROTECTION
+          // Dark target areas (sky at dusk, dark water, shadows): prevent chaotic high-contrast tiles
+          if (targetBr < 35) {
+            // Dark area: penalize tiles with very high internal contrast (high edgeEnergy)
+            // These create the "black pixel noise" effect in dark regions
+            if (tileEdgeEnergy > 0.60) {
+              dist += (tileEdgeEnergy - 0.60) * 400; // up to +160 for very busy tile in dark area
+            }
+            // Also penalize tiles that are much brighter than the target (creates bright spots in dark areas)
+            if (tileBr > targetBr + 40) {
+              dist += (tileBr - targetBr - 40) * 3; // up to ~180 for very bright tile in dark area
+            }
+          }
+
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
