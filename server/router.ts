@@ -1029,6 +1029,8 @@ export const appRouter = router({
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
                       blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
                       brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                      sourceProvider: input.source,
+                      importQuery: keyword,
                     });
                     if (inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
@@ -1142,7 +1144,10 @@ export const appRouter = router({
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
                       blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
                       brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                      theme: task.subject ?? 'general',
                       subject: task.subject ?? 'general',
+                      sourceProvider: input.sourceId,
+                      importQuery: task.query,
                     });
                     if (inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
@@ -1270,7 +1275,11 @@ export const appRouter = router({
                   await Promise.all(batch.map(async (photo) => {
                     try {
                       const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                      const inserted = await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                      const inserted = await db.insertMosaicImage({ ...photo,
+                        avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+                        sourceProvider: src,
+                        importQuery: keyword,
+                      });
                       if (inserted) { imported++; batchNew++; status.imported = imported; }
                     } catch { /* duplicate – skip */ }
                   }));
@@ -1622,9 +1631,285 @@ export const appRouter = router({
         trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
         blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
         brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+        sourceProvider: 'upload',
       });
       return { ok: true };
     }),
+
+  // ── QA: Run quality check ──────────────────────────────────────────────────
+  runQualityCheck: publicProcedure
+    .input(z.object({
+      checkType: z.enum(['index-integrity', 'import-health', 'pool-balance', 'duplicate-check', 'tile-quality-score', 'all']),
+    }))
+    .mutation(async ({ input }) => {
+      const checksToRun = input.checkType === 'all'
+        ? ['index-integrity', 'import-health', 'pool-balance', 'duplicate-check', 'tile-quality-score']
+        : [input.checkType];
+      const runIds: Record<string, number> = {};
+      for (const checkType of checksToRun) {
+        const runId = await db.startQualityRun(checkType);
+        runIds[checkType] = runId;
+        // Run async (don't await – returns immediately)
+        runQualityCheckAsync(checkType, runId).catch(e => {
+          console.error(`[QA] ${checkType} failed:`, e);
+          db.finishQualityRun(runId, 'error', { error: String(e) }).catch(() => {});
+        });
+      }
+      return { started: true, runIds };
+    }),
+
+  // ── QA: Get quality check runs ─────────────────────────────────────────────
+  getQualityRuns: publicProcedure
+    .input(z.object({ checkType: z.string().optional(), limit: z.number().default(20) }))
+    .query(async ({ input }) => {
+      return db.getQualityRuns({ checkType: input.checkType, limit: input.limit });
+    }),
+
+  // ── QA: Get quality check run items ───────────────────────────────────────
+  getQualityRunItems: publicProcedure
+    .input(z.object({ runId: z.number() }))
+    .query(async ({ input }) => {
+      return db.getQualityRunItems(input.runId);
+    }),
+
+  // ── Algorithm Profiles ────────────────────────────────────────────────────
+  getAlgorithmProfiles: publicProcedure
+    .query(async () => db.getAlgorithmProfiles()),
+
+  saveAlgorithmProfile: publicProcedure
+    .input(z.object({
+      name: z.string(),
+      settings: z.record(z.any()),
+      isDefault: z.boolean().default(false),
+    }))
+    .mutation(async ({ input }) => {
+      const id = await db.saveAlgorithmProfile(input.name, input.settings, input.isDefault);
+      return { id };
+    }),
+
+  getDefaultAlgorithmProfile: publicProcedure
+    .query(async () => db.getDefaultAlgorithmProfile()),
+
+  // ── Admin: Get images with importedSince filter ───────────────────────────
+  getAdminImagesFiltered: publicProcedure
+    .input(z.object({
+      page: z.number().default(1),
+      limit: z.number().default(50),
+      brightnessFilter: z.string().optional(),
+      colorFilter: z.string().optional(),
+      sourceId: z.string().optional(),
+      importedSince: z.string().optional(),
+      qualityStatus: z.string().optional(),
+    }))
+    .query(async ({ input }) => {
+      return db.getAdminImages({
+        page: input.page,
+        limit: input.limit,
+        brightnessFilter: input.brightnessFilter,
+        colorFilter: input.colorFilter,
+        sourceId: input.sourceId,
+        importedSince: input.importedSince,
+        qualityStatus: input.qualityStatus,
+      });
+    }),
 });
+
+// ── Quality Check Async Runner ─────────────────────────────────────────────────
+async function runQualityCheckAsync(checkType: string, runId: number): Promise<void> {
+  const pool = db.getPool();
+  const items: Array<{ runId: number; entityType: string; entityId: string; status: 'pass' | 'warn' | 'fail'; message: string; details?: object }> = [];
+
+  if (checkType === 'index-integrity') {
+    // Check: all images have LAB values computed (not default 50/0/0)
+    const res = await pool.query(`
+      SELECT COUNT(*) as total,
+        SUM(CASE WHEN avg_l = 50 AND avg_a = 0 AND avg_b = 0 THEN 1 ELSE 0 END) as unindexed,
+        SUM(CASE WHEN tile128_url IS NULL THEN 1 ELSE 0 END) as no_thumb
+      FROM mosaic_images
+    `);
+    const { total, unindexed, no_thumb } = res.rows[0];
+    const unindexedPct = total > 0 ? (unindexed / total * 100).toFixed(1) : '0';
+    items.push({
+      runId, entityType: 'db', entityId: 'mosaic_images',
+      status: Number(unindexed) > Number(total) * 0.05 ? 'warn' : 'pass',
+      message: `${unindexed}/${total} Bilder ohne LAB-Index (${unindexedPct}%)`,
+      details: { total: Number(total), unindexed: Number(unindexed), no_thumb: Number(no_thumb) },
+    });
+    // Check: quadrant LAB completeness
+    const quadRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE tl_l = 50 AND tl_a = 0 AND tl_b = 0 AND avg_l != 50
+    `);
+    const noQuadrant = Number(quadRes.rows[0].cnt);
+    items.push({
+      runId, entityType: 'db', entityId: 'quadrant_lab',
+      status: noQuadrant > 100 ? 'warn' : 'pass',
+      message: `${noQuadrant} Bilder ohne Quadrant-LAB (15D-Index unvollständig)`,
+      details: { noQuadrant },
+    });
+    // Check: source_provider backfill
+    const srcRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE source_provider IS NULL`);
+    const noSrc = Number(srcRes.rows[0].cnt);
+    items.push({
+      runId, entityType: 'db', entityId: 'source_provider',
+      status: noSrc > 0 ? 'warn' : 'pass',
+      message: `${noSrc} Bilder ohne source_provider`,
+      details: { noSrc },
+    });
+    await db.insertQualityItems(items);
+    const hasWarn = items.some(i => i.status === 'warn' || i.status === 'fail');
+    await db.finishQualityRun(runId, hasWarn ? 'warning' : 'success', {
+      total: Number(res.rows[0].total), unindexed: Number(res.rows[0].unindexed), noQuadrant, noSrc
+    });
+
+  } else if (checkType === 'pool-balance') {
+    // Check LAB-Cube coverage: are all color regions represented?
+    const res = await pool.query(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN avg_l < 20 THEN 1 ELSE 0 END) as extreme_dark,
+        SUM(CASE WHEN avg_l > 85 THEN 1 ELSE 0 END) as extreme_bright,
+        SUM(CASE WHEN avg_l >= 20 AND avg_l <= 85 AND ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 1 ELSE 0 END) as neutral,
+        SUM(CASE WHEN SQRT(avg_a*avg_a + avg_b*avg_b) < 20 THEN 1 ELSE 0 END) as low_sat,
+        SUM(CASE WHEN SQRT(avg_a*avg_a + avg_b*avg_b) BETWEEN 20 AND 42 THEN 1 ELSE 0 END) as mid_sat,
+        SUM(CASE WHEN SQRT(avg_a*avg_a + avg_b*avg_b) > 42 THEN 1 ELSE 0 END) as high_sat,
+        SUM(CASE WHEN avg_b < -5 THEN 1 ELSE 0 END) as cool,
+        SUM(CASE WHEN avg_a > 10 AND avg_b > 5 THEN 1 ELSE 0 END) as warm_skin
+      FROM mosaic_images
+    `);
+    const r = res.rows[0];
+    const total = Number(r.total);
+    const checks = [
+      { key: 'extreme_dark', label: 'Extrem-Dunkel (L<20)', target: 0.10 },
+      { key: 'extreme_bright', label: 'Extrem-Hell (L>85)', target: 0.10 },
+      { key: 'low_sat', label: 'Niedrig-Sättigung (<20)', target: 0.30 },
+      { key: 'mid_sat', label: 'Mittel-Sättigung (20-42)', target: 0.40 },
+      { key: 'high_sat', label: 'Hoch-Sättigung (>42)', target: 0.30 },
+      { key: 'cool', label: 'Kühl-Töne (b<-5)', target: 0.20 },
+      { key: 'warm_skin', label: 'Warm/Haut-Töne (a>10,b>5)', target: 0.15 },
+    ];
+    for (const c of checks) {
+      const count = Number(r[c.key]);
+      const pct = total > 0 ? count / total : 0;
+      const diff = pct - c.target;
+      items.push({
+        runId, entityType: 'pool', entityId: c.key,
+        status: diff < -0.05 ? 'fail' : diff < -0.02 ? 'warn' : 'pass',
+        message: `${c.label}: ${(pct*100).toFixed(1)}% (Ziel: ${(c.target*100).toFixed(0)}%, Δ${diff > 0 ? '+' : ''}${(diff*100).toFixed(1)}%)`,
+        details: { count, pct: Math.round(pct*1000)/10, target: c.target*100 },
+      });
+    }
+    await db.insertQualityItems(items);
+    const hasWarn = items.some(i => i.status === 'warn' || i.status === 'fail');
+    await db.finishQualityRun(runId, hasWarn ? 'warning' : 'success', { total, checks: items.map(i => ({ id: i.entityId, status: i.status })) });
+
+  } else if (checkType === 'import-health') {
+    // Check: per-source import stats
+    const res = await pool.query(`
+      SELECT
+        COALESCE(source_provider, 'unknown') as provider,
+        COUNT(*) as total,
+        SUM(CASE WHEN imported_at >= NOW() - INTERVAL '24 hours' THEN 1 ELSE 0 END) as last_24h,
+        SUM(CASE WHEN imported_at >= NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END) as last_7d,
+        COUNT(DISTINCT import_query) as unique_queries
+      FROM mosaic_images
+      GROUP BY COALESCE(source_provider, 'unknown')
+      ORDER BY total DESC
+    `);
+    for (const row of res.rows) {
+      items.push({
+        runId, entityType: 'source', entityId: row.provider,
+        status: 'pass',
+        message: `${row.provider}: ${row.total} Bilder total, +${row.last_24h} (24h), +${row.last_7d} (7d), ${row.unique_queries} Keywords`,
+        details: { total: Number(row.total), last24h: Number(row.last_24h), last7d: Number(row.last_7d), uniqueQueries: Number(row.unique_queries) },
+      });
+    }
+    // Check: duplicate rate
+    const dupRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM (
+        SELECT source_url, COUNT(*) as c FROM mosaic_images GROUP BY source_url HAVING COUNT(*) > 1
+      ) t
+    `);
+    const dupCount = Number(dupRes.rows[0].cnt);
+    items.push({
+      runId, entityType: 'db', entityId: 'url_duplicates',
+      status: dupCount > 0 ? 'fail' : 'pass',
+      message: `${dupCount} doppelte source_urls in DB`,
+      details: { dupCount },
+    });
+    await db.insertQualityItems(items);
+    await db.finishQualityRun(runId, dupCount > 0 ? 'warning' : 'success', { sources: res.rows.length, dupCount });
+
+  } else if (checkType === 'duplicate-check') {
+    // Find visual duplicates via phash (if available) or via URL similarity
+    const res = await pool.query(`
+      SELECT phash, COUNT(*) as cnt, array_agg(id) as ids
+      FROM mosaic_images
+      WHERE phash IS NOT NULL
+      GROUP BY phash HAVING COUNT(*) > 1
+      LIMIT 100
+    `);
+    const urlDupRes = await pool.query(`
+      SELECT source_url, COUNT(*) as cnt
+      FROM mosaic_images
+      GROUP BY source_url HAVING COUNT(*) > 1
+      LIMIT 100
+    `);
+    items.push({
+      runId, entityType: 'db', entityId: 'phash_dupes',
+      status: res.rows.length > 0 ? 'warn' : 'pass',
+      message: `${res.rows.length} pHash-Duplikat-Gruppen gefunden`,
+      details: { groups: res.rows.length, examples: res.rows.slice(0, 5).map(r => ({ phash: r.phash, count: Number(r.cnt), ids: r.ids })) },
+    });
+    items.push({
+      runId, entityType: 'db', entityId: 'url_dupes',
+      status: urlDupRes.rows.length > 0 ? 'fail' : 'pass',
+      message: `${urlDupRes.rows.length} URL-Duplikate in DB (sollte 0 sein)`,
+      details: { count: urlDupRes.rows.length },
+    });
+    await db.insertQualityItems(items);
+    const hasWarn = items.some(i => i.status === 'warn' || i.status === 'fail');
+    await db.finishQualityRun(runId, hasWarn ? 'warning' : 'success', { phashDupes: res.rows.length, urlDupes: urlDupRes.rows.length });
+
+  } else if (checkType === 'tile-quality-score') {
+    // Sample 200 random tiles and compute quality score
+    const res = await pool.query(`
+      SELECT id, tile128_url, avg_l, avg_a, avg_b,
+        tl_l, tl_a, tl_b, tr_l, tr_a, tr_b, bl_l, bl_a, bl_b, br_l, br_a, br_b
+      FROM mosaic_images
+      WHERE tile128_url IS NOT NULL
+      ORDER BY RANDOM() LIMIT 200
+    `);
+    let pass = 0, warn = 0, fail = 0;
+    for (const row of res.rows) {
+      // Compute quality score from LAB values (no image download needed)
+      const chroma = Math.sqrt(row.avg_a * row.avg_a + row.avg_b * row.avg_b);
+      // Color diversity: variance across quadrants
+      const lVals = [row.tl_l, row.tr_l, row.bl_l, row.br_l];
+      const lMean = lVals.reduce((a: number, b: number) => a + b, 0) / 4;
+      const lVariance = lVals.reduce((a: number, b: number) => a + (b - lMean) ** 2, 0) / 4;
+      // Score components (0-1 each)
+      const chromaScore = Math.min(chroma / 40, 1); // higher chroma = more colorful
+      const brightnessScore = 1 - Math.abs(row.avg_l - 50) / 50; // prefer mid-brightness
+      const textureScore = Math.min(Math.sqrt(lVariance) / 20, 1); // quadrant variance = texture
+      const qualityScore = Math.round((chromaScore * 0.3 + brightnessScore * 0.3 + textureScore * 0.4) * 100) / 100;
+      // Reject criteria: too uniform (lVariance < 5) AND too dark/bright
+      const isRejected = lVariance < 2 && (row.avg_l < 15 || row.avg_l > 90);
+      const status: 'pass' | 'warn' | 'fail' = isRejected ? 'fail' : qualityScore < 0.3 ? 'warn' : 'pass';
+      if (status === 'pass') pass++;
+      else if (status === 'warn') warn++;
+      else fail++;
+      items.push({
+        runId, entityType: 'tile', entityId: String(row.id),
+        status,
+        message: `Score: ${qualityScore.toFixed(2)} | L=${row.avg_l.toFixed(0)} chroma=${chroma.toFixed(0)} texture=${Math.sqrt(lVariance).toFixed(1)}`,
+        details: { qualityScore, avgL: row.avg_l, chroma: Math.round(chroma), lVariance: Math.round(lVariance) },
+      });
+    }
+    await db.insertQualityItems(items);
+    const overallStatus = fail > res.rows.length * 0.1 ? 'warning' : 'success';
+    await db.finishQualityRun(runId, overallStatus, { sampled: res.rows.length, pass, warn, fail });
+  }
+}
 
 export type AppRouter = typeof appRouter;

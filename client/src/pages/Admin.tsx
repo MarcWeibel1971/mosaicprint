@@ -152,7 +152,7 @@ export default function Admin() {
   useEffect(() => {
     try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
   }, []);
-  const [activeTab, setActiveTab] = useState<'import' | 'database' | 'settings'>('import')
+  const [activeTab, setActiveTab] = useState<'import' | 'database' | 'settings' | 'qa'>('import')
   const [stats, setStats] = useState<DbStats | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -506,6 +506,7 @@ export default function Admin() {
               { id: 'import', label: 'Import & Verwaltung', icon: Upload },
               { id: 'database', label: 'Datenbank', icon: Grid },
               { id: 'settings', label: 'Algorithmus', icon: Settings },
+              { id: 'qa', label: 'Qualitätssicherung', icon: CheckCircle },
             ] as const).map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -877,6 +878,11 @@ export default function Admin() {
         {/* ── TAB: Algorithmus-Einstellungen ── */}
         {activeTab === 'settings' && (
           <AlgorithmSettings />
+        )}
+
+        {/* ── TAB: Qualitätssicherung ── */}
+        {activeTab === 'qa' && (
+          <QualityAssurance onMessage={setMessage} />
         )}
       </div>
     </div>
@@ -1848,6 +1854,257 @@ function AlgorithmSettings() {
       <div className="bg-gray-900 rounded-2xl p-5 text-green-400 font-mono text-xs">
         <div className="text-gray-400 mb-2">// Aktuelle Werte (werden in Studio.tsx gelesen)</div>
         <pre>{JSON.stringify(settings, null, 2)}</pre>
+      </div>
+    </div>
+  )
+}
+
+// ── Quality Assurance Tab ─────────────────────────────────────────────────────
+interface QaRun {
+  id: number; checkType: string; status: string; startedAt: string; finishedAt: string | null; summary: Record<string, unknown> | null
+}
+interface QaItem {
+  id: number; runId: number; entityType: string; entityId: string; status: string; message: string; details: Record<string, unknown> | null
+}
+
+const QA_CHECKS = [
+  { id: 'index-integrity', label: 'Index-Integrität', icon: '🔍', desc: 'Prüft ob alle Bilder LAB-Werte haben und Quadrant-Index vollständig ist.' },
+  { id: 'pool-balance', label: 'Pool-Balance', icon: '⚖️', desc: 'Analysiert Farbraum-Abdeckung: Dunkel/Hell/Sättigung/Warm/Kühl.' },
+  { id: 'import-health', label: 'Import-Health', icon: '📥', desc: 'Zeigt Import-Statistiken pro Quelle und prüft auf URL-Duplikate.' },
+  { id: 'duplicate-check', label: 'Duplikat-Check', icon: '🔁', desc: 'Sucht nach pHash- und URL-Duplikaten in der Datenbank.' },
+  { id: 'tile-quality-score', label: 'Tile-Quality-Score', icon: '⭐', desc: 'Bewertet 200 zufällige Tiles nach Farbvielfalt, Textur und Helligkeit.' },
+]
+
+function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const [runs, setRuns] = useState<QaRun[]>([])
+  const [runningChecks, setRunningChecks] = useState<Set<string>>(new Set())
+  const [selectedRun, setSelectedRun] = useState<number | null>(null)
+  const [runItems, setRunItems] = useState<QaItem[]>([])
+  const [loadingItems, setLoadingItems] = useState(false)
+  const [lastRefresh, setLastRefresh] = useState(Date.now())
+
+  const fetchRuns = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trpc/getQualityRuns?input=' + encodeURIComponent(JSON.stringify({ limit: 50 })))
+      const data = await res.json()
+      const rows: QaRun[] = data.result?.data?.json ?? data.result?.data ?? []
+      setRuns(rows)
+      // Auto-refresh while any check is running
+      const anyRunning = rows.some((r: QaRun) => r.status === 'running')
+      if (anyRunning) setTimeout(() => setLastRefresh(Date.now()), 2000)
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { fetchRuns() }, [fetchRuns, lastRefresh])
+
+  const fetchItems = useCallback(async (runId: number) => {
+    setLoadingItems(true)
+    try {
+      const res = await fetch('/api/trpc/getQualityRunItems?input=' + encodeURIComponent(JSON.stringify({ runId })))
+      const data = await res.json()
+      setRunItems(data.result?.data?.json ?? data.result?.data ?? [])
+    } catch { /* ignore */ }
+    finally { setLoadingItems(false) }
+  }, [])
+
+  useEffect(() => {
+    if (selectedRun !== null) fetchItems(selectedRun)
+  }, [selectedRun, fetchItems])
+
+  const runCheck = useCallback(async (checkType: string) => {
+    setRunningChecks(prev => new Set([...prev, checkType]))
+    try {
+      const res = await fetch('/api/trpc/runQualityCheck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ json: { checkType } }),
+      })
+      const data = await res.json()
+      if (data.result?.data?.json?.started || data.result?.data?.started) {
+        onMessage({ text: `${checkType} gestartet`, type: 'info' })
+        setTimeout(() => { setLastRefresh(Date.now()); setRunningChecks(prev => { const n = new Set(prev); n.delete(checkType); return n }) }, 1500)
+      }
+    } catch (e) {
+      onMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
+      setRunningChecks(prev => { const n = new Set(prev); n.delete(checkType); return n })
+    }
+  }, [onMessage])
+
+  const runAll = useCallback(() => runCheck('all'), [runCheck])
+
+  const statusColor = (s: string) => {
+    if (s === 'success') return 'text-green-600 bg-green-50'
+    if (s === 'warning') return 'text-amber-600 bg-amber-50'
+    if (s === 'error') return 'text-red-600 bg-red-50'
+    if (s === 'running') return 'text-blue-600 bg-blue-50'
+    return 'text-gray-500 bg-gray-50'
+  }
+  const itemStatusColor = (s: string) => {
+    if (s === 'pass') return 'text-green-700 bg-green-50 border-green-200'
+    if (s === 'warn') return 'text-amber-700 bg-amber-50 border-amber-200'
+    if (s === 'fail') return 'text-red-700 bg-red-50 border-red-200'
+    return 'text-gray-600 bg-gray-50 border-gray-200'
+  }
+  const statusEmoji = (s: string) => ({ success: '✅', warning: '⚠️', error: '❌', running: '⏳' }[s] ?? '❓')
+
+  // Group runs by checkType for "last run" display
+  const lastRunByType: Record<string, QaRun> = {}
+  for (const run of runs) {
+    if (!lastRunByType[run.checkType] || run.id > lastRunByType[run.checkType].id) {
+      lastRunByType[run.checkType] = run
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">Qualitätssicherung</h2>
+          <p className="text-sm text-gray-500 mt-1">Manuelle und automatische Checks für Tile-Pool, Import-Pipeline und Algorithmus</p>
+        </div>
+        <div className="flex gap-3">
+          <button onClick={fetchRuns} className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl text-sm transition-colors">
+            <RefreshCw className="w-4 h-4" />
+            Aktualisieren
+          </button>
+          <button onClick={runAll} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-2 rounded-xl text-sm transition-colors">
+            <Zap className="w-4 h-4" />
+            Alle Checks starten
+          </button>
+        </div>
+      </div>
+
+      {/* Check Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {QA_CHECKS.map(check => {
+          const lastRun = lastRunByType[check.id]
+          const isRunning = runningChecks.has(check.id) || lastRun?.status === 'running'
+          return (
+            <div key={check.id} className="bg-white rounded-2xl p-5 border border-gray-200 flex flex-col gap-3">
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">{check.icon}</span>
+                  <div>
+                    <h3 className="font-bold text-gray-900 text-sm">{check.label}</h3>
+                    {lastRun && (
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor(lastRun.status)}`}>
+                        {statusEmoji(lastRun.status)} {lastRun.status}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => runCheck(check.id)}
+                  disabled={isRunning}
+                  className="flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-medium px-3 py-1.5 rounded-lg text-xs transition-colors"
+                >
+                  {isRunning ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                  {isRunning ? 'Läuft...' : 'Starten'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">{check.desc}</p>
+              {lastRun && (
+                <div className="border-t border-gray-100 pt-3 mt-auto">
+                  <div className="text-xs text-gray-400 mb-2">
+                    Letzter Run: {new Date(lastRun.startedAt).toLocaleString('de-CH')}
+                    {lastRun.finishedAt && ` (${Math.round((new Date(lastRun.finishedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000)}s)`}
+                  </div>
+                  {lastRun.summary && (
+                    <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 font-mono">
+                      {Object.entries(lastRun.summary).slice(0, 4).map(([k, v]) => (
+                        <div key={k}>{k}: <span className="font-semibold">{String(v)}</span></div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setSelectedRun(selectedRun === lastRun.id ? null : lastRun.id)}
+                    className="mt-2 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                  >
+                    {selectedRun === lastRun.id ? '▲ Details ausblenden' : '▼ Details anzeigen'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Run Items Detail */}
+      {selectedRun !== null && (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-gray-900">Check-Details (Run #{selectedRun})</h3>
+            <button onClick={() => setSelectedRun(null)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+          </div>
+          {loadingItems ? (
+            <div className="text-center py-8 text-gray-400"><RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />Lade...</div>
+          ) : runItems.length === 0 ? (
+            <div className="text-center py-8 text-gray-400">Keine Einträge gefunden</div>
+          ) : (
+            <div className="space-y-2 max-h-96 overflow-y-auto">
+              {runItems.map(item => (
+                <div key={item.id} className={`flex items-start gap-3 p-3 rounded-xl border text-sm ${itemStatusColor(item.status)}`}>
+                  <span className="font-bold shrink-0 w-12 text-center">
+                    {item.status === 'pass' ? '✅' : item.status === 'warn' ? '⚠️' : '❌'}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{item.entityType}/{item.entityId}</div>
+                    <div className="text-xs mt-0.5 opacity-80">{item.message}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Run History */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <h3 className="font-bold text-gray-900 mb-4">Run-Verlauf (letzte 50)</h3>
+        {runs.length === 0 ? (
+          <div className="text-center py-8 text-gray-400">Noch keine Checks ausgeführt. Starte einen Check oben.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
+                  <th className="pb-2 pr-4">ID</th>
+                  <th className="pb-2 pr-4">Check-Typ</th>
+                  <th className="pb-2 pr-4">Status</th>
+                  <th className="pb-2 pr-4">Gestartet</th>
+                  <th className="pb-2 pr-4">Dauer</th>
+                  <th className="pb-2">Aktionen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map(run => (
+                  <tr key={run.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="py-2 pr-4 text-gray-400 font-mono">#{run.id}</td>
+                    <td className="py-2 pr-4 font-medium">{run.checkType}</td>
+                    <td className="py-2 pr-4">
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor(run.status)}`}>
+                        {statusEmoji(run.status)} {run.status}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(run.startedAt).toLocaleString('de-CH')}</td>
+                    <td className="py-2 pr-4 text-gray-500 text-xs">
+                      {run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'}
+                    </td>
+                    <td className="py-2">
+                      <button
+                        onClick={() => { setSelectedRun(run.id); fetchItems(run.id) }}
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                      >
+                        Details
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   )
