@@ -1003,10 +1003,12 @@ export const appRouter = router({
                 if (!res.ok) { log(`⚠️ Pixabay ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
                 photos = (data.hits ?? []).map((p: any) => ({
-                  // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
-                  sourceUrl: p.previewURL ?? '',
-                  tile128Url: p.previewURL ?? '',
-                })).filter((p: any) => p.sourceUrl);
+                  // previewURL (150px, stable CDN) used as dedup key via source_url
+                  // webformatURL (640px) used as tile128Url for better LAB accuracy and rendering quality
+                  // largeImageURL (1280px) used as sourceUrl for print-quality output
+                  sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
+                  tile128Url: p.webformatURL || p.previewURL || '',
+                })).filter((p: any) => p.tile128Url);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
@@ -1106,11 +1108,10 @@ export const appRouter = router({
                 if (!res.ok) { log(`⚠️ Pixabay API error ${res.status} for "${task.query}"`); continue; }
                 const data = await res.json() as any;
                 photos = (data.hits ?? []).map((p: any) => ({
-                   // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
-                  // webformatURL uses rotating tokens and cannot be used for dedup
-                  sourceUrl: p.previewURL ?? '',
-                  tile128Url: p.previewURL ?? '',
-                })).filter((p: any) => p.sourceUrl);
+                  // webformatURL (640px) for tile rendering quality; largeImageURL (1280px) for print
+                  sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
+                  tile128Url: p.webformatURL || p.previewURL || '',
+                })).filter((p: any) => p.tile128Url);
               } else {
                 const res = await fetch(
                   `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
@@ -1256,10 +1257,10 @@ export const appRouter = router({
                   if (!res.ok) continue;
                   const data = await res.json() as any;
                   photos = (data.hits ?? []).map((p: any) => ({
-                    // Use stable previewURL (cdn.pixabay.com) as sourceUrl for deduplication
-                    sourceUrl: p.previewURL ?? '',
-                    tile128Url: p.previewURL ?? '',
-                  })).filter((p: any) => p.sourceUrl);
+                    // webformatURL (640px) for tile rendering quality; largeImageURL (1280px) for print
+                    sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
+                    tile128Url: p.webformatURL || p.previewURL || '',
+                  })).filter((p: any) => p.tile128Url);
                 } else {
                   const res = await fetch(
                     `https://api.unsplash.com/search/photos?query=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&orientation=squarish`,
@@ -1578,9 +1579,10 @@ export const appRouter = router({
             if (res.ok) {
               const data = await res.json() as any;
               photos = (data.hits ?? []).map((p: any) => ({
-                sourceUrl: p.previewURL ?? '',
-                tile128Url: p.previewURL ?? '',
-              })).filter((p: any) => p.sourceUrl);
+                // webformatURL (640px) for tile rendering quality; largeImageURL (1280px) for print
+                sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
+                tile128Url: p.webformatURL || p.previewURL || '',
+              })).filter((p: any) => p.tile128Url);
             }
           } else {
             const res = await fetch(
@@ -2034,6 +2036,42 @@ async function runQualityCheckAsync(checkType: string, runId: number): Promise<v
     const overallStatus = fail > res.rows.length * 0.1 ? 'warning' : 'success';
     await db.finishQualityRun(runId, overallStatus, { sampled: res.rows.length, pass, warn, fail });
   }
+}
+
+// ── pHash berechnen für alle Tiles ohne Hash ─────────────────────────────────
+async function computeSimplePHash(url: string): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let createCanvas: any = null, loadImage: any = null;
+    try { const m = require('canvas'); createCanvas = m.createCanvas; loadImage = m.loadImage; } catch { return null; }
+    if (!createCanvas || !loadImage) return null;
+    const https = require('https');
+    const http = require('http');
+    const fetchBuf = (u: string): Promise<Buffer> => new Promise((res, rej) => {
+      const mod = u.startsWith('https') ? https : http;
+      mod.get(u, { headers: { 'User-Agent': 'MosaicPrint/1.0' } }, (r: any) => {
+        const c: Buffer[] = []; r.on('data', (d: Buffer) => c.push(d)); r.on('end', () => res(Buffer.concat(c))); r.on('error', rej);
+      }).on('error', rej);
+    });
+    const buf = await fetchBuf(url);
+    const img = await loadImage(buf);
+    // Resize to 8x8 DCT hash
+    const canvas = createCanvas(8, 8);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, 8, 8);
+    const data = ctx.getImageData(0, 0, 8, 8).data;
+    // Compute grayscale values
+    const gray: number[] = [];
+    for (let i = 0; i < 64; i++) gray.push(0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2]);
+    const mean = gray.reduce((a, b) => a + b, 0) / 64;
+    // Build hash bits
+    let hash = '';
+    for (const g of gray) hash += g > mean ? '1' : '0';
+    // Convert to hex
+    let hex = '';
+    for (let i = 0; i < 64; i += 4) hex += parseInt(hash.slice(i, i+4), 2).toString(16);
+    return hex;
+  } catch { return null; }
 }
 
 export type AppRouter = typeof appRouter;
