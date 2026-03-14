@@ -1917,7 +1917,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       const res = await fetch('/api/trpc/runQualityCheck', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ json: { checkType } }),
+        body: JSON.stringify({ checkType }),
       })
       const data = await res.json()
       if (data.result?.data?.json?.started || data.result?.data?.started) {
