@@ -1744,12 +1744,12 @@ export const appRouter = router({
       imageBase64: z.string().optional(), // base64-encoded image (data URI or raw base64)
     }).refine(d => d.imageUrl || d.imageBase64, { message: 'imageUrl or imageBase64 required' }))
     .mutation(async ({ input }) => {
-      // Fetch image and compute average LAB via pixel sampling
+      // Fetch image and compute average LAB via pixel sampling (using sharp)
       const https = await import('https');
       const http = await import('http');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let createCanvas: any = null, loadImage: any = null;
-      try { const m = require('canvas'); createCanvas = m.createCanvas; loadImage = m.loadImage; } catch { /* canvas not available */ }
+      let sharp: any = null;
+      try { sharp = require('sharp'); } catch { /* sharp not available */ }
 
       // Helper: RGB -> LAB
       const rgbToLab = (r: number, g: number, b: number) => {
@@ -1777,12 +1777,12 @@ export const appRouter = router({
         }).on('error', reject);
       });
 
-      // Analyse image LAB distribution
+      // Analyse image LAB distribution using sharp
       let imageLABZones: Array<{L: number; a: number; b: number; count: number}> = [];
       let imageError = '';
 
       try {
-        if (!createCanvas || !loadImage) throw new Error('canvas not available');
+        if (!sharp) throw new Error('sharp not available');
         let buf: Buffer;
         if (input.imageBase64) {
           // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
@@ -1791,17 +1791,18 @@ export const appRouter = router({
         } else {
           buf = await fetchBuffer(input.imageUrl!);
         }
-        const img = await (loadImage as (b: Buffer) => Promise<{width: number; height: number}>)(buf);
-        const canvas = (createCanvas as (w: number, h: number) => {getContext: (t: string) => CanvasRenderingContext2D})(64, 64);
-        const ctx = canvas.getContext('2d');
-        (ctx as unknown as {drawImage: (img: unknown, x: number, y: number, w: number, h: number) => void}).drawImage(img, 0, 0, 64, 64);
-        const imageData = ctx.getImageData(0, 0, 64, 64);
-        const data = imageData.data;
-        // Sample every 4th pixel
+        // Resize to 64x64 and get raw RGB pixels via sharp
+        const { data, info } = await sharp(buf)
+          .resize(64, 64, { fit: 'fill' })
+          .removeAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        const pixels = data as Buffer;
+        const channels = info.channels; // should be 3 (RGB)
         const zones: Record<string, {L: number; a: number; b: number; count: number}> = {};
-        for (let i = 0; i < data.length; i += 16) {
-          const lab = rgbToLab(data[i], data[i+1], data[i+2]);
-          // Quantize to 8-unit LAB zones
+        for (let i = 0; i < pixels.length; i += channels * 4) { // sample every 4th pixel
+          const r = pixels[i], g = pixels[i+1], b2 = pixels[i+2];
+          const lab = rgbToLab(r, g, b2);
           const zL = Math.round(lab.L / 8) * 8;
           const zA = Math.round(lab.a / 8) * 8;
           const zB = Math.round(lab.b / 8) * 8;

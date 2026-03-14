@@ -2449,14 +2449,27 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         </div>
         {/* Preset-Buttons */}
         <div className="flex flex-wrap gap-2 mb-4">
-          <span className="text-xs text-gray-400 self-center">Presets:</span>
+          <span className="text-xs text-gray-400 self-center shrink-0">Beispiele:</span>
           {[
-            { label: '👤 Portrait', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400' },
-            { label: '🌅 Landschaft', url: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400' },
-            { label: '🏙️ Stadt', url: 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400' },
-            { label: '🐶 Tier', url: 'https://images.unsplash.com/photo-1587300003388-59208cc962cb?w=400' },
+            // Portraits – verschiedene Hauttöne & Beleuchtung
+            { label: '👩 Portrait hell', url: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400', cat: 'portrait' },
+            { label: '👨🏿 Portrait dunkel', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400', cat: 'portrait' },
+            { label: '👶 Kind', url: 'https://images.unsplash.com/photo-1555252333-9f8e92e65df9?w=400', cat: 'portrait' },
+            // Natur & Landschaft
+            { label: '🌅 Sonnenuntergang', url: 'https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?w=400', cat: 'natur' },
+            { label: '🌊 Ozean', url: 'https://images.unsplash.com/photo-1505118380757-91f5f5632de0?w=400', cat: 'natur' },
+            { label: '🌲 Wald', url: 'https://images.unsplash.com/photo-1448375240586-882707db888b?w=400', cat: 'natur' },
+            { label: '❄️ Schnee/Winter', url: 'https://images.unsplash.com/photo-1491002052546-bf38f186af56?w=400', cat: 'natur' },
+            // Architektur & Stadt
+            { label: '🏙️ Skyline Nacht', url: 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=400', cat: 'stadt' },
+            { label: '🏛️ Architektur', url: 'https://images.unsplash.com/photo-1486325212027-8081e485255e?w=400', cat: 'stadt' },
+            // Tiere
+            { label: '🦁 Löwe', url: 'https://images.unsplash.com/photo-1546182990-dffeafbe841d?w=400', cat: 'tier' },
+            { label: '🦜 Vogel bunt', url: 'https://images.unsplash.com/photo-1444464666168-49d633b86797?w=400', cat: 'tier' },
+            // Abstrakt / Farbe
+            { label: '🎨 Farbenreich', url: 'https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=400', cat: 'farbe' },
           ].map(p => (
-            <button key={p.label} onClick={() => setTestImageUrl(p.url)}
+            <button key={p.label} onClick={() => { setTestImageUrl(p.url); setTestImageFile(null); }}
               className="px-3 py-1 rounded-full text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
               {p.label}
             </button>
