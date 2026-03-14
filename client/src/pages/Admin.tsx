@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { jsPDF } from 'jspdf'
 import {
   Database, RefreshCw, Upload, Image, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle
@@ -1139,7 +1140,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const dateStr = new Date().toISOString().slice(0, 10)
       const filterDesc = [sourceFilter !== 'alle' ? `Quelle: ${sourceFilter}` : '', colorFilter !== 'alle' ? `Farbe: ${colorFilter}` : '', brightnessFilter !== 'alle' ? `Helligkeit: ${brightnessFilter}` : ''].filter(Boolean).join(' · ') || 'Alle Tiles'
 
-      const { jsPDF } = await import('jspdf')
       const pageW = 210, pageH = 297
       const margin = 10
       const tileSize = 18  // mm per tile
@@ -2139,7 +2139,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const downloadPdfReport = useCallback(async () => {
     setPdfGenerating(true)
     try {
-      const { jsPDF } = await import('jspdf')
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       const now = new Date().toLocaleString('de-CH')
       const pageW = 210; const margin = 14; const colW = pageW - 2 * margin
