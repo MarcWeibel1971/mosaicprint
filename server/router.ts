@@ -817,18 +817,23 @@ export const appRouter = router({
       // LAB indexed (not default 50/0/0)
       const labRes = await pool.query("SELECT COUNT(*) as cnt FROM mosaic_images WHERE NOT (avg_l = 50 AND avg_a = 0 AND avg_b = 0)");
       const labIndexed = Number(labRes.rows[0]?.cnt ?? 0);
-      // By source (detect from source_url)
+      // By source (use source_provider column first, fall back to URL detection)
       const srcRes = await pool.query(`
         SELECT
-          CASE
-            WHEN source_url LIKE '%picsum%' THEN 'picsum'
-            WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
-            WHEN source_url LIKE '%pexels%' THEN 'pexels'
-            ELSE 'other'
-          END as src,
+          COALESCE(
+            source_provider,
+            CASE
+              WHEN source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%' THEN 'picsum'
+              WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
+              WHEN source_url LIKE '%pexels%' THEN 'pexels'
+              WHEN source_url LIKE '%pixabay%' OR source_url LIKE '%cdn.pixabay%' THEN 'pixabay'
+              ELSE 'other'
+            END
+          ) as src,
           COUNT(*) as cnt
         FROM mosaic_images
         GROUP BY src
+        ORDER BY cnt DESC
       `);
       const bySource: Record<string, number> = {};
       for (const row of srcRes.rows) bySource[row.src] = Number(row.cnt);
@@ -1436,10 +1441,15 @@ export const appRouter = router({
     .query(async ({ input }) => {
       const pool = db.getPool();
       const conditions: string[] = [];
-      if (input.sourceId === 'pexels') conditions.push("source_url LIKE '%pexels%'");
-      else if (input.sourceId === 'unsplash') conditions.push("source_url LIKE '%unsplash%'");
-      else if (input.sourceId === 'picsum') conditions.push("(source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%')");
-      else if (input.sourceId === 'pixabay') conditions.push("source_url LIKE '%pixabay%'");
+      if (input.sourceId && input.sourceId !== 'alle') {
+        // Prefer source_provider column (canonical), fall back to URL pattern for legacy rows
+        const sid = input.sourceId;
+        if (sid === 'pexels') conditions.push("(source_provider = 'pexels' OR (source_provider IS NULL AND source_url LIKE '%pexels%'))");
+        else if (sid === 'unsplash') conditions.push("(source_provider = 'unsplash' OR (source_provider IS NULL AND source_url LIKE '%unsplash%'))");
+        else if (sid === 'picsum') conditions.push("(source_provider = 'picsum' OR (source_provider IS NULL AND (source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%')))");
+        else if (sid === 'pixabay') conditions.push("(source_provider = 'pixabay' OR (source_provider IS NULL AND (source_url LIKE '%pixabay%' OR source_url LIKE '%cdn.pixabay%')))");
+        else conditions.push(`source_provider = '${sid}'`);
+      }
       if (input.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
       else if (input.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
       else if (input.brightnessFilter === "hell") conditions.push("avg_l > 65");

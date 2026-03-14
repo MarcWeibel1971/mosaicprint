@@ -86,11 +86,22 @@ export async function ensureSchema(): Promise<void> {
       CASE
         WHEN source_url LIKE '%pexels%' THEN 'pexels'
         WHEN source_url LIKE '%unsplash%' THEN 'unsplash'
-        WHEN source_url LIKE '%pixabay%' THEN 'pixabay'
+        WHEN source_url LIKE '%pixabay%' OR source_url LIKE '%cdn.pixabay%' THEN 'pixabay'
         WHEN source_url LIKE '%picsum%' OR source_url LIKE '%lorempixel%' THEN 'picsum'
         ELSE 'other'
       END
     WHERE source_provider IS NULL
+  `).catch(() => {});
+  // Fix: tiles imported with largeImageURL (pixabay.com/get/...) were tagged as 'other'
+  // because the URL contains 'pixabay.com' but not the string 'pixabay' in path
+  await pool.query(`
+    UPDATE mosaic_images SET source_provider = 'pixabay'
+    WHERE source_provider = 'other'
+      AND (
+        source_url LIKE '%pixabay.com%'
+        OR tile128_url LIKE '%pixabay.com%'
+        OR tile128_url LIKE '%cdn.pixabay%'
+      )
   `).catch(() => {});
 
   // import_query: keyword used to find this tile
