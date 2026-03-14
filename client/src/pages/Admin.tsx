@@ -56,6 +56,7 @@ interface TileImage {
   createdAt: string; sourceId: string
   colorCategory: string | null; brightnessCategory: string | null
   subject: string | null
+  semanticTheme: string | null
 }
 interface DbStatsDetail {
   total: number; labIndexed: number
@@ -1011,6 +1012,9 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [sourceDeleting, setSourceDeleting] = useState(false)
+  const [semanticThemeFilter, setSemanticThemeFilter] = useState('alle')
+  const [batchTagging, setBatchTagging] = useState(false)
+  const [batchTagResult, setBatchTagResult] = useState<string | null>(null)
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -1030,6 +1034,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
       if (importedSince !== 'alle') params.importedSince = importedSince
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
+      if (semanticThemeFilter !== 'alle') params.semanticTheme = semanticThemeFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
       const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`)
       const data = await res.json()
@@ -1039,7 +1044,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, semanticThemeFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -1127,7 +1132,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   }, [fetchDbStats, fetchImages])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
@@ -1332,6 +1337,26 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     onMessage({ text: `✅ ${deleted} Bilder gelöscht`, type: 'success' })
     fetchImages(page)
     fetchDbStats()
+  }
+
+  const runBatchTag = async () => {
+    if (!confirm('Alle Tiles ohne Semantic-Tag automatisch taggen? (Kann einige Minuten dauern)')) return
+    setBatchTagging(true)
+    setBatchTagResult(null)
+    try {
+      const res = await fetch('/api/trpc/batchTagSemanticThemes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+      })
+      const data = await res.json()
+      const result = data.result?.data?.json ?? data.result?.data ?? data
+      setBatchTagResult(`✅ ${result.tagged ?? 0} Tiles getaggt`)
+      fetchImages(page)
+      fetchDbStats()
+    } catch (e) {
+      setBatchTagResult(`❌ Fehler: ${String(e)}`)
+    } finally {
+      setBatchTagging(false)
+    }
   }
 
   const handleDeleteBySource = async (source: string) => {
@@ -1709,6 +1734,15 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {shutterstockLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>❌</span>}
             {shutterstockLoading ? 'Entferne...' : 'Shutterstock entfernen'}
           </button>
+          <button
+            onClick={runBatchTag}
+            disabled={batchTagging}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+          >
+            {batchTagging ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🏷️</span>}
+            {batchTagging ? 'Tagge Tiles...' : 'Semantic-Tags vergeben'}
+          </button>
+          {batchTagResult && <p className="text-xs font-medium text-indigo-700">{batchTagResult}</p>}
         </div>
       </div>
 
@@ -1738,6 +1772,17 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}>
               {v === 'alle' ? 'Alle' : v === 'pending' ? '⏳ Ausstehend' : v === 'pass' ? '✅ Pass' : v === 'warn' ? '⚠️ Warn' : '❌ Fail'}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Semantic-Tag:</span>
+          {['alle', 'portrait', 'nature_ocean', 'nature_forest', 'nature_sunset', 'nature_snow', 'city_night', 'abstract_colorful', 'general'].map(v => (
+            <button key={v} onClick={() => { setSemanticThemeFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                semanticThemeFilter === v ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>
+              {v === 'alle' ? 'Alle' : v === 'portrait' ? '👤 Portrait' : v === 'nature_ocean' ? '🌊 Ozean' : v === 'nature_forest' ? '🌿 Wald' : v === 'nature_sunset' ? '🌅 Sonnenuntergang' : v === 'nature_snow' ? '❄️ Schnee' : v === 'city_night' ? '🌃 Nacht' : v === 'abstract_colorful' ? '🎨 Bunt' : '📦 Allgemein'}
             </button>
           ))}
         </div>
@@ -1775,8 +1820,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setQualityStatusFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle') }}
+        {semanticThemeFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-indigo-100 text-indigo-700 text-xs px-2 py-1 rounded-full">
+            🏷️ {semanticThemeFilter}
+            <button onClick={() => setSemanticThemeFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>
@@ -1892,6 +1943,9 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               </div>
               <div className="flex justify-between"><span>Helligkeit:</span><span className="font-medium">{selectedImage.brightnessCategory ?? 'Nicht indexiert'}</span></div>
               <div className="flex justify-between"><span>Thema:</span><span className="font-medium">{selectedImage.subject ?? 'general'}</span></div>
+              <div className="flex justify-between"><span>Semantic-Tag:</span>
+                <span className="font-medium text-indigo-600">{selectedImage.semanticTheme ?? <span className="text-gray-400 italic">nicht getaggt</span>}</span>
+              </div>
               {/* 15D LAB Feature Vectors */}
               <div className="mt-2 pt-2 border-t border-gray-100">
                 <p className="text-xs font-semibold text-gray-500 mb-1">15D Matching-Features</p>

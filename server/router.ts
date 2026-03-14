@@ -1764,6 +1764,7 @@ export const appRouter = router({
       sourceId: z.string().optional(),
       importedSince: z.string().optional(),
       qualityStatus: z.string().optional(),
+      semanticTheme: z.string().optional(),
     }))
     .query(async ({ input }) => {
       return db.getAdminImages({
@@ -1774,6 +1775,7 @@ export const appRouter = router({
         sourceId: input.sourceId,
         importedSince: input.importedSince,
         qualityStatus: input.qualityStatus,
+        semanticTheme: input.semanticTheme,
       });
     }),
 
@@ -2032,6 +2034,39 @@ export const appRouter = router({
   getAutoLearnRuns: publicProcedure
     .input(z.object({ limit: z.number().default(10) }))
     .query(async ({ input }) => db.getAutoLearnRuns(input.limit)),
+
+  // ── Semantic Tagger ──────────────────────────────────────────────────────
+  // Batch-tag all tiles with semantic_theme derived from LAB features
+  runSemanticTagger: publicProcedure
+    .input(z.object({ forceRetag: z.boolean().default(false) }))
+    .mutation(async ({ input }) => {
+      const result = await db.batchTagSemanticThemes(input.forceRetag);
+      return result;
+    }),
+
+  // Get distribution of semantic themes
+  getSemanticThemeStats: publicProcedure
+    .query(async () => db.getSemanticThemeStats()),
+
+  // Tag a single tile (used after import)
+  tagSingleTile: publicProcedure
+    .input(z.object({ tileId: z.number() }))
+    .mutation(async ({ input }) => {
+      const pool = db.getPool();
+      const res = await pool.query(
+        `SELECT id, avg_l, avg_a, avg_b, tl_l, tl_a, tl_b, br_l, br_a, br_b,
+                is_skin_friendly, tile_type, import_query
+         FROM mosaic_images WHERE id = $1`,
+        [input.tileId]
+      );
+      if (!res.rows[0]) return { ok: false, theme: null };
+      const theme = db.deriveSemanticTheme(res.rows[0]);
+      await pool.query(
+        `UPDATE mosaic_images SET semantic_theme = $1 WHERE id = $2`,
+        [theme, input.tileId]
+      );
+      return { ok: true, theme };
+    }),
 });
 
 // ── Quality Check Async Runner ─────────────────────────────────────────────────

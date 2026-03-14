@@ -244,7 +244,14 @@ export async function ensureSchema(): Promise<void> {
     )
   `);
 
-  console.log("[DB] Schema ensured (v4 with auto_learn_runs)");
+  // semantic_theme: auto-tagged category derived from LAB features (no image download needed)
+  // Values: portrait_light_skin | portrait_medium_skin | portrait_dark_skin | nature_sunset |
+  //         nature_ocean | nature_forest | nature_snow | nature_mountain | city_night |
+  //         city_architecture | animal_warm | animal_colorful | abstract_colorful | general
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS semantic_theme TEXT DEFAULT NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_semantic_theme ON mosaic_images (semantic_theme)`);
+
+  console.log("[DB] Schema ensured (v5 with semantic_theme)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
@@ -275,6 +282,7 @@ export async function getAdminImages(opts: {
   sourceId?: string;
   importedSince?: string; // ISO date string for 'recently imported' filter
   qualityStatus?: string;
+  semanticTheme?: string; // filter by auto-tagged semantic category
 }) {
   const pool = getPool();
   const pageSize = opts.pageSize ?? opts.limit ?? 50;
@@ -301,6 +309,10 @@ export async function getAdminImages(opts: {
     conditions.push(`COALESCE(quality_status, 'pending') = '${opts.qualityStatus}'`);
   }
 
+  // Semantic theme filter
+  if (opts.semanticTheme && opts.semanticTheme !== 'alle') {
+    conditions.push(`semantic_theme = '${opts.semanticTheme.replace(/'/g, "''")}' `);
+  }
   // Brightness filter
   if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
   else if (opts.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
@@ -333,6 +345,7 @@ export async function getAdminImages(opts: {
       br_l as "brL", br_a as "brA", br_b as "brB",
       COALESCE(theme, subject, 'general') as "theme",
       COALESCE(theme, subject, 'general') as "subject",
+      semantic_theme as "semanticTheme",
       COALESCE(quality_status, 'pending') as "qualityStatus",
       quality_score as "qualityScore",
       quality_reason as "qualityReason",
@@ -403,13 +416,23 @@ export async function insertMosaicImage(data: {
     normalizedUrl.includes('pixabay') ? 'pixabay' :
     normalizedUrl.includes('picsum') || normalizedUrl.includes('lorempixel') ? 'picsum' : 'other'
   );
+  // Derive semantic_theme from LAB features at insert time
+  const isSkinFriendly = Math.sqrt(data.avgA * data.avgA + data.avgB * data.avgB) < 25 && data.avgL >= 35 && data.avgL <= 80;
+  const semanticTheme = deriveSemanticTheme({
+    avg_l: data.avgL, avg_a: data.avgA, avg_b: data.avgB,
+    tl_l: data.tlL, tl_a: data.tlA, tl_b: data.tlB,
+    br_l: data.brL, br_a: data.brA, br_b: data.brB,
+    is_skin_friendly: isSkinFriendly,
+    tile_type: data.tileType ?? 'medium',
+    import_query: data.importQuery ?? null,
+  });
   const res = await pool.query(
     `INSERT INTO mosaic_images
        (source_url, tile128_url, avg_l, avg_a, avg_b,
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
-        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22)
+        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -418,7 +441,7 @@ export async function insertMosaicImage(data: {
       tlL, tlA, tlB, trL, trA, trB,
       blL, blA, blB, brL, brA, brB,
       theme, theme, sourceProvider, data.importQuery ?? null,
-      data.tileType ?? 'medium'
+      data.tileType ?? 'medium', semanticTheme
     ]
   );
   return (res.rowCount ?? 0) > 0;
@@ -638,4 +661,130 @@ export async function getAutoLearnRun(runId: number): Promise<any | null> {
   const pool = getPool();
   const res = await pool.query(`SELECT * FROM auto_learn_runs WHERE id = $1`, [runId]);
   return res.rows[0] ?? null;
+}
+
+// ── Semantic Tagger ───────────────────────────────────────────────────────────
+// Derives a semantic category from LAB features already stored in the DB.
+// No image download needed – purely rule-based on avg_l, avg_a, avg_b,
+// tile_type, is_skin_friendly and quadrant variance.
+//
+// Category hierarchy (priority order):
+//   1. Portrait (skin-friendly + warm LAB)
+//   2. Nature (color-based: sunset/ocean/forest/snow/mountain)
+//   3. City (dark + low-sat → night; neutral + medium-L → architecture)
+//   4. Animal (warm earth tones or vivid colors)
+//   5. Abstract (very high saturation)
+//   6. general (fallback)
+export function deriveSemanticTheme(tile: {
+  avg_l: number; avg_a: number; avg_b: number;
+  tl_l?: number; tl_a?: number; tl_b?: number;
+  br_l?: number; br_a?: number; br_b?: number;
+  is_skin_friendly?: boolean;
+  tile_type?: string;
+  import_query?: string | null;
+}): string {
+  const L = tile.avg_l ?? 50;
+  const a = tile.avg_a ?? 0;
+  const b = tile.avg_b ?? 0;
+  const sat = Math.sqrt(a * a + b * b); // LAB chroma (saturation proxy)
+  const isSkin = tile.is_skin_friendly ?? false;
+  const tileType = tile.tile_type ?? 'medium';
+  const query = (tile.import_query ?? '').toLowerCase();
+
+  // ── 1. Portrait detection ────────────────────────────────────────────────
+  if (isSkin && L >= 35 && L <= 85) {
+    // Distinguish by brightness + warmth (a-channel)
+    if (L >= 65 && a >= 2 && a <= 18) return 'portrait_light_skin';   // fair/blonde
+    if (L >= 45 && L < 65 && a >= 3 && a <= 22) return 'portrait_medium_skin'; // olive/brown
+    if (L >= 35 && L < 50 && a >= 5) return 'portrait_dark_skin';     // dark skin
+    if (L >= 60 && sat < 15) return 'portrait_grey_hair';              // grey/white hair
+    if (L >= 65 && sat < 20 && a < 5) return 'portrait_child';        // soft pale child skin
+    return 'portrait_medium_skin'; // fallback portrait
+  }
+
+  // ── 2. Nature ────────────────────────────────────────────────────────────
+  // Sunset / golden hour: warm orange-red tones
+  if (a >= 8 && b >= 12 && L >= 30 && L <= 80) return 'nature_sunset';
+  // Ocean / sea: cyan-blue tones
+  if (a <= -8 && b <= -8 && L >= 25) return 'nature_ocean';
+  // Forest / vegetation: green tones
+  if (a <= -8 && b >= -5 && L >= 25 && L <= 75) return 'nature_forest';
+  // Snow / winter: very bright + low saturation
+  if (L >= 78 && sat < 18) return 'nature_snow';
+  // Mountain / rocky: medium-dark, low saturation, calm texture
+  if (L >= 30 && L <= 65 && sat < 20 && tileType === 'calm') return 'nature_mountain';
+
+  // ── 3. City ──────────────────────────────────────────────────────────────
+  // Night / skyline: very dark
+  if (L < 25) return 'city_night';
+  // Architecture: medium brightness, low saturation, busy texture (lots of edges)
+  if (L >= 35 && L <= 70 && sat < 22 && tileType === 'busy') return 'city_architecture';
+
+  // ── 4. Animal ────────────────────────────────────────────────────────────
+  // Warm earth tones (lion, dog, fox): warm + medium brightness
+  if (a >= 5 && b >= 8 && L >= 35 && L <= 70 && sat >= 15 && sat < 40) return 'animal_warm';
+  // Colorful animals (birds, fish): very vivid
+  if (sat >= 45 && L >= 35 && L <= 75) return 'animal_colorful';
+
+  // ── 5. Abstract ──────────────────────────────────────────────────────────
+  if (sat >= 40) return 'abstract_colorful';
+
+  // ── 6. Fallback ──────────────────────────────────────────────────────────
+  return 'general';
+}
+
+// Batch-tag all tiles that have no semantic_theme yet (or force re-tag)
+export async function batchTagSemanticThemes(forceRetag = false): Promise<{ tagged: number; skipped: number }> {
+  const pool = getPool();
+  const whereClause = forceRetag
+    ? 'WHERE avg_l IS NOT NULL'
+    : 'WHERE semantic_theme IS NULL AND avg_l IS NOT NULL';
+  const res = await pool.query(
+    `SELECT id, avg_l, avg_a, avg_b, tl_l, tl_a, tl_b, br_l, br_a, br_b,
+            is_skin_friendly, tile_type, import_query
+     FROM mosaic_images ${whereClause}`
+  );
+  if (res.rows.length === 0) return { tagged: 0, skipped: 0 };
+
+  let tagged = 0;
+  // Process in batches of 500 for efficiency
+  const BATCH = 500;
+  for (let i = 0; i < res.rows.length; i += BATCH) {
+    const batch = res.rows.slice(i, i + BATCH);
+    const values: string[] = [];
+    const params: (string | number)[] = [];
+    let pi = 1;
+    for (const row of batch) {
+      const theme = deriveSemanticTheme(row);
+      values.push(`($${pi++}::int, $${pi++}::text)`);
+      params.push(row.id, theme);
+    }
+    await pool.query(
+      `UPDATE mosaic_images SET semantic_theme = v.theme
+       FROM (VALUES ${values.join(',')}) AS v(id, theme)
+       WHERE mosaic_images.id = v.id`,
+      params
+    );
+    tagged += batch.length;
+  }
+  return { tagged, skipped: res.rows.length - tagged };
+}
+
+// Get distribution of semantic themes
+export async function getSemanticThemeStats(): Promise<Array<{ theme: string; count: number; pct: number }>> {
+  const pool = getPool();
+  const res = await pool.query(`
+    SELECT
+      COALESCE(semantic_theme, 'untagged') as theme,
+      COUNT(*) as count
+    FROM mosaic_images
+    GROUP BY semantic_theme
+    ORDER BY count DESC
+  `);
+  const total = res.rows.reduce((s: number, r: { count: string }) => s + Number(r.count), 0);
+  return res.rows.map((r: { theme: string; count: string }) => ({
+    theme: r.theme,
+    count: Number(r.count),
+    pct: total > 0 ? Math.round((Number(r.count) / total) * 1000) / 10 : 0,
+  }));
 }
