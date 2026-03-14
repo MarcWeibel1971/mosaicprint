@@ -1095,7 +1095,7 @@ export default function Studio() {
            // Detailed target areas (hair, texture, edges) can use busy tiles
            if (IS_16D) {
              const tileComplexity = labIndex[i + 15]; // 0=calm, 0.5=medium, 1=busy
-             const cellEdge = edgeMap[ci]; // 0-1 target edge energy
+             const cellEdge = targetEdge; // 0-1 target edge energy (passed as parameter)
              if (cellEdge < 0.15 && tileComplexity > 0.6) {
                // Very smooth target + busy tile = strong penalty
                dist += (tileComplexity - 0.6) * 500; // up to +200 for very busy tile in smooth area
