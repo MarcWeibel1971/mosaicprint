@@ -1127,9 +1127,18 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         }))
       }
 
-      onMessage({ text: `PDF: Erstelle Dokument (${allImages.length} Tiles)...`, type: 'info' })
+      // ── PDF-Splitting-Logik: max. 40 MB pro Datei ────────────────────────────
+      // Schätze Tiles pro Teil: 64px JPEG ≈ 8–15 KB encoded → ~12 KB Durchschnitt
+      // 40 MB = 40 * 1024 * 1024 Bytes. Wir schätzen konservativ mit 15 KB/Tile.
+      const MAX_BYTES = 40 * 1024 * 1024  // 40 MB
+      const AVG_TILE_BYTES = 15 * 1024    // 15 KB pro Tile (konservative Schätzung)
+      const TILES_PER_PART = Math.floor(MAX_BYTES / AVG_TILE_BYTES)  // ~2730 Tiles
+
+      const totalParts = Math.ceil(allImages.length / TILES_PER_PART)
+      const dateStr = new Date().toISOString().slice(0, 10)
+      const filterDesc = [sourceFilter !== 'alle' ? `Quelle: ${sourceFilter}` : '', colorFilter !== 'alle' ? `Farbe: ${colorFilter}` : '', brightnessFilter !== 'alle' ? `Helligkeit: ${brightnessFilter}` : ''].filter(Boolean).join(' · ') || 'Alle Tiles'
+
       const { jsPDF } = await import('jspdf')
-      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       const pageW = 210, pageH = 297
       const margin = 10
       const tileSize = 18  // mm per tile
@@ -1137,75 +1146,110 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const rowH = tileSize + 10  // tile + label area
       const headerH = 14
 
-      // Title page
-      doc.setFontSize(20)
-      doc.setTextColor(30, 30, 30)
-      doc.text('MosaicPrint – Tile-Katalog', pageW / 2, 30, { align: 'center' })
-      doc.setFontSize(10)
-      doc.setTextColor(100, 100, 100)
-      const filterDesc = [sourceFilter !== 'alle' ? `Quelle: ${sourceFilter}` : '', colorFilter !== 'alle' ? `Farbe: ${colorFilter}` : '', brightnessFilter !== 'alle' ? `Helligkeit: ${brightnessFilter}` : ''].filter(Boolean).join(' · ') || 'Alle Tiles'
-      doc.text(`${allImages.length.toLocaleString()} Tiles · ${filterDesc}`, pageW / 2, 42, { align: 'center' })
-      doc.text(`Generiert: ${new Date().toLocaleDateString('de-CH')}`, pageW / 2, 50, { align: 'center' })
-      doc.text(`Geladen: ${b64Map.size} von ${allImages.length} Bildern`, pageW / 2, 58, { align: 'center' })
+      let totalPagesAcrossAllParts = 0
 
-      // Grid pages
-      let x = margin
-      let y = headerH + margin
-      let pageNum = 1
-      doc.addPage()
+      for (let part = 0; part < totalParts; part++) {
+        const partImages = allImages.slice(part * TILES_PER_PART, (part + 1) * TILES_PER_PART)
+        const partLabel = totalParts > 1 ? ` (Teil ${part + 1} von ${totalParts})` : ''
+        onMessage({ text: `PDF: Erstelle Dokument${partLabel} (${partImages.length} Tiles)...`, type: 'info' })
 
-      const addPageHeader = () => {
-        doc.setFontSize(7)
-        doc.setTextColor(150, 150, 150)
-        doc.text(`MosaicPrint Tile-Katalog · Seite ${pageNum} · ${allImages.length.toLocaleString()} Tiles`, margin, 7)
-        doc.setDrawColor(220, 220, 220)
-        doc.line(margin, 9, pageW - margin, 9)
-      }
-      addPageHeader()
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
 
-      for (let i = 0; i < allImages.length; i++) {
-        const img = allImages[i]
-        const b64 = b64Map.get(img.id)
-        if (b64) {
-          try { doc.addImage(b64, 'JPEG', x, y, tileSize, tileSize) } catch {
-            doc.setFillColor(230, 230, 230); doc.rect(x, y, tileSize, tileSize, 'F')
-          }
-        } else {
-          // Placeholder for failed images
-          doc.setFillColor(220, 220, 220)
-          doc.rect(x, y, tileSize, tileSize, 'F')
-          doc.setFontSize(4); doc.setTextColor(150, 150, 150)
-          doc.text('?', x + tileSize / 2, y + tileSize / 2, { align: 'center' })
+        // Title page
+        doc.setFontSize(20)
+        doc.setTextColor(30, 30, 30)
+        doc.text(`MosaicPrint – Tile-Katalog${partLabel}`, pageW / 2, 30, { align: 'center' })
+        doc.setFontSize(10)
+        doc.setTextColor(100, 100, 100)
+        doc.text(`${allImages.length.toLocaleString()} Tiles gesamt · ${filterDesc}`, pageW / 2, 42, { align: 'center' })
+        doc.text(`Generiert: ${new Date().toLocaleDateString('de-CH')}`, pageW / 2, 50, { align: 'center' })
+        doc.text(`Geladen: ${b64Map.size} von ${allImages.length} Bildern`, pageW / 2, 58, { align: 'center' })
+        if (totalParts > 1) {
+          doc.setFontSize(11)
+          doc.setTextColor(60, 60, 60)
+          doc.text(`Tiles ${(part * TILES_PER_PART + 1).toLocaleString()} – ${Math.min((part + 1) * TILES_PER_PART, allImages.length).toLocaleString()} von ${allImages.length.toLocaleString()}`, pageW / 2, 68, { align: 'center' })
         }
 
-        // Labels below tile
-        doc.setFontSize(4.5)
-        doc.setTextColor(80, 80, 80)
-        const colorLabel = COLOR_LABELS[img.colorCategory ?? '']?.label ?? img.colorCategory ?? ''
-        const brightLabel = img.brightnessCategory ?? ''
-        doc.text(`#${img.id}`, x + tileSize / 2, y + tileSize + 2.5, { align: 'center' })
-        doc.setTextColor(120, 120, 120)
-        doc.text(colorLabel, x + tileSize / 2, y + tileSize + 5, { align: 'center' })
-        doc.text(`L:${img.avgL.toFixed(0)} a:${img.avgA.toFixed(0)} b:${img.avgB.toFixed(0)}`, x + tileSize / 2, y + tileSize + 7.5, { align: 'center' })
-        doc.text(brightLabel, x + tileSize / 2, y + tileSize + 10, { align: 'center' })
+        // Grid pages
+        let x = margin
+        let y = headerH + margin
+        let pageNum = 1
+        doc.addPage()
 
-        x += tileSize + gap
-        if (x + tileSize > pageW - margin) {
-          x = margin
-          y += rowH
-          if (y + rowH > pageH - margin) {
-            doc.addPage()
-            pageNum++
-            addPageHeader()
-            y = headerH
+        const addPageHeader = (pNum: number) => {
+          doc.setFontSize(7)
+          doc.setTextColor(150, 150, 150)
+          const headerText = totalParts > 1
+            ? `MosaicPrint Tile-Katalog · Teil ${part + 1}/${totalParts} · Seite ${pNum} · ${partImages.length.toLocaleString()} Tiles`
+            : `MosaicPrint Tile-Katalog · Seite ${pNum} · ${allImages.length.toLocaleString()} Tiles`
+          doc.text(headerText, margin, 7)
+          doc.setDrawColor(220, 220, 220)
+          doc.line(margin, 9, pageW - margin, 9)
+        }
+        addPageHeader(pageNum)
+
+        for (let i = 0; i < partImages.length; i++) {
+          const img = partImages[i]
+          const b64 = b64Map.get(img.id)
+          if (b64) {
+            try { doc.addImage(b64, 'JPEG', x, y, tileSize, tileSize) } catch {
+              doc.setFillColor(230, 230, 230); doc.rect(x, y, tileSize, tileSize, 'F')
+            }
+          } else {
+            // Placeholder for failed images
+            doc.setFillColor(220, 220, 220)
+            doc.rect(x, y, tileSize, tileSize, 'F')
+            doc.setFontSize(4); doc.setTextColor(150, 150, 150)
+            doc.text('?', x + tileSize / 2, y + tileSize / 2, { align: 'center' })
+          }
+
+          // Labels below tile
+          doc.setFontSize(4.5)
+          doc.setTextColor(80, 80, 80)
+          const colorLabel = COLOR_LABELS[img.colorCategory ?? '']?.label ?? img.colorCategory ?? ''
+          const brightLabel = img.brightnessCategory ?? ''
+          doc.text(`#${img.id}`, x + tileSize / 2, y + tileSize + 2.5, { align: 'center' })
+          doc.setTextColor(120, 120, 120)
+          doc.text(colorLabel, x + tileSize / 2, y + tileSize + 5, { align: 'center' })
+          doc.text(`L:${img.avgL.toFixed(0)} a:${img.avgA.toFixed(0)} b:${img.avgB.toFixed(0)}`, x + tileSize / 2, y + tileSize + 7.5, { align: 'center' })
+          doc.text(brightLabel, x + tileSize / 2, y + tileSize + 10, { align: 'center' })
+
+          x += tileSize + gap
+          if (x + tileSize > pageW - margin) {
             x = margin
+            y += rowH
+            if (y + rowH > pageH - margin) {
+              doc.addPage()
+              pageNum++
+              addPageHeader(pageNum)
+              y = headerH
+              x = margin
+            }
           }
+        }
+
+        totalPagesAcrossAllParts += pageNum
+
+        // Dateiname: bei mehreren Teilen mit "partX-of-Y" Suffix
+        const filename = totalParts > 1
+          ? `mosaicprint-tiles-${dateStr}-teil${part + 1}-von${totalParts}.pdf`
+          : `mosaicprint-tiles-${dateStr}.pdf`
+
+        // Prüfe tatsächliche Dateigröße (jsPDF output als ArrayBuffer)
+        const pdfOutput = doc.output('arraybuffer')
+        const actualMB = (pdfOutput.byteLength / (1024 * 1024)).toFixed(1)
+        onMessage({ text: `PDF Teil ${part + 1}/${totalParts}: ${actualMB} MB – wird heruntergeladen...`, type: 'info' })
+
+        doc.save(filename)
+
+        // Kurze Pause zwischen Downloads damit Browser nicht blockiert
+        if (part < totalParts - 1) {
+          await new Promise(r => setTimeout(r, 800))
         }
       }
 
-      const filename = `mosaicprint-tiles-${new Date().toISOString().slice(0, 10)}.pdf`
-      doc.save(filename)
-      onMessage({ text: `✅ PDF mit ${allImages.length} Tiles exportiert (${pageNum} Seiten)`, type: 'success' })
+      const summaryParts = totalParts > 1 ? ` in ${totalParts} Dateien` : ''
+      onMessage({ text: `✅ PDF mit ${allImages.length} Tiles exportiert (${totalPagesAcrossAllParts} Seiten${summaryParts})`, type: 'success' })
     } catch (e) {
       onMessage({ text: `❌ PDF-Fehler: ${String(e)}`, type: 'error' })
     } finally {
@@ -1562,7 +1606,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
           >
             {pdfExporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-            {pdfExporting ? 'PDF wird generiert...' : 'Tile-Katalog als PDF'}
+            {pdfExporting ? 'PDF wird generiert...' : 'Tile-Katalog als PDF (max. 40 MB/Datei)'}
           </button>
           <button
             onClick={runDedup}
