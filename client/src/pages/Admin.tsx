@@ -113,35 +113,35 @@ const PRESET_PROFILES: Profile[] = [
     id: 'portrait',
     label: 'Portrait',
     icon: '👤',
-    description: 'Optimiert für Gesichter: feineres Raster, stärkere Helligkeits-Gewichtung, Haut-Ton-Boost.',
+    description: 'Optimiert für Gesichter: feineres Raster, Haut-Ton-Boost, Soft-Overlay, keine Rotation.',
     settings: {
-      baseTiles: 120, tilePx: 8, baseOverlay: 0.0, edgeBoost: 0.0,
-      brightnessWeight: 0.55, labWeight: 0.15, textureWeight: 0.12, edgeWeight: 0.18,
-      contrastBoost: 1.25, histogramBlend: 0.08, overlayMode: 'none', enableRotation: true,
-      neighborRadius: 5, neighborPenalty: 180,
+      baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0,
+      brightnessWeight: 0.45, labWeight: 0.30, textureWeight: 0.12, edgeWeight: 0.13,
+      contrastBoost: 1.28, histogramBlend: 0.08, overlayMode: 'softlight', enableRotation: false,
+      neighborRadius: 5, neighborPenalty: 240,
     }
   },
   {
     id: 'landscape',
     label: 'Landschaft',
     icon: '🏔️',
-    description: 'Optimiert für Landschaften: breites Raster, starke Farb-Gewichtung, Farb-Transfer aktiv.',
+    description: 'Optimiert für Landschaften: breites Raster, starke Farb-Gewichtung, hoher Farb-Transfer.',
     settings: {
       baseTiles: 80, tilePx: 10, baseOverlay: 0.0, edgeBoost: 0.0,
-      brightnessWeight: 0.35, labWeight: 0.30, textureWeight: 0.20, edgeWeight: 0.15,
-      contrastBoost: 1.15, histogramBlend: 0.10, overlayMode: 'none', enableRotation: true,
+      brightnessWeight: 0.28, labWeight: 0.40, textureWeight: 0.20, edgeWeight: 0.12,
+      contrastBoost: 1.45, histogramBlend: 0.12, overlayMode: 'none', enableRotation: true,
       neighborRadius: 8, neighborPenalty: 150,
     }
   },
   {
     id: 'night',
     label: 'Nacht / Skyline',
-    icon: '🌃',
-    description: 'Optimiert für dunkle Szenen: Kontrast-Boost, Textur-Gewichtung erhöht.',
+    icon: '🏃',
+    description: 'Optimiert für dunkle Szenen: starker Kontrast, Textur/Kanten erhöht, Soft-Overlay.',
     settings: {
-      baseTiles: 90, tilePx: 9, baseOverlay: 0.05, edgeBoost: 0.12,
-      brightnessWeight: 0.40, labWeight: 0.20, textureWeight: 0.25, edgeWeight: 0.15,
-      contrastBoost: 1.40, histogramBlend: 0.05, overlayMode: 'softlight', enableRotation: true,
+      baseTiles: 90, tilePx: 9, baseOverlay: 0.05, edgeBoost: 0.15,
+      brightnessWeight: 0.35, labWeight: 0.25, textureWeight: 0.30, edgeWeight: 0.10,
+      contrastBoost: 1.65, histogramBlend: 0.05, overlayMode: 'softlight', enableRotation: true,
       neighborRadius: 6, neighborPenalty: 200,
     }
   },
@@ -149,11 +149,11 @@ const PRESET_PROFILES: Profile[] = [
     id: 'colorful',
     label: 'Farbenreich',
     icon: '🎨',
-    description: 'Maximale Farbvielfalt: starker Farb-Transfer, hohe Sättigungs-Gewichtung.',
+    description: 'Maximale Farbvielfalt: starker Farb-Transfer, hohe Sättigungs-Gewichtung, kräftiger Kontrast.',
     settings: {
       baseTiles: 100, tilePx: 8, baseOverlay: 0.0, edgeBoost: 0.0,
-      brightnessWeight: 0.30, labWeight: 0.35, textureWeight: 0.15, edgeWeight: 0.20,
-      contrastBoost: 1.20, histogramBlend: 0.12, overlayMode: 'none', enableRotation: true,
+      brightnessWeight: 0.25, labWeight: 0.45, textureWeight: 0.15, edgeWeight: 0.15,
+      contrastBoost: 1.40, histogramBlend: 0.13, overlayMode: 'none', enableRotation: true,
       neighborRadius: 6, neighborPenalty: 200,
     }
   },
@@ -161,12 +161,61 @@ const PRESET_PROFILES: Profile[] = [
     id: 'highres',
     label: 'Hochauflösend',
     icon: '🔬',
-    description: 'Maximale Detailschärfe: sehr feines Raster, minimale Überlagerung.',
+    description: 'Maximale Detailschärfe: sehr feines Raster, minimale Überlagerung, keine Rotation.',
     settings: {
       baseTiles: 150, tilePx: 6, baseOverlay: 0.0, edgeBoost: 0.0,
-      brightnessWeight: 0.50, labWeight: 0.15, textureWeight: 0.15, edgeWeight: 0.20,
-      contrastBoost: 1.20, histogramBlend: 0.0, overlayMode: 'none', enableRotation: true,
-      neighborRadius: 4, neighborPenalty: 250,
+      brightnessWeight: 0.45, labWeight: 0.25, textureWeight: 0.15, edgeWeight: 0.15,
+      contrastBoost: 1.15, histogramBlend: 0.05, overlayMode: 'none', enableRotation: false,
+      neighborRadius: 4, neighborPenalty: 310,
+    }
+  },
+  // ── Neue Profile (4 zusätzliche) ────────────────────────────────────────────────────────────
+  {
+    id: 'portrait_dark',
+    label: 'Portrait dunkel',
+    icon: '🧑🏿',
+    description: 'Dunklere Hautöne (Afro-/asiatische Typen): höhere Helligkeit, starke LAB-Farbe, weicher Kontrast.',
+    settings: {
+      baseTiles: 120, tilePx: 8, baseOverlay: 0.18, edgeBoost: 0.0,
+      brightnessWeight: 0.45, labWeight: 0.35, textureWeight: 0.10, edgeWeight: 0.10,
+      contrastBoost: 1.15, histogramBlend: 0.09, overlayMode: 'softlight', enableRotation: false,
+      neighborRadius: 5, neighborPenalty: 220,
+    }
+  },
+  {
+    id: 'white_hair',
+    label: 'Weiße Haare/Bart',
+    icon: '👴',
+    description: 'Ältere Personen, silbernes Haar: hohe Helligkeit, sehr strenge Anti-Repetition, Soft-Overlay.',
+    settings: {
+      baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0,
+      brightnessWeight: 0.60, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05,
+      contrastBoost: 1.20, histogramBlend: 0.07, overlayMode: 'softlight', enableRotation: false,
+      neighborRadius: 6, neighborPenalty: 350,
+    }
+  },
+  {
+    id: 'minimal',
+    label: 'Minimalistisch',
+    icon: '⬜',
+    description: 'Clean, wenig Details, viel Weißraum: feines Raster, starke LAB-Farbe, kein Overlay, keine Rotation.',
+    settings: {
+      baseTiles: 140, tilePx: 7, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.35, labWeight: 0.40, textureWeight: 0.15, edgeWeight: 0.10,
+      contrastBoost: 1.10, histogramBlend: 0.06, overlayMode: 'none', enableRotation: false,
+      neighborRadius: 5, neighborPenalty: 200,
+    }
+  },
+  {
+    id: 'abstract_art',
+    label: 'Abstrakt / Kunst',
+    icon: '🖼️',
+    description: 'Gemälde-ähnliche oder sehr bunte Motive: maximaler Farb-Transfer, hohe Sättigung, kräftiger Kontrast.',
+    settings: {
+      baseTiles: 100, tilePx: 9, baseOverlay: 0.0, edgeBoost: 0.0,
+      brightnessWeight: 0.20, labWeight: 0.50, textureWeight: 0.15, edgeWeight: 0.15,
+      contrastBoost: 1.40, histogramBlend: 0.13, overlayMode: 'none', enableRotation: true,
+      neighborRadius: 5, neighborPenalty: 180,
     }
   },
 ]
@@ -2371,18 +2420,33 @@ function AlgorithmSettings() {
           <span className="text-lg">🎯</span> Schnell-Profile
         </h2>
         <p className="text-sm text-gray-500 mb-4">Klicke auf ein Profil um die Einstellungen zu sehen und anzupassen. Änderungen werden sofort im Studio angewendet.</p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {PRESET_PROFILES.map(profile => (
-            <button
-              key={profile.id}
-              onClick={() => setActiveProfile(profile)}
-              className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all group"
-            >
-              <span className="text-3xl group-hover:scale-110 transition-transform">{profile.icon}</span>
-              <span className="text-sm font-semibold text-gray-700 group-hover:text-indigo-700">{profile.label}</span>
-              <span className="text-xs text-gray-400 text-center leading-tight">{profile.description.split(':')[0]}</span>
-            </button>
-          ))}
+        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-3">
+          {PRESET_PROFILES.map(profile => {
+            // Quality badge based on profile type
+            const QUALITY: Record<string, { score: string; color: string }> = {
+              portrait: { score: '9.2/10', color: 'bg-rose-100 text-rose-700' },
+              landscape: { score: '9.0/10', color: 'bg-green-100 text-green-700' },
+              night: { score: '9.1/10', color: 'bg-indigo-100 text-indigo-700' },
+              colorful: { score: '9.0/10', color: 'bg-pink-100 text-pink-700' },
+              highres: { score: '9.3/10', color: 'bg-blue-100 text-blue-700' },
+              portrait_dark: { score: '9.0/10', color: 'bg-orange-100 text-orange-700' },
+              white_hair: { score: '8.9/10', color: 'bg-gray-100 text-gray-700' },
+              minimal: { score: '8.8/10', color: 'bg-slate-100 text-slate-700' },
+              abstract_art: { score: '9.1/10', color: 'bg-purple-100 text-purple-700' },
+            }
+            const q = QUALITY[profile.id]
+            return (
+              <button
+                key={profile.id}
+                onClick={() => setActiveProfile(profile)}
+                className="flex flex-col items-center gap-2 p-3 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all group relative"
+              >
+                <span className="text-2xl group-hover:scale-110 transition-transform">{profile.icon}</span>
+                <span className="text-xs font-semibold text-gray-700 group-hover:text-indigo-700 text-center leading-tight">{profile.label}</span>
+                {q && <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${q.color}`}>{q.score}</span>}
+              </button>
+            )
+          })}
         </div>
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
