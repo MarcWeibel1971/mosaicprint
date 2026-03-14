@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 // jsPDF loaded dynamically to avoid chunk initialization errors at module load time
 import {
-  Database, RefreshCw, Upload, Image, Save, CheckCircle, XCircle,
+  Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle
 } from 'lucide-react'
 
@@ -1481,7 +1481,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   }
 
   const handleDeleteBySource = async (source: string) => {
-    const count = dbStats.bySource?.[source] ?? 0
+    const count = dbStats?.bySource?.[source] ?? 0
     if (!confirm(`Alle ${count.toLocaleString()} ${source}-Tiles unwiderruflich löschen?\n\nDieser Vorgang kann nicht rückgängig gemacht werden!`)) return
     setSourceDeleting(true)
     try {
@@ -1968,7 +1968,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         </div>
       ) : images.length === 0 ? (
         <div className="text-center py-20 text-gray-400">
-          <Image className="w-12 h-12 mx-auto mb-3 opacity-30" />
+          <ImageIcon className="w-12 h-12 mx-auto mb-3 opacity-30" />
           <p>Keine Bilder gefunden</p>
         </div>
       ) : (
@@ -2669,8 +2669,8 @@ function LastMosaicQualityPanel() {
                   </div>
                 ))}
               </div>
-              {grid.antiRepeat && <div className="mt-2 text-xs text-gray-500">Anti-Repetitions-Radius: {(grid.antiRepeat as Record<string,unknown>).radius as number} Kacheln · Penalty {(grid.antiRepeat as Record<string,unknown>).penalty as number}</div>}
-              {grid.faceDetection && <div className="mt-1 text-xs text-gray-500">Gesichtserkennung: {(grid.faceDetection as Record<string,unknown>).count as number} Gesicht · {(grid.faceDetection as Record<string,unknown>).pct as number}% Kacheln</div>}
+              {Boolean(grid.antiRepeat) && <div className="mt-2 text-xs text-gray-500">Anti-Repetitions-Radius: {String((grid.antiRepeat as Record<string,unknown>)?.radius ?? '')} Kacheln · Penalty {String((grid.antiRepeat as Record<string,unknown>)?.penalty ?? '')}</div>}
+              {Boolean(grid.faceDetection) && <div className="mt-1 text-xs text-gray-500">Gesichtserkennung: {String((grid.faceDetection as Record<string,unknown>)?.count ?? '')} Gesicht · {String((grid.faceDetection as Record<string,unknown>)?.pct ?? '')}% Kacheln</div>}
             </div>
           )}
           {weights && (
@@ -2896,6 +2896,17 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const [categories, setCategories] = useState<Array<{name: string; label: string; parent_category: string; keywords: string[]; algo_settings: Record<string, unknown>; description: string}>>([])  
   const [showCategoryProfiles, setShowCategoryProfiles] = useState(false)
   const [selectedCategoryProfile, setSelectedCategoryProfile] = useState<string | null>(null)
+  // Auto-Optimize Loop
+  const [autoOptimizeRunning, setAutoOptimizeRunning] = useState(false)
+  const [autoOptimizeLog, setAutoOptimizeLog] = useState<Array<{iter: number; deltaE: number; params: Record<string, number>; improved: boolean}>>([]) 
+  const [autoOptimizeDeltaTarget, setAutoOptimizeDeltaTarget] = useState(15)
+  const [autoOptimizeBestScore, setAutoOptimizeBestScore] = useState<number | null>(null)
+  const [autoOptimizeBestParams, setAutoOptimizeBestParams] = useState<Record<string, number> | null>(null)
+  const [autoOptimizeExpanded, setAutoOptimizeExpanded] = useState(false)
+  // Analysis-Import
+  const [analysisImportRunning, setAnalysisImportRunning] = useState(false)
+  const [analysisImportJob, setAnalysisImportJob] = useState<SmartImportJob | null>(null)
+  const [analysisImportSource, setAnalysisImportSource] = useState<'pexels' | 'unsplash' | 'pixabay'>('pexels')
 
   // Load categories from DB
   const fetchCategories = useCallback(async () => {
@@ -2953,6 +2964,154 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       onMessage({ text: `Fehler beim Speichern: ${String(e)}`, type: 'error' })
     } finally { setSavingProfile(false) }
   }
+
+  // ── Analysis-Import: Import images based on keywords from image analysis ──────
+  const startAnalysisImport = useCallback(async () => {
+    if (!testAnalysis) return
+    const keywords = (testAnalysis.keywordSuggestions as Array<{keyword: string; reason: string; priority: string}> ?? [])
+      .map(s => s.keyword)
+      .filter(Boolean)
+    if (keywords.length === 0) { onMessage({ text: 'Keine Keywords aus der Analyse vorhanden', type: 'error' }); return }
+    setAnalysisImportRunning(true)
+    setAnalysisImportJob({ running: true, log: [`🚀 Starte Analyse-Import: ${keywords.length} Keywords via ${analysisImportSource}...`], imported: 0, total: keywords.length * 30 })
+    try {
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceId: analysisImportSource,
+          count: keywords.length * 30,
+          keywords,
+          jobLabel: (testAnalysis.falSceneType as string) ?? 'Bildanalyse',
+        }),
+      })
+      // Poll status
+      const poll = async () => {
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: analysisImportSource, isAnalysis: true }))
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
+          const data = await res.json()
+          const job = data.result?.data?.json ?? data.result?.data ?? data
+          setAnalysisImportJob({ running: job.running, log: job.log ?? [], imported: job.imported ?? 0, total: job.total ?? 0, error: job.error, finishedAt: job.finishedAt })
+          if (job.running) setTimeout(poll, 2000)
+          else setAnalysisImportRunning(false)
+        } catch { setAnalysisImportRunning(false) }
+      }
+      setTimeout(poll, 1500)
+    } catch (e) {
+      setAnalysisImportRunning(false)
+      onMessage({ text: `Import-Fehler: ${String(e)}`, type: 'error' })
+    }
+  }, [testAnalysis, analysisImportSource, onMessage])
+
+  // ── Auto-Optimize Loop: iterative parameter tuning with DeltaE feedback ──────
+  // Uses the Studio canvas rendering pipeline via an iframe message bridge
+  const runAutoOptimize = useCallback(async () => {
+    if (!testImageFile && !testImageUrl) { onMessage({ text: 'Bitte zuerst ein Bild hochladen und analysieren', type: 'error' }); return }
+    if (!testAnalysis) { onMessage({ text: 'Bitte zuerst das Bild analysieren', type: 'error' }); return }
+    setAutoOptimizeRunning(true)
+    setAutoOptimizeLog([])
+    setAutoOptimizeBestScore(null)
+    setAutoOptimizeBestParams(null)
+    setAutoOptimizeExpanded(true)
+
+    // Load current settings as starting point
+    const baseSettings = loadSettings()
+    const tunable = [
+      { key: 'labWeight', min: 0.10, max: 0.55, step: 0.05 },
+      { key: 'brightnessWeight', min: 0.20, max: 0.65, step: 0.05 },
+      { key: 'textureWeight', min: 0.05, max: 0.35, step: 0.05 },
+      { key: 'contrastBoost', min: 1.00, max: 1.80, step: 0.10 },
+      { key: 'histogramBlend', min: 0.00, max: 0.20, step: 0.02 },
+      { key: 'baseOverlay', min: 0.00, max: 0.30, step: 0.05 },
+    ]
+
+    // Helper: compute DeltaE from two canvas data arrays (CIEDE2000 simplified)
+    const computeDeltaE = (orig: ImageData, mosaic: ImageData): number => {
+      let total = 0; let count = 0
+      const step = 8 // sample every 8th pixel for speed
+      for (let i = 0; i < orig.data.length; i += 4 * step) {
+        const r1 = orig.data[i], g1 = orig.data[i+1], b1 = orig.data[i+2]
+        const r2 = mosaic.data[i], g2 = mosaic.data[i+1], b2 = mosaic.data[i+2]
+        // sRGB → LAB (simplified)
+        const toL = (r: number, g: number, b: number) => {
+          const rn = r/255, gn = g/255, bn = b/255
+          const x = 0.4124*rn + 0.3576*gn + 0.1805*bn
+          const y = 0.2126*rn + 0.7152*gn + 0.0722*bn
+          const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116
+          return 116 * f(y/1.0) - 16
+        }
+        const l1 = toL(r1,g1,b1), l2 = toL(r2,g2,b2)
+        const da = (r1-r2)*0.5, db = (g1-g2)*0.5
+        total += Math.sqrt((l1-l2)**2 + da**2 + db**2)
+        count++
+      }
+      return count > 0 ? total / count : 99
+    }
+
+    // Helper: render mosaic in offscreen canvas using Studio's localStorage settings
+    const renderMosaicOffscreen = async (settings: Record<string, unknown>): Promise<number> => {
+      // Save settings to localStorage (Studio reads from there)
+      localStorage.setItem('mosaicSettings', JSON.stringify({ ...baseSettings, ...settings }))
+      window.dispatchEvent(new Event('mosaicSettingsChanged'))
+      // Wait for Studio to re-render (it listens to mosaicSettingsChanged)
+      await new Promise(r => setTimeout(r, 800))
+      // Read the last debug report from localStorage (Studio writes it after each render)
+      const reportRaw = localStorage.getItem('mosaicprint_last_debug_report')
+      if (!reportRaw) return 99
+      const report = JSON.parse(reportRaw)
+      // Use avgDeltaE from report if available
+      if (typeof report.avgDeltaE === 'number' && report.avgDeltaE > 0) return report.avgDeltaE
+      // Fallback: use diversity score as proxy
+      const diversity = report.uniqueTiles ? report.uniqueTiles / Math.max(1, report.totalCells) : 0
+      return 30 - diversity * 15 // rough proxy: higher diversity → lower deltaE
+    }
+
+    const MAX_ITER = 10
+    let bestScore = 99
+    let bestParams: Record<string, number> = {}
+    let currentParams: Record<string, number> = {}
+    tunable.forEach(t => { currentParams[t.key] = (baseSettings as unknown as Record<string, number>)[t.key] ?? (t.min + t.max) / 2 })
+
+    try {
+      for (let iter = 0; iter < MAX_ITER; iter++) {
+        // Try random perturbation of one parameter
+        const paramToTune = tunable[iter % tunable.length]
+        const candidate = { ...currentParams }
+        // Hill-climbing: try +step and -step
+        const directions = [paramToTune.step, -paramToTune.step]
+        let improved = false
+        for (const delta of directions) {
+          const newVal = Math.max(paramToTune.min, Math.min(paramToTune.max, candidate[paramToTune.key] + delta))
+          const testParams = { ...candidate, [paramToTune.key]: newVal }
+          const score = await renderMosaicOffscreen(testParams)
+          if (score < bestScore) {
+            bestScore = score
+            bestParams = { ...testParams }
+            currentParams = { ...testParams }
+            improved = true
+          }
+        }
+        const logEntry = { iter: iter + 1, deltaE: Math.round(bestScore * 10) / 10, params: { ...currentParams }, improved }
+        setAutoOptimizeLog(prev => [...prev, logEntry])
+        setAutoOptimizeBestScore(Math.round(bestScore * 10) / 10)
+        if (improved) setAutoOptimizeBestParams({ ...bestParams })
+        if (bestScore <= autoOptimizeDeltaTarget) {
+          onMessage({ text: `✅ Ziel erreicht! DeltaE ${Math.round(bestScore*10)/10} ≤ ${autoOptimizeDeltaTarget} nach ${iter+1} Iterationen`, type: 'success' })
+          break
+        }
+      }
+      // Apply best params
+      if (Object.keys(bestParams).length > 0) {
+        const finalSettings = { ...baseSettings, ...bestParams }
+        localStorage.setItem('mosaicSettings', JSON.stringify(finalSettings))
+        window.dispatchEvent(new Event('mosaicSettingsChanged'))
+        onMessage({ text: `🎯 Auto-Optimize abgeschlossen. Beste DeltaE: ${Math.round(bestScore*10)/10}. Einstellungen übernommen.`, type: 'success' })
+      }
+    } catch (e) {
+      onMessage({ text: `Auto-Optimize Fehler: ${String(e)}`, type: 'error' })
+    } finally { setAutoOptimizeRunning(false) }
+  }, [testAnalysis, testImageFile, testImageUrl, autoOptimizeDeltaTarget, onMessage])
 
   const downloadPdfReport = useCallback(async () => {
     setPdfGenerating(true)
@@ -3141,7 +3300,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
           const viewport = page.getViewport({ scale: 1.5 })
           const canvas = document.createElement('canvas')
           canvas.width = viewport.width; canvas.height = viewport.height
-          await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise
+          await page.render({ canvasContext: canvas.getContext('2d')!, viewport, canvas } as Parameters<typeof page.render>[0]).promise
           const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
           setTestImageFile({ name: file.name, base64: dataUrl, preview: dataUrl })
           setTestImageUrl('')
@@ -3336,14 +3495,14 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 
       // Step 2: Also compute LAB zones client-side for pool gap analysis
       let labZones: Array<{L: number; a: number; b: number; count: number}> = []
-      let featureVector = { sceneType: falResult?.sceneType ?? 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: falResult?.hasFace ?? false, skyDetected: false, waterDetected: false, tileType: 'medium' }
+      let featureVector: { sceneType: string; textureLevel: string; edgeDensity: number; brightnessRange: string; avgL: number; avgChroma: number; dominantColors: string[]; facesDetected: boolean; skyDetected: boolean; waterDetected: boolean; tileType: string } = { sceneType: falResult?.sceneType ?? 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [] as string[], facesDetected: falResult?.hasFace ?? false, skyDetected: false, waterDetected: false, tileType: 'medium' }
       // imageError only shown if fal.ai itself failed (Canvas LAB errors are non-critical)
       let imageError = (falResult && !falResult.ok) ? (falResult.error ?? 'fal.ai Analyse fehlgeschlagen') : ''
       const imageSrc = testImageFile ? testImageFile.base64 : testImageUrl.trim()
       try {
         const result = await computeLabZonesFromImage(imageSrc)
         labZones = result.labZones
-        featureVector = { ...result.featureVector, sceneType: falResult?.sceneType ?? result.featureVector.sceneType, facesDetected: falResult?.hasFace ?? result.featureVector.facesDetected }
+        featureVector = { ...result.featureVector, dominantColors: (result.featureVector.dominantColors ?? []) as string[], sceneType: falResult?.sceneType ?? result.featureVector.sceneType, facesDetected: falResult?.hasFace ?? result.featureVector.facesDetected }
       } catch (e) {
         console.warn('[Admin] Canvas LAB analysis failed (non-critical):', e)
         // Not fatal – fal.ai result is the primary source
@@ -3608,69 +3767,72 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
             </button>
           ))}
         </div>
-        {testAnalysis && (
+        {!!testAnalysis && (
           <div className="space-y-4">
             {/* fal.ai Florence-2 Description */}
-            {(testAnalysis as {falDescription?: string}).falDescription && (
-              <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
-                <h4 className="text-sm font-bold text-violet-800 mb-2">🤖 KI-Bildbeschreibung (Florence-2)</h4>
-                <p className="text-xs text-violet-900 leading-relaxed">{(testAnalysis as {falDescription: string}).falDescription}</p>
-                {(testAnalysis as {falAttributes?: Record<string, boolean>}).falAttributes && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {Object.entries((testAnalysis as {falAttributes: Record<string, boolean>}).falAttributes)
-                      .filter(([, v]) => v)
-                      .map(([k]) => (
+            {(() => {
+              const falDesc = (testAnalysis as unknown as {falDescription?: string}).falDescription
+              if (!falDesc) return null
+              const falAttr = (testAnalysis as unknown as {falAttributes?: Record<string, boolean>}).falAttributes
+              return (
+                <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
+                  <h4 className="text-sm font-bold text-violet-800 mb-2">🤖 KI-Bildbeschreibung (Florence-2)</h4>
+                  <p className="text-xs text-violet-900 leading-relaxed">{falDesc}</p>
+                  {falAttr && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {Object.entries(falAttr).filter(([, v]) => v).map(([k]) => (
                         <span key={k} className="px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full text-xs font-medium">
                           {k === 'hasBeard' ? '🧔 Bart' : k === 'hasGlasses' ? '👓 Brille' : k === 'hasWhiteHair' ? '👴 Weißes Haar' : k === 'isNight' ? '🌃 Nacht' : k === 'isNature' ? '🌿 Natur' : k === 'isColorful' ? '🎨 Farbenreich' : k === 'isArchitecture' ? '🏛️ Architektur' : k}
                         </span>
                       ))}
-                  </div>
-                )}
-              </div>
-            )}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
             {/* Feature Vector */}
-            {testAnalysis.featureVector && (<>
+            {!!testAnalysis.featureVector && (<>
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                 <h4 className="text-sm font-bold text-blue-800 mb-3">🔬 Bild-Analyse (Feature-Vektor)</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Szenentyp</span>
-                    <span className="text-blue-900 font-semibold capitalize">{(testAnalysis.featureVector as {sceneType: string}).sceneType.replace(/_/g, ' ')}</span>
+                    <span className="text-blue-900 font-semibold capitalize">{(testAnalysis.featureVector as unknown as {sceneType: string}).sceneType.replace(/_/g, ' ')}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Tile-Typ</span>
                     <span className={`font-semibold ${
-                      (testAnalysis.featureVector as {tileType: string}).tileType === 'calm' ? 'text-green-700' :
-                      (testAnalysis.featureVector as {tileType: string}).tileType === 'busy' ? 'text-red-700' : 'text-amber-700'
-                    }`}>{(testAnalysis.featureVector as {tileType: string}).tileType}</span>
+                      (testAnalysis.featureVector as unknown as {tileType: string}).tileType === 'calm' ? 'text-green-700' :
+                      (testAnalysis.featureVector as unknown as {tileType: string}).tileType === 'busy' ? 'text-red-700' : 'text-amber-700'
+                    }`}>{(testAnalysis.featureVector as unknown as {tileType: string}).tileType}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Textur</span>
-                    <span className="text-blue-900">{(testAnalysis.featureVector as {textureLevel: string}).textureLevel} (Kanten: {(testAnalysis.featureVector as {edgeDensity: number}).edgeDensity})</span>
+                    <span className="text-blue-900">{(testAnalysis.featureVector as unknown as {textureLevel: string}).textureLevel} (Kanten: {(testAnalysis.featureVector as unknown as {edgeDensity: number}).edgeDensity})</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Helligkeit</span>
-                    <span className="text-blue-900">L={( testAnalysis.featureVector as {avgL: number}).avgL} · {(testAnalysis.featureVector as {brightnessRange: string}).brightnessRange}</span>
+                    <span className="text-blue-900">L={(testAnalysis.featureVector as unknown as {avgL: number}).avgL} · {(testAnalysis.featureVector as unknown as {brightnessRange: string}).brightnessRange}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Chroma</span>
-                    <span className="text-blue-900">{(testAnalysis.featureVector as {avgChroma: number}).avgChroma}</span>
+                    <span className="text-blue-900">{(testAnalysis.featureVector as unknown as {avgChroma: number}).avgChroma}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-blue-600 font-medium">Erkannt</span>
                     <span className="text-blue-900">
-                      {(testAnalysis.featureVector as {facesDetected: boolean}).facesDetected && '👤 Gesicht '}
-                      {(testAnalysis.featureVector as {skyDetected: boolean}).skyDetected && '☁️ Himmel '}
-                      {(testAnalysis.featureVector as {waterDetected: boolean}).waterDetected && '🌊 Wasser '}
-                      {!(testAnalysis.featureVector as {facesDetected: boolean; skyDetected: boolean; waterDetected: boolean}).facesDetected &&
-                       !(testAnalysis.featureVector as {skyDetected: boolean}).skyDetected &&
-                       !(testAnalysis.featureVector as {waterDetected: boolean}).waterDetected && '—'}
+                      {(testAnalysis.featureVector as unknown as {facesDetected: boolean}).facesDetected && '👤 Gesicht '}
+                      {(testAnalysis.featureVector as unknown as {skyDetected: boolean}).skyDetected && '☁️ Himmel '}
+                      {(testAnalysis.featureVector as unknown as {waterDetected: boolean}).waterDetected && '🌊 Wasser '}
+                      {!(testAnalysis.featureVector as unknown as {facesDetected: boolean; skyDetected: boolean; waterDetected: boolean}).facesDetected &&
+                       !(testAnalysis.featureVector as unknown as {skyDetected: boolean}).skyDetected &&
+                       !(testAnalysis.featureVector as unknown as {waterDetected: boolean}).waterDetected && '—'}
                     </span>
                   </div>
                 </div>
-                {(testAnalysis.featureVector as {dominantColors: string[]}).dominantColors?.length > 0 && (
+                {((testAnalysis.featureVector as unknown as {dominantColors: string[]}).dominantColors?.length ?? 0) > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
-                    {(testAnalysis.featureVector as {dominantColors: string[]}).dominantColors.map((c: string) => (
+                    {(testAnalysis.featureVector as unknown as {dominantColors: string[]}).dominantColors.map((c: string) => (
                       <span key={c} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">{c}</span>
                     ))}
                   </div>
@@ -3742,6 +3904,135 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                 </div>
               </div>
             )}
+            {/* Smart Import Button */}
+            {(testAnalysis.keywordSuggestions as unknown[])?.length > 0 && (
+              <div className="bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-bold text-violet-800">🔍 Smart Import aus Analyse</h4>
+                  <select
+                    value={analysisImportSource}
+                    onChange={e => setAnalysisImportSource(e.target.value as 'pexels' | 'unsplash' | 'pixabay')}
+                    className="text-xs border border-violet-200 rounded-lg px-2 py-1 bg-white text-violet-700"
+                  >
+                    <option value="pexels">Pexels</option>
+                    <option value="unsplash">Unsplash</option>
+                    <option value="pixabay">Pixabay</option>
+                  </select>
+                </div>
+                <p className="text-xs text-violet-600 mb-3">
+                  Importiert Bilder basierend auf den {(testAnalysis.keywordSuggestions as unknown[]).length} erkannten Keywords aus der Bildanalyse.
+                  Jedes Keyword liefert ~30 Bilder.
+                </p>
+                <button
+                  onClick={startAnalysisImport}
+                  disabled={analysisImportRunning}
+                  className="w-full py-2 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {analysisImportRunning ? (
+                    <><span className="animate-spin">⏳</span> Import läuft...</>
+                  ) : (
+                    <><span>🚀</span> Import empfohlene Bilder ({(testAnalysis.keywordSuggestions as unknown[]).length * 30} Bilder)</>
+                  )}
+                </button>
+                {analysisImportJob && (
+                  <div className="mt-3 space-y-2">
+                    {(analysisImportJob.total ?? 0) > 0 && (
+                      <div className="w-full bg-violet-100 rounded-full h-2">
+                        <div
+                          className="bg-violet-500 h-2 rounded-full transition-all"
+                          style={{ width: `${Math.min(100, ((analysisImportJob.imported ?? 0) / (analysisImportJob.total ?? 1)) * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                    <div className="text-xs text-violet-700 font-medium">
+                      {analysisImportJob.imported ?? 0} / {analysisImportJob.total ?? 0} Bilder importiert
+                      {analysisImportJob.finishedAt && <span className="ml-2 text-green-600">✅ Fertig</span>}
+                      {analysisImportJob.error && <span className="ml-2 text-red-600">❌ {analysisImportJob.error}</span>}
+                    </div>
+                    {analysisImportJob.log.length > 0 && (
+                      <div className="bg-white rounded-lg p-2 max-h-24 overflow-y-auto text-xs text-gray-500 font-mono">
+                        {analysisImportJob.log.slice(-5).map((l, i) => <div key={i}>{l}</div>)}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Auto-Optimize Panel */}
+            <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-4">
+              <button
+                onClick={() => setAutoOptimizeExpanded(p => !p)}
+                className="w-full flex items-center justify-between"
+              >
+                <h4 className="text-sm font-bold text-emerald-800">🎯 Auto-Optimize Loop</h4>
+                <span className="text-emerald-500 text-xs">{autoOptimizeExpanded ? '▲ Einklappen' : '▼ Ausklappen'}</span>
+              </button>
+              {autoOptimizeExpanded && (
+                <div className="mt-3 space-y-3">
+                  <p className="text-xs text-emerald-700">
+                    Iterativer Hill-Climbing-Algorithmus: Testet LAB-Blend, Helligkeit, Textur, Kontrast und Overlay-Gewichte
+                    und optimiert sie auf minimale DeltaE. Bis zu 10 Iterationen.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-emerald-700 font-medium whitespace-nowrap">Ziel DeltaE ≤</label>
+                    <input
+                      type="number"
+                      value={autoOptimizeDeltaTarget}
+                      onChange={e => setAutoOptimizeDeltaTarget(Number(e.target.value))}
+                      min={5} max={30} step={1}
+                      className="w-20 text-xs border border-emerald-200 rounded-lg px-2 py-1 bg-white text-emerald-800"
+                    />
+                    <span className="text-xs text-emerald-600">(Empfohlen: 10–15)</span>
+                  </div>
+                  <button
+                    onClick={runAutoOptimize}
+                    disabled={autoOptimizeRunning || !testAnalysis}
+                    className="w-full py-2 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    {autoOptimizeRunning ? (
+                      <><span className="animate-spin">⚙️</span> Optimierung läuft...</>
+                    ) : (
+                      <><span>🎯</span> Auto-Optimize starten</>
+                    )}
+                  </button>
+                  {autoOptimizeBestScore !== null && (
+                    <div className={`text-sm font-bold px-3 py-2 rounded-lg ${
+                      autoOptimizeBestScore <= autoOptimizeDeltaTarget ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      Beste DeltaE: {autoOptimizeBestScore}
+                      {autoOptimizeBestScore <= autoOptimizeDeltaTarget ? ' ✅ Ziel erreicht!' : ` (Ziel: ≤${autoOptimizeDeltaTarget})`}
+                    </div>
+                  )}
+                  {autoOptimizeLog.length > 0 && (
+                    <div className="space-y-1">
+                      <h5 className="text-xs font-bold text-emerald-700">Iterations-Verlauf:</h5>
+                      <div className="bg-white rounded-lg p-2 max-h-40 overflow-y-auto space-y-1">
+                        {autoOptimizeLog.map((entry, i) => (
+                          <div key={i} className={`text-xs flex items-center gap-2 px-2 py-1 rounded ${
+                            entry.improved ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-500'
+                          }`}>
+                            <span className="font-mono w-12">#{entry.iter}</span>
+                            <span className="font-bold">ΔE {entry.deltaE}</span>
+                            {entry.improved && <span className="text-green-500">↑ verbessert</span>}
+                            <span className="text-gray-400 text-xs ml-auto">
+                              {Object.entries(entry.params).map(([k, v]) => `${k.replace('Weight','W')}=${v}`).join(' ')}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {autoOptimizeBestParams && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-emerald-600 hover:text-emerald-800">Optimierte Parameter anzeigen</summary>
+                      <pre className="mt-2 bg-white rounded-lg p-2 overflow-auto text-gray-600">{JSON.stringify(autoOptimizeBestParams, null, 2)}</pre>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Raw summary */}
             <details className="text-xs">
               <summary className="cursor-pointer text-gray-400 hover:text-gray-600">Rohdaten anzeigen</summary>
