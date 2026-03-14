@@ -1023,15 +1023,14 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    await db.insertMosaicImage({ ...photo,
+                    const inserted = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
                       blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
                       brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                     });
-                    imported++; batchNew++;
-                    status.imported = imported;
+                    if (inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
                 }));
               }
@@ -1137,7 +1136,7 @@ export const appRouter = router({
                       return; // discard – too vivid / noisy / watermarked
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    await db.insertMosaicImage({ ...photo,
+                    const inserted = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
@@ -1145,9 +1144,7 @@ export const appRouter = router({
                       brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                       subject: task.subject ?? 'general',
                     });
-                    imported++;
-                    batchImported++;
-                    smartImportJobs[jobKey].imported = imported;
+                    if (inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
                 }));
               }
@@ -1273,9 +1270,8 @@ export const appRouter = router({
                   await Promise.all(batch.map(async (photo) => {
                     try {
                       const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                      await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
-                      imported++; batchNew++;
-                      status.imported = imported;
+                      const inserted = await db.insertMosaicImage({ ...photo, avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0 });
+                      if (inserted) { imported++; batchNew++; status.imported = imported; }
                     } catch { /* duplicate – skip */ }
                   }));
                 }

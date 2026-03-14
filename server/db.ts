@@ -215,7 +215,7 @@ export async function insertMosaicImage(data: {
   blL?: number; blA?: number; blB?: number;
   brL?: number; brA?: number; brB?: number;
   subject?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const pool = getPool();
   // Normalize URL: strip query params that change between requests (Pexels/Unsplash add w/h/fit params)
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
@@ -224,14 +224,15 @@ export async function insertMosaicImage(data: {
   const trL = data.trL ?? data.avgL, trA = data.trA ?? data.avgA, trB = data.trB ?? data.avgB;
   const blL = data.blL ?? data.avgL, blA = data.blA ?? data.avgA, blB = data.blB ?? data.avgB;
   const brL = data.brL ?? data.avgL, brA = data.brA ?? data.avgA, brB = data.brB ?? data.avgB;
-  await pool.query(
+  const res = await pool.query(
     `INSERT INTO mosaic_images
        (source_url, tile128_url, avg_l, avg_a, avg_b,
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
         subject, url_hash)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,MD5($1))
-     ON CONFLICT (source_url) DO NOTHING`,
+     ON CONFLICT (source_url) DO NOTHING
+     RETURNING id`,
     [
       normalizedUrl, data.tile128Url,
       data.avgL, data.avgA, data.avgB,
@@ -240,6 +241,8 @@ export async function insertMosaicImage(data: {
       data.subject ?? 'general'
     ]
   );
+  // Returns true only if a new row was actually inserted (not a duplicate skipped by ON CONFLICT)
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function getMosaicOrders() {
