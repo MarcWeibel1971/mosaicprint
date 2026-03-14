@@ -1729,7 +1729,10 @@ export const appRouter = router({
 
   // ── Analyse Testbild gegen Pool ───────────────────────────────────────────
   analyzeTestImage: publicProcedure
-    .input(z.object({ imageUrl: z.string().url() }))
+    .input(z.object({
+      imageUrl: z.string().url().optional(),
+      imageBase64: z.string().optional(), // base64-encoded image (data URI or raw base64)
+    }).refine(d => d.imageUrl || d.imageBase64, { message: 'imageUrl or imageBase64 required' }))
     .mutation(async ({ input }) => {
       // Fetch image and compute average LAB via pixel sampling
       const https = await import('https');
@@ -1770,7 +1773,14 @@ export const appRouter = router({
 
       try {
         if (!createCanvas || !loadImage) throw new Error('canvas not available');
-        const buf = await fetchBuffer(input.imageUrl);
+        let buf: Buffer;
+        if (input.imageBase64) {
+          // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
+          const b64 = input.imageBase64.includes(',') ? input.imageBase64.split(',')[1] : input.imageBase64;
+          buf = Buffer.from(b64, 'base64');
+        } else {
+          buf = await fetchBuffer(input.imageUrl!);
+        }
         const img = await (loadImage as (b: Buffer) => Promise<{width: number; height: number}>)(buf);
         const canvas = (createCanvas as (w: number, h: number) => {getContext: (t: string) => CanvasRenderingContext2D})(64, 64);
         const ctx = canvas.getContext('2d');
@@ -1842,7 +1852,7 @@ export const appRouter = router({
       });
 
       return {
-        imageUrl: input.imageUrl,
+        imageUrl: input.imageUrl ?? '(uploaded file)',
         imageError,
         dominantZones: imageLABZones.slice(0, 10),
         gapZones: gapZones.slice(0, 10),

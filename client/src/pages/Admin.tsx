@@ -2132,6 +2132,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 
   const [pdfGenerating, setPdfGenerating] = useState(false)
   const [testImageUrl, setTestImageUrl] = useState('')
+  const [testImageFile, setTestImageFile] = useState<{ name: string; base64: string; preview: string } | null>(null)
   const [testAnalysis, setTestAnalysis] = useState<Record<string, unknown> | null>(null)
   const [testAnalyzing, setTestAnalyzing] = useState(false)
 
@@ -2229,14 +2230,56 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     }
   }, [runs, lastRunByType, onMessage])
 
+  const handleTestFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    if (file.type === 'application/pdf') {
+      // For PDF: render first page via PDF.js in a canvas and extract as JPEG
+      reader.onload = async (ev) => {
+        try {
+          const typedArray = new Uint8Array(ev.target!.result as ArrayBuffer)
+          // Dynamically import PDF.js
+          const pdfjsLib = await import('pdfjs-dist')
+          pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`
+          const pdf = await pdfjsLib.getDocument({ data: typedArray }).promise
+          const page = await pdf.getPage(1)
+          const viewport = page.getViewport({ scale: 1.5 })
+          const canvas = document.createElement('canvas')
+          canvas.width = viewport.width; canvas.height = viewport.height
+          await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+          setTestImageFile({ name: file.name, base64: dataUrl, preview: dataUrl })
+          setTestImageUrl('')
+        } catch (err) {
+          onMessage({ text: `PDF-Fehler: ${String(err)}`, type: 'error' })
+        }
+      }
+      reader.readAsArrayBuffer(file)
+    } else {
+      // JPG/PNG: read as data URL directly
+      reader.onload = (ev) => {
+        const dataUrl = ev.target!.result as string
+        setTestImageFile({ name: file.name, base64: dataUrl, preview: dataUrl })
+        setTestImageUrl('')
+      }
+      reader.readAsDataURL(file)
+    }
+    // Reset input so same file can be re-selected
+    e.target.value = ''
+  }, [onMessage])
+
   const runTestAnalysis = useCallback(async () => {
-    if (!testImageUrl.trim()) return
+    if (!testImageUrl.trim() && !testImageFile) return
     setTestAnalyzing(true); setTestAnalysis(null)
     try {
+      const body = testImageFile
+        ? { imageBase64: testImageFile.base64 }
+        : { imageUrl: testImageUrl.trim() }
       const res = await fetch('/api/trpc/analyzeTestImage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl: testImageUrl.trim() }),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       const result = data.result?.data?.json ?? data.result?.data
@@ -2244,7 +2287,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     } catch (e) {
       onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
     } finally { setTestAnalyzing(false) }
-  }, [testImageUrl, onMessage])
+  }, [testImageUrl, testImageFile, onMessage])
 
   return (
     <div className="space-y-8">
@@ -2359,15 +2402,46 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <h3 className="font-bold text-gray-900 mb-1">🧪 Testbild-Analyse</h3>
         <p className="text-sm text-gray-500 mb-4">Analysiert ein Bild gegen den Tile-Pool und zeigt fehlende Farbbereiche + Keyword-Vorschläge für Smart-Import.</p>
+
+        {/* File upload preview */}
+        {testImageFile && (
+          <div className="flex items-center gap-3 mb-3 p-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+            <img src={testImageFile.preview} alt="Vorschau" className="w-12 h-12 rounded-lg object-cover border border-indigo-200" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-indigo-800 truncate">{testImageFile.name}</p>
+              <p className="text-xs text-indigo-500">Datei geladen – bereit zur Analyse</p>
+            </div>
+            <button onClick={() => setTestImageFile(null)} className="text-indigo-400 hover:text-indigo-600 text-lg leading-none">&times;</button>
+          </div>
+        )}
+
         <div className="flex gap-3 mb-4">
+          {/* Hidden file input */}
+          <input
+            id="test-image-file-input"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,application/pdf"
+            className="hidden"
+            onChange={handleTestFileUpload}
+          />
+          {/* Upload button */}
+          <label
+            htmlFor="test-image-file-input"
+            className="flex items-center gap-2 border border-gray-200 hover:border-indigo-400 bg-white text-gray-700 hover:text-indigo-700 font-medium px-4 py-2 rounded-xl text-sm cursor-pointer transition-colors shrink-0"
+            title="JPG, PNG oder PDF hochladen"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Datei</span>
+          </label>
           <input
             type="url"
             value={testImageUrl}
-            onChange={e => setTestImageUrl(e.target.value)}
-            placeholder="Bild-URL eingeben (z.B. https://images.unsplash.com/...)"
-            className="flex-1 border border-gray-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+            onChange={e => { setTestImageUrl(e.target.value); setTestImageFile(null) }}
+            placeholder={testImageFile ? `(${testImageFile.name})` : 'Bild-URL eingeben (z.B. https://images.unsplash.com/...)'}
+            disabled={!!testImageFile}
+            className="flex-1 border border-gray-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:bg-gray-50 disabled:text-gray-400"
           />
-          <button onClick={runTestAnalysis} disabled={testAnalyzing || !testImageUrl.trim()}
+          <button onClick={runTestAnalysis} disabled={testAnalyzing || (!testImageUrl.trim() && !testImageFile)}
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors">
             {testAnalyzing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
             {testAnalyzing ? 'Analysiere...' : 'Analysieren'}
