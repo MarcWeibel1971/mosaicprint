@@ -3337,7 +3337,8 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       // Step 2: Also compute LAB zones client-side for pool gap analysis
       let labZones: Array<{L: number; a: number; b: number; count: number}> = []
       let featureVector = { sceneType: falResult?.sceneType ?? 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: falResult?.hasFace ?? false, skyDetected: false, waterDetected: false, tileType: 'medium' }
-      let imageError = falResult?.error ?? ''
+      // imageError only shown if fal.ai itself failed (Canvas LAB errors are non-critical)
+      let imageError = (falResult && !falResult.ok) ? (falResult.error ?? 'fal.ai Analyse fehlgeschlagen') : ''
       const imageSrc = testImageFile ? testImageFile.base64 : testImageUrl.trim()
       try {
         const result = await computeLabZonesFromImage(imageSrc)
@@ -3371,7 +3372,8 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       setTestAnalysis({
         ...serverResult,
         featureVector,
-        imageError: imageError || serverResult?.imageError,
+        // Only show imageError if fal.ai failed; suppress Canvas/LAB errors (non-critical when fal.ai succeeded)
+        imageError: imageError || (falResult?.ok === false ? serverResult?.imageError : undefined),
         falDescription: falResult?.description,
         falSceneType: falResult?.sceneType,
         falAttributes: falResult?.attributes,

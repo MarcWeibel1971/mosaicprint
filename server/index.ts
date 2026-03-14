@@ -560,7 +560,7 @@ app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, 
     const lower = description.toLowerCase();
     const hasFace = /\bface\b|\bperson\b|\bman\b|\bwoman\b|\bportrait\b|\bgirl\b|\bboy\b|\bchild\b|\bpeople\b/.test(lower);
     const hasBeard = /\bbeard\b|\bstubble\b|\bmustache\b/.test(lower);
-    const hasGlasses = /\bglasses\b|\bspectacles\b|\beyeglasses\b/.test(lower);
+    const hasGlasses = /\bglasses\b|\bspectacles\b|\beyeglasses\b|\bsunglasses\b|\bshades\b/.test(lower);
     const hasWhiteHair = /\bwhite hair\b|\bgray hair\b|\bgrey hair\b|\bsilver hair\b/.test(lower);
     const isNight = /\bnight\b|\bdark sky\b|\bskyline\b|\bneon\b|\bcity lights\b/.test(lower);
     const isNature = /\bforest\b|\btrees\b|\bmountain\b|\bocean\b|\bsea\b|\bbeach\b|\briver\b|\blandscape\b/.test(lower);
