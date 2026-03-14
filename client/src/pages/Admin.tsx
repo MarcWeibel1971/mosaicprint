@@ -1941,6 +1941,127 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 }
 
 // ── Algorithm Settings ────────────────────────────────────────────────────────
+// ── Category Profiles Panel ─────────────────────────────────────────────────
+function CategoryProfilesPanel() {
+  const [categories, setCategories] = useState<Array<{
+    name: string; label: string; parent_category: string;
+    keywords: string[]; algo_settings: Record<string, unknown>;
+    description: string; updated_at?: string;
+  }>>([])
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  const loadCategories = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/trpc/getImageCategories')
+      const data = await res.json()
+      const cats = data?.result?.data?.json ?? data?.result?.data ?? []
+      setCategories(cats.filter((c: {algo_settings: Record<string,unknown>}) =>
+        c.algo_settings && Object.keys(c.algo_settings).length > 0
+      ))
+    } catch { /* ignore */ } finally { setLoading(false) }
+  }
+
+  useEffect(() => { if (open) loadCategories() }, [open])
+
+  const deleteProfile = async (catName: string) => {
+    if (!confirm(`Profil für "${catName}" löschen?`)) return
+    try {
+      await fetch('/api/trpc/saveImageCategoryAlgoSettings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ categoryName: catName, settings: {} })
+      })
+      loadCategories()
+    } catch { /* ignore */ }
+  }
+
+  const applyProfile = (settings: Record<string, unknown>) => {
+    try {
+      const existing = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}')
+      localStorage.setItem('mosaicSettings', JSON.stringify({ ...existing, ...settings }))
+      window.dispatchEvent(new Event('mosaicSettingsChanged'))
+      alert('✅ Profil angewendet! Lade die Studio-Seite neu um die Änderungen zu sehen.')
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-lg">📋</span>
+          <div className="text-left">
+            <h3 className="font-semibold text-gray-800">Gespeicherte Kategorie-Profile</h3>
+            <p className="text-xs text-gray-500">Algorithmus-Einstellungen pro Bildkategorie (Portrait, Landschaft, etc.)</p>
+          </div>
+        </div>
+        <span className="text-gray-400 text-sm">{open ? '▲ Einklappen' : '▼ Anzeigen'}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 p-5">
+          {loading && <p className="text-sm text-gray-400 text-center py-4">⏳ Lade Profile...</p>}
+          {!loading && categories.length === 0 && (
+            <div className="text-center py-6">
+              <p className="text-gray-400 text-sm">Noch keine Profile gespeichert.</p>
+              <p className="text-gray-400 text-xs mt-1">Analysiere ein Testbild in der Qualitätssicherung und speichere das Algorithmus-Profil.</p>
+            </div>
+          )}
+          {!loading && categories.length > 0 && (
+            <div className="space-y-3">
+              {categories.map(cat => (
+                <div key={cat.name} className="border border-gray-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between p-3 bg-gray-50">
+                    <div>
+                      <span className="font-semibold text-gray-800 text-sm">{cat.label}</span>
+                      <span className="ml-2 text-xs text-gray-400 capitalize">{cat.parent_category}</span>
+                      {cat.updated_at && (
+                        <span className="ml-2 text-xs text-gray-400">
+                          · gespeichert {new Date(cat.updated_at).toLocaleDateString('de-CH')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => applyProfile(cat.algo_settings)}
+                        className="text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-1 rounded-lg transition-colors"
+                      >
+                        ▶ Anwenden
+                      </button>
+                      <button
+                        onClick={() => setExpanded(expanded === cat.name ? null : cat.name)}
+                        className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-2 py-1 rounded-lg transition-colors"
+                      >
+                        {expanded === cat.name ? '▲ Details' : '▼ Details'}
+                      </button>
+                      <button
+                        onClick={() => deleteProfile(cat.name)}
+                        className="text-xs bg-red-50 hover:bg-red-100 text-red-600 px-2 py-1 rounded-lg transition-colors"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                  {expanded === cat.name && (
+                    <div className="p-3 bg-gray-900 text-green-400 font-mono text-xs">
+                      <pre>{JSON.stringify(cat.algo_settings, null, 2)}</pre>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AlgorithmSettings() {
   const [settings, setSettings] = useState<AlgoSettings>(loadSettings)
   const [saved, setSaved] = useState(false)
@@ -2076,6 +2197,9 @@ function AlgorithmSettings() {
         <div className="text-gray-400 mb-2">// Aktuelle Werte (werden in Studio.tsx gelesen)</div>
         <pre>{JSON.stringify(settings, null, 2)}</pre>
       </div>
+
+      {/* Kategorie-Profile-Übersicht */}
+      <CategoryProfilesPanel />
     </div>
   )
 }
@@ -2838,6 +2962,39 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                   </div>
                 )}
               </div>
+              {/* Profil-Speicher-Button */}
+              {detectedCategory && (
+                <div className="mt-3 pt-3 border-t border-blue-200 flex items-center justify-between">
+                  <div className="text-xs text-blue-700">
+                    <span className="font-medium">Erkannte Kategorie:</span>{' '}
+                    <span className="bg-blue-100 px-2 py-0.5 rounded-full font-semibold">
+                      {categories.find(c => c.name === detectedCategory)?.label ?? detectedCategory}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => saveProfileForCategory(detectedCategory)}
+                    disabled={savingProfile}
+                    className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    {savingProfile ? '⏳ Speichern...' : '💾 Algorithmus-Profil speichern'}
+                  </button>
+                </div>
+              )}
+              {!detectedCategory && (
+                <div className="mt-3 pt-3 border-t border-blue-200">
+                  <p className="text-xs text-blue-500">Keine Kategorie automatisch erkannt. Wähle manuell:</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {categories.slice(0, 8).map(cat => (
+                      <button key={cat.name} onClick={() => saveProfileForCategory(cat.name)}
+                        disabled={savingProfile}
+                        className="px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 text-xs rounded-lg transition-colors disabled:opacity-50">
+                        {cat.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             )}
             {/* LAB Gap Analysis */}
             {(testAnalysis.gapZones as unknown[])?.length > 0 && (

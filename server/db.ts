@@ -249,7 +249,8 @@ export async function getMosaicImagesForMatching() {
       tl_l as "tlL", tl_a as "tlA", tl_b as "tlB",
       tr_l as "trL", tr_a as "trA", tr_b as "trB",
       bl_l as "blL", bl_a as "blA", bl_b as "blB",
-      br_l as "brL", br_a as "brA", br_b as "brB"
+      br_l as "brL", br_a as "brA", br_b as "brB",
+      COALESCE(tile_type, 'medium') as "tileType"
     FROM mosaic_images ORDER BY id ASC
   `);
   return res.rows;

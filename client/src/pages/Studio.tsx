@@ -377,7 +377,7 @@ export default function Studio() {
   // Loaded once at startup, used for fast multi-dimensional k-NN pre-filter over entire DB
   const labIndexRef = useRef<Float32Array | null>(null);
   const labIndexLoadedRef = useRef<boolean>(false);
-  const floatsPerTileRef = useRef<number>(4); // 4 (legacy), 7 (7D), or 14 (14D with quadrant colors)
+  const floatsPerTileRef = useRef<number>(4); // 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity)
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
@@ -1003,7 +1003,8 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), or 15 (15D with isSkinFriendly)
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity)
+    const IS_16D = FPT >= 16; // includes tileComplexity
     const USE_2STAGE = labIndex !== null && labIndex.length >= (FPT);
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
@@ -1089,6 +1090,20 @@ export default function Studio() {
            if (IS_15D && savedSettings.portraitMode) {
              const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
              if (isTargetSkinArea && !isSkinFriendlyTile) dist += 200; // stronger: was +50
+           }
+           // tileComplexity (16D): calm=0.0, medium=0.5, busy=1.0
+           // Smooth target areas (sky, water, skin) should use calm tiles
+           // Detailed target areas (hair, texture, edges) can use busy tiles
+           if (IS_16D) {
+             const tileComplexity = labIndex[i + 15]; // 0=calm, 0.5=medium, 1=busy
+             const cellEdge = edgeMap[ci]; // 0-1 target edge energy
+             if (cellEdge < 0.15 && tileComplexity > 0.6) {
+               // Very smooth target + busy tile = strong penalty
+               dist += (tileComplexity - 0.6) * 500; // up to +200 for very busy tile in smooth area
+             } else if (cellEdge > 0.50 && tileComplexity < 0.2) {
+               // Very detailed target + calm tile = mild penalty (calm tiles lack detail for edges)
+               dist += (0.2 - tileComplexity) * 100; // up to +20
+             }
            }
         } else if (IS_7D) {
           const edge = labIndex[i + 4];

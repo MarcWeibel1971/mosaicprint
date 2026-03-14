@@ -613,7 +613,8 @@ async function computeLabFull(url: string): Promise<{
 } | null> {
   try {
     const { Jimp } = await import("jimp");
-    let image: InstanceType<typeof Jimp>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let image: any;
     if (url.startsWith("data:")) {
       const b64 = url.split(",")[1];
       const buf = Buffer.from(b64, "base64");

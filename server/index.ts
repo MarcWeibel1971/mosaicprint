@@ -93,7 +93,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       res.setHeader('Content-Length', cached.buf.length);
       res.setHeader('Cache-Control', 'public, max-age=3600');
       res.setHeader('X-Tile-Count', cached.tileCount.toString());
-      res.setHeader('X-Floats-Per-Tile', '15');
+      res.setHeader('X-Floats-Per-Tile', '16');
       res.setHeader('X-Cache', 'HIT');
       return res.send(cached.buf);
     }
@@ -107,18 +107,20 @@ app.get("/api/tile-lab-index", async (req, res) => {
       `SELECT id, avg_l, avg_a, avg_b,
               tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
               bl_l, bl_a, bl_b, br_l, br_a, br_b,
-              COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly
+              COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly,
+              COALESCE(tile_type, 'medium') as tile_type
        FROM mosaic_images
        WHERE avg_l IS NOT NULL ${themeFilter} ORDER BY id ASC`,
       queryParams
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly] = 15 floats
+    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity] = 16 floats
     // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
     // edge: variance of L across quadrants (high variance = high edge energy)
     // brightness: avg_l / 100
     // isSkinFriendly: 1.0 = skin-friendly tile, 0.0 = not skin-friendly
-    const FLOATS_PER_TILE = 15;
+    // tileComplexity: 0.0=calm, 0.5=medium, 1.0=busy (from tile_type column)
+    const FLOATS_PER_TILE = 16;
     const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
@@ -150,7 +152,9 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
       buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
+      const tileComplexity = row.tile_type === 'calm' ? 0.0 : row.tile_type === 'busy' ? 1.0 : 0.5;
       buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
+      buf.writeFloatLE(tileComplexity, offset);   offset += 4;  // [15] tileComplexity (0=calm, 0.5=medium, 1=busy)
     }
     // Cache the result
     indexCacheMap.set(theme, { buf, tileCount: rows.length, builtAt: Date.now(), theme });
