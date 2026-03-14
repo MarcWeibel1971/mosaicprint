@@ -1252,8 +1252,8 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
       const neededArray = Array.from(neededTileIds);
-      const ATLAS_CHUNK = isMobileOrSlow ? 300 : 500; // max tiles per atlas request (Railway 60s timeout)
-      const ATLAS_TIMEOUT = isMobileOrSlow ? 40000 : 55000; // stay under Railway's 60s limit
+      const ATLAS_CHUNK = isMobileOrSlow ? 400 : 1000; // Sharp is fast: 1000 tiles in ~5-8s
+      const ATLAS_TIMEOUT = isMobileOrSlow ? 35000 : 45000; // well under Railway's 60s limit
 
       // Helper: fetch one atlas chunk and extract tiles into tileImgMap
       const fetchAtlasChunk = async (chunkIds: number[], progressStart: number, progressEnd: number): Promise<boolean> => {

@@ -26,8 +26,8 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
 import { createContext } from "./context.js";
 import * as db from "./db.js";
-// sharp replaced by Jimp for Railway compatibility (pure JS, no native binaries)
-import { Jimp, JimpMime } from "jimp";
+// Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
+import sharp from "sharp";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -556,8 +556,8 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const atlasW = cols * tileSize;
     const atlasH = rows2 * tileSize;
 
-    const CONCURRENCY = 30; // increased from 20 for faster atlas builds
-    const UPSTREAM_TIMEOUT = 12000; // 12s per tile fetch (was 8s)
+    const CONCURRENCY = 50; // Sharp is fast enough to handle 50 concurrent fetches
+    const UPSTREAM_TIMEOUT = 10000; // 10s per tile fetch
     const tileBuffers = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
@@ -636,16 +636,17 @@ interface AtlasCache {
   builtAt: number;
 }
 
-// Helper: resize image buffer to tileSize×tileSize using Jimp (cover mode)
+// Helper: resize image buffer to tileSize×tileSize using Sharp (cover mode, 10-50x faster than Jimp)
 async function resizeTileJimp(imgBuf: Buffer, tileSize: number): Promise<Buffer | null> {
   try {
-    const img = await Jimp.fromBuffer(imgBuf);
-    img.cover({ w: tileSize, h: tileSize });
-    return await img.getBuffer(JimpMime.jpeg);
+    return await sharp(imgBuf)
+      .resize(tileSize, tileSize, { fit: 'cover', position: 'centre' })
+      .jpeg({ quality: 85 })
+      .toBuffer();
   } catch { return null; }
 }
 
-// Helper: build atlas JPEG from tile buffers using Jimp
+// Helper: build atlas JPEG from tile buffers using Sharp composite
 async function buildAtlasJimp(
   tileBuffers: Map<number, Buffer>,
   tileIds: number[],
@@ -656,21 +657,25 @@ async function buildAtlasJimp(
   const rows = Math.ceil(n / cols);
   const atlasW = cols * tileSize;
   const atlasH = rows * tileSize;
-  const atlas = new Jimp({ width: atlasW, height: atlasH, color: 0x808080ff });
   const map: Record<number, [number, number]> = {};
+  // Build composite input array for Sharp
+  const compositeInputs: Array<{ input: Buffer; left: number; top: number }> = [];
   for (let i = 0; i < tileIds.length; i++) {
     const id = tileIds[i];
     const buf = tileBuffers.get(id);
     if (!buf) continue;
-    try {
-      const tile = await Jimp.fromBuffer(buf);
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      atlas.composite(tile, col * tileSize, row * tileSize);
-      map[id] = [col, row];
-    } catch { /* skip bad tile */ }
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    compositeInputs.push({ input: buf, left: col * tileSize, top: row * tileSize });
+    map[id] = [col, row];
   }
-  const jpeg = await atlas.getBuffer(JimpMime.jpeg);
+  // Create atlas canvas and composite all tiles in one Sharp call
+  const jpeg = await sharp({
+    create: { width: atlasW, height: atlasH, channels: 3, background: { r: 128, g: 128, b: 128 } }
+  })
+    .composite(compositeInputs)
+    .jpeg({ quality: 85 })
+    .toBuffer();
   return { jpeg, map, cols, rows };
 }
 const atlasCacheMap = new Map<string, AtlasCache>();
