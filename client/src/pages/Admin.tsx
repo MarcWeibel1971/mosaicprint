@@ -153,7 +153,7 @@ export default function Admin() {
   useEffect(() => {
     try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
   }, []);
-  const [activeTab, setActiveTab] = useState<'import' | 'database' | 'settings' | 'qa'>('import')
+  const [activeTab, setActiveTab] = useState<'database' | 'import' | 'algorithm' | 'quality'>('database')
   const [stats, setStats] = useState<DbStats | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -505,10 +505,10 @@ export default function Admin() {
         <div className="max-w-7xl mx-auto px-4">
           <div className="flex gap-1">
             {([
-              { id: 'import', label: 'Import & Verwaltung', icon: Upload },
               { id: 'database', label: 'Datenbank', icon: Grid },
-              { id: 'settings', label: 'Algorithmus', icon: Settings },
-              { id: 'qa', label: 'Qualitätssicherung', icon: CheckCircle },
+              { id: 'import', label: 'Import', icon: Upload },
+              { id: 'algorithm', label: 'Algorithmus', icon: Settings },
+              { id: 'quality', label: 'Qualität & Statistik', icon: BarChart2 },
             ] as const).map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -536,7 +536,11 @@ export default function Admin() {
           </div>
         )}
 
-        {/* ── TAB: Import & Verwaltung ── */}
+        {/* ── TAB: Datenbank ── */}
+        {activeTab === 'database' && (
+          <DatabaseBrowser onMessage={setMessage} />
+        )}
+        {/* ── TAB: Import ── */}
         {activeTab === 'import' && (
           <div className="space-y-8">
             {/* API Key Status */}
@@ -917,18 +921,12 @@ export default function Admin() {
           </div>
         )}
 
-        {/* ── TAB: Datenbank-Browser ── */}
-        {activeTab === 'database' && (
-          <DatabaseBrowser onMessage={setMessage} />
-        )}
-
-        {/* ── TAB: Algorithmus-Einstellungen ── */}
-        {activeTab === 'settings' && (
+         {/* ── TAB: Algorithmus ── */}
+        {activeTab === 'algorithm' && (
           <AlgorithmSettings />
         )}
-
-        {/* ── TAB: Qualitätssicherung ── */}
-        {activeTab === 'qa' && (
+        {/* ── TAB: Qualität & Statistik ── */}
+        {activeTab === 'quality' && (
           <QualityAssurance onMessage={setMessage} />
         )}
       </div>
