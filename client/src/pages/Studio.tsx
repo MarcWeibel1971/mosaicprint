@@ -1889,6 +1889,32 @@ export default function Studio() {
           // Non-face: full scoring with saturation term
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
           let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
+
+          // HUE-DIRECTION ENFORCEMENT (non-face regions)
+          // This is the KEY FIX for landscapes: cool/gray areas must not get warm tiles
+          const tA = tf.lab[1], tB = tf.lab[2];
+          const mA = mf.lab[1], mB = mf.lab[2];
+          // COOL TARGET (b < 0, slightly blue/neutral): penalize warm tiles (b > 8)
+          // This prevents beige/orange/yellow tiles in sky, water, fog, mist
+          if (tB < 0 && mB > 8) {
+            // The cooler the target, the stronger the penalty for warm tiles
+            dist += Math.min(600, (-tB + 1) * (mB - 8) * 4); // up to +600 for very cool target + very warm tile
+          }
+          // COOL TARGET: also penalize tiles with strong warm red (a > 8) in cool areas
+          if (tA < 2 && mA > 8) {
+            dist += Math.min(400, (mA - 8) * (-tA + 3) * 5); // up to +400
+          }
+          // WARM TARGET (b > 10, a > 5): penalize cool/blue tiles
+          // This prevents blue tiles in sunset/warm areas
+          if (tB > 10 && mB < -5) {
+            dist += Math.min(400, (tB - 10) * (-mB - 5) * 3); // up to +400
+          }
+          // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
+          // Penalize tiles with strong hue in any direction
+          if (targetSatC < 15 && tileSatC > 30) {
+            dist += (tileSatC - 30) * 4; // up to +280 for very saturated tile in neutral area
+          }
+
           // BIDIRECTIONAL saturation penalty (fixes gray/dark patches in colored areas):
           // (1) Colorful tile in gray/neutral target area -> penalize
           if (targetSatC < 25 && tileSatC > 40) {
@@ -1906,8 +1932,7 @@ export default function Studio() {
             // In LAB: a=red/green axis, b=yellow/blue axis
             // If target is strongly red (a>15), penalize tiles with negative a (green)
             // If target is strongly blue (b<-15), penalize tiles with positive b (yellow)
-            const tA = tf.lab[1], tB = tf.lab[2];
-            const mA = mf.lab[1], mB = mf.lab[2];
+            // (tA, tB, mA, mB already declared above)
             // Red target (a>15): penalize green tiles (a<0)
             if (tA > 15 && mA < 0) dist += Math.min(400, (-mA) * (tA / 15) * 8);
             // Blue target (b<-15): penalize yellow tiles (b>0)
