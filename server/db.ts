@@ -231,7 +231,20 @@ export async function ensureSchema(): Promise<void> {
     ON CONFLICT (name) DO NOTHING
   `);
 
-  console.log("[DB] Schema ensured (v3 with image_categories)");
+  // ── Auto-Learn cycle runs table ─────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS auto_learn_runs (
+      id SERIAL PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      triggered_by TEXT DEFAULT 'manual',
+      steps_json JSONB DEFAULT '[]',
+      summary_json JSONB
+    )
+  `);
+
+  console.log("[DB] Schema ensured (v4 with auto_learn_runs)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
@@ -584,4 +597,45 @@ export async function upsertImageCategory(data: {
       JSON.stringify(data.algoSettings ?? {}),
     ]
   );
+}
+
+// ── Auto-Learn cycle DB functions ─────────────────────────────────────────────
+export async function startAutoLearnRun(triggeredBy = 'manual'): Promise<number> {
+  const pool = getPool();
+  const res = await pool.query(
+    `INSERT INTO auto_learn_runs (status, triggered_by) VALUES ('running', $1) RETURNING id`,
+    [triggeredBy]
+  );
+  return res.rows[0].id;
+}
+
+export async function updateAutoLearnRun(runId: number, steps: object[]): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE auto_learn_runs SET steps_json = $1 WHERE id = $2`,
+    [JSON.stringify(steps), runId]
+  );
+}
+
+export async function finishAutoLearnRun(runId: number, status: 'success' | 'warning' | 'error', summary: object): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE auto_learn_runs SET status = $1, finished_at = NOW(), summary_json = $2 WHERE id = $3`,
+    [status, JSON.stringify(summary), runId]
+  );
+}
+
+export async function getAutoLearnRuns(limit = 20): Promise<any[]> {
+  const pool = getPool();
+  const res = await pool.query(
+    `SELECT * FROM auto_learn_runs ORDER BY started_at DESC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+export async function getAutoLearnRun(runId: number): Promise<any | null> {
+  const pool = getPool();
+  const res = await pool.query(`SELECT * FROM auto_learn_runs WHERE id = $1`, [runId]);
+  return res.rows[0] ?? null;
 }

@@ -26,7 +26,8 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
 import { createContext } from "./context.js";
 import * as db from "./db.js";
-import sharp from "sharp";
+// sharp replaced by Jimp for Railway compatibility (pure JS, no native binaries)
+import { Jimp, JimpMime } from "jimp";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -556,58 +557,45 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const atlasH = rows2 * tileSize;
 
     const CONCURRENCY = 20;
-    const compositeInputs: sharp.OverlayOptions[] = [];
-    const tileMap: Record<number, [number, number]> = {};
-
+    const tileBuffers = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (row: any, bi: number) => {
-        const idx = i + bi;
-        const col = idx % cols;
-        const rowIdx = Math.floor(idx / cols);
+      await Promise.all(batch.map(async (row: any) => {
         const url = row.tile128_url || row.source_url || '';
         if (!url) return;
         try {
-          const cacheKeyTile = `${row.id}-128`;
           let imgBuf: Buffer | null = null;
-          const tileCached = tileCacheMap.get(cacheKeyTile);
-          if (tileCached) { imgBuf = tileCached.buf; }
-          else if (url.startsWith('data:')) { imgBuf = Buffer.from(url.split(',')[1], 'base64'); }
+          if (url.startsWith('data:')) { imgBuf = Buffer.from(url.split(',')[1], 'base64'); }
           else {
             const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
             if (resp.ok) imgBuf = Buffer.from(await resp.arrayBuffer());
           }
           if (!imgBuf) return;
-          const resized = await sharp(imgBuf).resize(tileSize, tileSize, { fit: 'cover' }).jpeg({ quality: 80 }).toBuffer();
-          compositeInputs[idx] = { input: resized, top: rowIdx * tileSize, left: col * tileSize };
-          tileMap[Number(row.id)] = [col, rowIdx];
+          const resized = await resizeTileJimp(imgBuf, tileSize);
+          if (resized) tileBuffers.set(Number(row.id), resized);
         } catch { /* skip */ }
       }));
     }
-
-    const validInputs = compositeInputs.filter(Boolean);
-    const atlasJpeg = await sharp({
-      create: { width: atlasW, height: atlasH, channels: 3, background: { r: 128, g: 128, b: 128 } }
-    }).composite(validInputs).jpeg({ quality: 82 }).toBuffer();
-
-    const atlasData: AtlasCache = { jpeg: atlasJpeg, map: tileMap, tileSize, cols, rows: rows2, builtAt: Date.now() };
+    // Build atlas using Jimp helper
+    const orderedIds = rows.map((r: any) => Number(r.id)).filter((id: number) => tileBuffers.has(id));
+    const atlasResult = await buildAtlasJimp(tileBuffers, orderedIds, tileSize);
+    const atlasData: AtlasCache = { jpeg: atlasResult.jpeg, map: atlasResult.map, tileSize, cols: atlasResult.cols, rows: atlasResult.rows, builtAt: Date.now() };
     atlasCacheMap.set(cacheKey, atlasData);
-
+    console.log(`[atlas-targeted] Built: ${orderedIds.length} tiles, ${atlasResult.cols}x${atlasResult.rows} grid, ${(atlasResult.jpeg.length/1024).toFixed(0)} KB`);
     res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Length', atlasJpeg.length);
+    res.setHeader('Content-Length', atlasResult.jpeg.length);
     res.setHeader('Cache-Control', 'public, max-age=1800');
-    res.setHeader('X-Atlas-Cols', cols.toString());
-    res.setHeader('X-Atlas-Rows', rows2.toString());
+    res.setHeader('X-Atlas-Cols', atlasResult.cols.toString());
+    res.setHeader('X-Atlas-Rows', atlasResult.rows.toString());
     res.setHeader('X-Atlas-TileSize', tileSize.toString());
-    res.setHeader('X-Atlas-Map', JSON.stringify(tileMap));
-    return res.send(atlasJpeg);
+    res.setHeader('X-Atlas-Map', JSON.stringify(atlasResult.map));
+    return res.send(atlasResult.jpeg);
   } catch (err: any) {
     console.error('[atlas-targeted] Error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
-
-// GET /api/tile-atlas-map - returns the tile position map as JSON (separate from the JPEG)
+// GET /api/tile-atlas-mapp - returns the tile position map as JSON (separate from the JPEG)
 app.get('/api/tile-atlas-map', async (req, res) => {
   const theme = ((req.query.theme as string) ?? '').toLowerCase().trim();
   const tileSize = Math.min(Math.max(Number(req.query.tileSize ?? 64), 32), 128);
@@ -633,6 +621,44 @@ interface AtlasCache {
   cols: number;
   rows: number;
   builtAt: number;
+}
+
+// Helper: resize image buffer to tileSize×tileSize using Jimp (cover mode)
+async function resizeTileJimp(imgBuf: Buffer, tileSize: number): Promise<Buffer | null> {
+  try {
+    const img = await Jimp.fromBuffer(imgBuf);
+    img.cover({ w: tileSize, h: tileSize });
+    return await img.getBuffer(JimpMime.jpeg);
+  } catch { return null; }
+}
+
+// Helper: build atlas JPEG from tile buffers using Jimp
+async function buildAtlasJimp(
+  tileBuffers: Map<number, Buffer>,
+  tileIds: number[],
+  tileSize: number
+): Promise<{ jpeg: Buffer; map: Record<number, [number, number]>; cols: number; rows: number }> {
+  const n = tileIds.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const atlasW = cols * tileSize;
+  const atlasH = rows * tileSize;
+  const atlas = new Jimp({ width: atlasW, height: atlasH, color: 0x808080ff });
+  const map: Record<number, [number, number]> = {};
+  for (let i = 0; i < tileIds.length; i++) {
+    const id = tileIds[i];
+    const buf = tileBuffers.get(id);
+    if (!buf) continue;
+    try {
+      const tile = await Jimp.fromBuffer(buf);
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      atlas.composite(tile, col * tileSize, row * tileSize);
+      map[id] = [col, row];
+    } catch { /* skip bad tile */ }
+  }
+  const jpeg = await atlas.getBuffer(JimpMime.jpeg);
+  return { jpeg, map, cols, rows };
 }
 const atlasCacheMap = new Map<string, AtlasCache>();
 const ATLAS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -690,72 +716,51 @@ app.get('/api/tile-atlas', async (req, res) => {
     const atlasW = cols * tileSize;
     const atlasH = rows2 * tileSize;
 
-    // Build atlas using sharp composite
+    // Build atlas using Jimp (pure JS, no native binaries)
     const CONCURRENCY = 20;
-    const compositeInputs: sharp.OverlayOptions[] = [];
-    const tileMap: Record<number, [number, number]> = {};
-
+    const tileBuffers2 = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (row: any, bi: number) => {
-        const idx = i + bi;
-        const col = idx % cols;
-        const rowIdx = Math.floor(idx / cols);
+      await Promise.all(batch.map(async (row: any) => {
         const url = row.tile128_url || row.source_url || '';
         if (!url) return;
-
         try {
-          // Check in-memory tile cache first
-          const cacheKeyTile = `${row.id}-128`;
           let imgBuf: Buffer | null = null;
-          const tileCached = tileCacheMap.get(cacheKeyTile);
-          if (tileCached) {
-            imgBuf = tileCached.buf;
-          } else if (url.startsWith('data:')) {
+          if (url.startsWith('data:')) {
             imgBuf = Buffer.from(url.split(',')[1], 'base64');
           } else {
             const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
             if (resp.ok) imgBuf = Buffer.from(await resp.arrayBuffer());
           }
           if (!imgBuf) return;
-
-          // Resize to tileSize×tileSize
-          const resized = await sharp(imgBuf).resize(tileSize, tileSize, { fit: 'cover' }).jpeg({ quality: 80 }).toBuffer();
-          compositeInputs[idx] = { input: resized, top: rowIdx * tileSize, left: col * tileSize };
-          tileMap[Number(row.id)] = [col, rowIdx];
-        } catch {
-          // Skip failed tiles
-        }
+          const resized = await resizeTileJimp(imgBuf, tileSize);
+          if (resized) tileBuffers2.set(Number(row.id), resized);
+        } catch { /* skip */ }
       }));
       if (i % 500 === 0) console.log(`[atlas] Processing tiles ${i}/${n}...`);
     }
-
-    // Create blank canvas and composite all tiles
-    const validInputs = compositeInputs.filter(Boolean);
-    const atlasJpeg = await sharp({
-      create: { width: atlasW, height: atlasH, channels: 3, background: { r: 128, g: 128, b: 128 } }
-    }).composite(validInputs).jpeg({ quality: 82 }).toBuffer();
-
+    // Build atlas using Jimp helper
+    const orderedIds2 = rows.map((r: any) => Number(r.id)).filter((id: number) => tileBuffers2.has(id));
+    const atlasResult2 = await buildAtlasJimp(tileBuffers2, orderedIds2, tileSize);
     const atlasData: AtlasCache = {
-      jpeg: atlasJpeg,
-      map: tileMap,
+      jpeg: atlasResult2.jpeg,
+      map: atlasResult2.map,
       tileSize,
-      cols,
-      rows: rows2,
+      cols: atlasResult2.cols,
+      rows: atlasResult2.rows,
       builtAt: Date.now(),
     };
     atlasCacheMap.set(cacheKey, atlasData);
     atlasBuildInProgress.delete(cacheKey);
-    console.log(`[atlas] Built: ${n} tiles, ${cols}×${rows2} grid, ${(atlasJpeg.length/1024/1024).toFixed(1)} MB JPEG`);
-
+    console.log(`[atlas] Built: ${orderedIds2.length} tiles, ${atlasResult2.cols}x${atlasResult2.rows} grid, ${(atlasResult2.jpeg.length/1024/1024).toFixed(1)} MB JPEG`);
     res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Length', atlasJpeg.length);
+    res.setHeader('Content-Length', atlasResult2.jpeg.length);
     res.setHeader('Cache-Control', 'public, max-age=1800');
-    res.setHeader('X-Atlas-Cols', cols.toString());
-    res.setHeader('X-Atlas-Rows', rows2.toString());
+    res.setHeader('X-Atlas-Cols', atlasResult2.cols.toString());
+    res.setHeader('X-Atlas-Rows', atlasResult2.rows.toString());
     res.setHeader('X-Atlas-TileSize', tileSize.toString());
     res.setHeader('X-Cache', 'MISS');
-    res.send(atlasJpeg);
+    res.send(atlasResult2.jpeg);
   } catch (e) {
     atlasBuildInProgress.clear();
     console.error('[atlas] Error:', e);
@@ -841,13 +846,12 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
             if (resp.ok) {
               const buf = Buffer.from(await resp.arrayBuffer());
               // Resize to TILE_PX and cache to disk
-              const resized = await sharp(buf)
-                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-                .jpeg({ quality: 92, mozjpeg: true })
-                .toBuffer();
-              tileBuffers[id] = resized;
-              // Save to disk cache (async, don't await)
-              fs.writeFile(cacheFile, resized, () => {});
+              const resized = await resizeTileJimp(buf, TILE_PX);
+              if (resized) {
+                tileBuffers[id] = resized;
+                // Save to disk cache (async, don't await)
+                fs.writeFile(cacheFile, resized, () => {});
+              }
               break;
             }
           } catch { /* try next url */ }
@@ -855,7 +859,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       }));
     }
 
-    // Build composite inputs for sharp
+    // Build composite inputs for Jimp strip rendering
     // For large images (>8000px), render in row-strips to avoid OOM
     // Each strip = STRIP_ROWS rows, composited separately, then joined vertically
     const STRIP_ROWS = Math.max(1, Math.floor(4000 / TILE_PX)); // ~4000px per strip
@@ -866,10 +870,8 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     const resizedBuffers: Record<number, Buffer> = {};
     for (const [id, buf] of Object.entries(tileBuffers)) {
       try {
-        resizedBuffers[Number(id)] = await sharp(buf)
-          .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-          .jpeg({ quality: 90 })
-          .toBuffer();
+        const rBuf = await resizeTileJimp(buf, TILE_PX);
+        if (rBuf) resizedBuffers[Number(id)] = rBuf;
       } catch { /* skip bad tiles */ }
     }
 
@@ -878,7 +880,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     for (let stripStart = 0; stripStart < rows; stripStart += STRIP_ROWS) {
       const stripEnd = Math.min(stripStart + STRIP_ROWS, rows);
       const stripH = (stripEnd - stripStart) * TILE_PX;
-      const compositeInputs: sharp.OverlayOptions[] = [];
+      const compositeInputs: Array<{ buf: Buffer; top: number; left: number }> = [];
 
       for (let r = stripStart; r < stripEnd; r++) {
         for (let c = 0; c < cols; c++) {
@@ -887,39 +889,39 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
           const buf = resizedBuffers[tileId];
           if (!buf) continue;
           compositeInputs.push({
-            input: buf,
+            buf,
             top: (r - stripStart) * TILE_PX,
             left: c * TILE_PX,
           });
         }
       }
 
-      const stripJpeg = await sharp({
-        create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
-      }).composite(compositeInputs).jpeg({ quality: 90 }).toBuffer();
+      // Build strip using Jimp
+      const stripAtlas = new Jimp({ width: outW, height: stripH, color: 0xb4b4b4ff });
+      for (const ci of compositeInputs) {
+        try {
+          const tile = await Jimp.fromBuffer(ci.buf);
+          stripAtlas.composite(tile, ci.left, ci.top);
+        } catch { /* skip */ }
+      }
+      const stripJpeg = await stripAtlas.getBuffer(JimpMime.jpeg);
       stripBuffers.push(stripJpeg);
       console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
     }
-
-    // Join strips vertically
+    // Join strips vertically using Jimp
     let mosaicJpeg: Buffer;
     if (stripBuffers.length === 1) {
-      // Single strip: re-encode at higher quality
-      mosaicJpeg = await sharp(stripBuffers[0]).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
+      mosaicJpeg = stripBuffers[0];
     } else {
-      // Multiple strips: stack them
-      const joinInputs: sharp.OverlayOptions[] = [];
+      const fullAtlas = new Jimp({ width: outW, height: outH, color: 0xb4b4b4ff });
       let yOffset = 0;
       for (const stripBuf of stripBuffers) {
-        const meta = await sharp(stripBuf).metadata();
-        joinInputs.push({ input: stripBuf, top: yOffset, left: 0 });
-        yOffset += meta.height ?? STRIP_ROWS * TILE_PX;
+        const stripImg = await Jimp.fromBuffer(stripBuf);
+        fullAtlas.composite(stripImg, 0, yOffset);
+        yOffset += stripImg.height;
       }
-      mosaicJpeg = await sharp({
-        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
-      }).composite(joinInputs).jpeg({ quality: 93, mozjpeg: true }).toBuffer();
+      mosaicJpeg = await fullAtlas.getBuffer(JimpMime.jpeg);
     }
-
     console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
 
     // Save to temp file and return a download token.

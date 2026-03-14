@@ -2313,6 +2313,58 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   }
 
   const [pdfGenerating, setPdfGenerating] = useState(false)
+  // ── Auto-Learn state ──────────────────────────────────────────────────────
+  const [autoLearnRunning, setAutoLearnRunning] = useState(false)
+  const [autoLearnImportCount, setAutoLearnImportCount] = useState(300)
+  const [autoLearnTargetPerBucket, setAutoLearnTargetPerBucket] = useState(200)
+  const [autoLearnSteps, setAutoLearnSteps] = useState<Array<{step: string; status: string; message: string; ts: string}>>([])
+  const [autoLearnRuns, setAutoLearnRuns] = useState<Array<{id: number; status: string; started_at: string; finished_at: string | null; steps_json: unknown}>>([])
+  const [autoLearnExpandedRun, setAutoLearnExpandedRun] = useState<number | null>(null)
+  const fetchAutoLearnRuns = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trpc/getAutoLearnRuns')
+      const data = await res.json()
+      const rows = data.result?.data?.json ?? data.result?.data ?? []
+      if (Array.isArray(rows)) setAutoLearnRuns(rows)
+    } catch { /* ignore */ }
+  }, [])
+  useEffect(() => { fetchAutoLearnRuns() }, [fetchAutoLearnRuns])
+  const startAutoLearn = useCallback(async () => {
+    setAutoLearnRunning(true)
+    setAutoLearnSteps([])
+    try {
+      const res = await fetch('/api/trpc/startAutoLearnCycle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ importCount: autoLearnImportCount, targetPerBucket: autoLearnTargetPerBucket }),
+      })
+      const data = await res.json()
+      const runId: number = data.result?.data?.json?.runId ?? data.result?.data?.runId
+      if (!runId) throw new Error('Kein runId erhalten')
+      onMessage({ text: `Auto-Learn-Zyklus gestartet (Run #${runId})`, type: 'info' })
+      // Poll status
+      const poll = setInterval(async () => {
+        try {
+          const r2 = await fetch('/api/trpc/getAutoLearnRun?input=' + encodeURIComponent(JSON.stringify({ runId })))
+          const d2 = await r2.json()
+          const run = d2.result?.data?.json ?? d2.result?.data
+          if (!run) return
+          const steps = Array.isArray(run.steps_json) ? run.steps_json : []
+          setAutoLearnSteps(steps)
+          if (run.status !== 'running') {
+            clearInterval(poll)
+            setAutoLearnRunning(false)
+            fetchAutoLearnRuns()
+            const emoji = run.status === 'success' ? '✅' : run.status === 'error' ? '❌' : '⚠️'
+            onMessage({ text: `${emoji} Auto-Learn-Zyklus beendet (${run.status})`, type: run.status === 'error' ? 'error' : 'success' })
+          }
+        } catch { /* ignore */ }
+      }, 3000)
+    } catch (e) {
+      onMessage({ text: `Fehler beim Starten: ${String(e)}`, type: 'error' })
+      setAutoLearnRunning(false)
+    }
+  }, [autoLearnImportCount, autoLearnTargetPerBucket, onMessage, fetchAutoLearnRuns])
   const [testImageUrl, setTestImageUrl] = useState('')
   const [testImageFile, setTestImageFile] = useState<{ name: string; base64: string; preview: string } | null>(null)
   const [testAnalysis, setTestAnalysis] = useState<Record<string, unknown> | null>(null)
@@ -3084,6 +3136,123 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
           </div>
         )}
       </div>
+      {/* ── Auto-Learn Cycle ─────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-bold text-gray-900 flex items-center gap-2">
+              <span className="text-xl">🤖</span> Auto-Learn-Zyklus
+            </h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Vollautomatischer Zyklus: QA-Check → Lückenanalyse → Smart-Import → Reindex → QA-Nachcheck
+            </p>
+          </div>
+          <button
+            onClick={startAutoLearn}
+            disabled={autoLearnRunning}
+            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-semibold px-5 py-2 rounded-xl text-sm transition-colors"
+          >
+            {autoLearnRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            {autoLearnRunning ? 'Läuft...' : 'Zyklus starten'}
+          </button>
+        </div>
+        {/* Config */}
+        <div className="flex flex-wrap gap-4 mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500 shrink-0">Import-Anzahl:</label>
+            <input
+              type="number"
+              value={autoLearnImportCount}
+              onChange={e => setAutoLearnImportCount(Math.max(50, Math.min(2000, Number(e.target.value))))}
+              className="w-20 text-sm border border-gray-200 rounded-lg px-2 py-1 text-center"
+              min={50} max={2000} disabled={autoLearnRunning}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500 shrink-0">Ziel pro Bucket:</label>
+            <input
+              type="number"
+              value={autoLearnTargetPerBucket}
+              onChange={e => setAutoLearnTargetPerBucket(Math.max(50, Math.min(1000, Number(e.target.value))))}
+              className="w-20 text-sm border border-gray-200 rounded-lg px-2 py-1 text-center"
+              min={50} max={1000} disabled={autoLearnRunning}
+            />
+          </div>
+        </div>
+        {/* Current run steps */}
+        {autoLearnSteps.length > 0 && (
+          <div className="space-y-1 mb-4">
+            {autoLearnSteps.map((step, i) => (
+              <div key={i} className={`flex items-start gap-2 text-xs px-3 py-2 rounded-lg ${
+                step.status === 'done' ? 'bg-green-50 text-green-700' :
+                step.status === 'running' ? 'bg-blue-50 text-blue-700' :
+                step.status === 'skipped' ? 'bg-gray-50 text-gray-500' :
+                step.status === 'error' ? 'bg-red-50 text-red-700' :
+                'bg-gray-50 text-gray-600'
+              }`}>
+                <span className="shrink-0 mt-0.5">
+                  {step.status === 'done' ? '✅' : step.status === 'running' ? '⏳' : step.status === 'skipped' ? '⏭️' : step.status === 'error' ? '❌' : '•'}
+                </span>
+                <span className="flex-1">{step.message}</span>
+                <span className="text-gray-400 shrink-0">{new Date(step.ts).toLocaleTimeString('de-CH')}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Recent runs */}
+        {autoLearnRuns.length > 0 && (
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Letzte Zyklen</h4>
+            <div className="space-y-1">
+              {autoLearnRuns.slice(0, 5).map(run => (
+                <div key={run.id} className="flex items-center gap-3 text-xs px-3 py-2 bg-gray-50 rounded-lg">
+                  <span className="font-mono text-gray-400">#{run.id}</span>
+                  <span className={`font-medium px-2 py-0.5 rounded-full ${
+                    run.status === 'success' ? 'bg-green-100 text-green-700' :
+                    run.status === 'running' ? 'bg-blue-100 text-blue-700' :
+                    run.status === 'error' ? 'bg-red-100 text-red-700' :
+                    'bg-gray-100 text-gray-600'
+                  }`}>
+                    {run.status === 'success' ? '✅' : run.status === 'running' ? '⏳' : run.status === 'error' ? '❌' : '⚠️'} {run.status}
+                  </span>
+                  <span className="text-gray-500">{new Date(run.started_at).toLocaleString('de-CH')}</span>
+                  {run.finished_at && (
+                    <span className="text-gray-400">
+                      {Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setAutoLearnExpandedRun(autoLearnExpandedRun === run.id ? null : run.id)}
+                    className="ml-auto text-indigo-500 hover:text-indigo-700"
+                  >
+                    {autoLearnExpandedRun === run.id ? '▲' : '▼'}
+                  </button>
+                </div>
+              ))}
+            </div>
+            {autoLearnExpandedRun !== null && (() => {
+              const run = autoLearnRuns.find(r => r.id === autoLearnExpandedRun)
+              if (!run || !run.steps_json) return null
+              const steps = Array.isArray(run.steps_json) ? run.steps_json : []
+              return (
+                <div className="mt-2 space-y-1 pl-4">
+                  {steps.map((step: {step: string; status: string; message: string; ts: string}, i: number) => (
+                    <div key={i} className={`text-xs px-3 py-1.5 rounded-lg ${
+                      step.status === 'done' ? 'bg-green-50 text-green-700' :
+                      step.status === 'running' ? 'bg-blue-50 text-blue-700' :
+                      step.status === 'error' ? 'bg-red-50 text-red-700' :
+                      'bg-gray-50 text-gray-500'
+                    }`}>
+                      {step.status === 'done' ? '✅' : step.status === 'running' ? '⏳' : step.status === 'error' ? '❌' : '⏭️'} {step.message}
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
+          </div>
+        )}
+      </div>
+
     </div>
   )
 }

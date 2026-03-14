@@ -1877,6 +1877,161 @@ export const appRouter = router({
         poolSize: poolStats.reduce((s: number, p: {count: number}) => s + p.count, 0),
       };
     }),
+
+  // ── Auto-Learn: Start cycle ────────────────────────────────────────────────
+  startAutoLearnCycle: publicProcedure
+    .input(z.object({
+      importCount: z.number().min(50).max(2000).default(300),
+      targetPerBucket: z.number().min(50).max(1000).default(200),
+    }))
+    .mutation(async ({ input }) => {
+      const runId = await db.startAutoLearnRun('manual');
+      const steps: Array<{step: string; status: string; message: string; ts: string}> = [];
+      const addStep = async (step: string, status: string, message: string) => {
+        steps.push({ step, status, message, ts: new Date().toISOString() });
+        await db.updateAutoLearnRun(runId, steps);
+      };
+      (async () => {
+        try {
+          await addStep('start', 'running', 'Auto-Learn-Zyklus gestartet');
+          // Step 1: QA pre-check
+          await addStep('qa-pre', 'running', 'QA-Vorab-Check (index-integrity + pool-balance)...');
+          const qaRunId1 = await db.startQualityRun('index-integrity', 'auto-learn');
+          const qaRunId2 = await db.startQualityRun('pool-balance', 'auto-learn');
+          await runQualityCheckAsync('index-integrity', qaRunId1);
+          await runQualityCheckAsync('pool-balance', qaRunId2);
+          await addStep('qa-pre', 'done', 'QA-Vorab-Check abgeschlossen');
+          // Step 2: Analyse gaps
+          await addStep('gap-analysis', 'running', 'DB-Luecken analysieren...');
+          const alTasks = await analyzeDbGaps(input.targetPerBucket);
+          await addStep('gap-analysis', 'done', `${alTasks.length} Import-Tasks identifiziert`);
+          // Step 3: Smart Import
+          const alSources: Array<'pexels' | 'pixabay' | 'unsplash'> = [];
+          if (process.env.PEXELS_API_KEY) alSources.push('pexels');
+          if (process.env.PIXABAY_API_KEY) alSources.push('pixabay');
+          if (process.env.UNSPLASH_ACCESS_KEY) alSources.push('unsplash');
+          if (alSources.length === 0) {
+            await addStep('import', 'skipped', 'Kein API-Key konfiguriert - Import uebersprungen');
+          } else {
+            await addStep('import', 'running', `Smart Import via ${alSources.join(', ')} (${input.importCount} Bilder)...`);
+            let totalImported = 0;
+            for (const alSource of alSources) {
+              const jobKey = `smart_${alSource}`;
+              if (smartImportJobs[jobKey]?.running) continue;
+              smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.importCount };
+              const slog = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
+              try {
+                const alApiKey = alSource === 'pexels' ? process.env.PEXELS_API_KEY!
+                  : alSource === 'pixabay' ? process.env.PIXABAY_API_KEY!
+                  : process.env.UNSPLASH_ACCESS_KEY!;
+                let alImported = 0;
+                const alImportTasks = await analyzeDbGaps(input.targetPerBucket);
+                const AL_CONCURRENCY = 3;
+                const alPerPage = alSource === 'pexels' ? 80 : alSource === 'pixabay' ? 200 : 30;
+                for (const task of alImportTasks) {
+                  if (alImported >= input.importCount) break;
+                  try {
+                    let alPhotos: Array<{ sourceUrl: string; tile128Url: string }> = [];
+                    if (alSource === 'pexels') {
+                      const res = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=${alPerPage}&orientation=square`, { headers: { Authorization: alApiKey } });
+                      if (res.ok) { const data = await res.json() as any; alPhotos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small })); }
+                    } else if (alSource === 'pixabay') {
+                      const res = await fetch(`https://pixabay.com/api/?key=${encodeURIComponent(alApiKey)}&q=${encodeURIComponent(task.query)}&per_page=${alPerPage}&image_type=photo&safesearch=true&orientation=horizontal`, { headers: { 'Accept': 'application/json' } });
+                      if (res.ok) { const data = await res.json() as any; alPhotos = (data.hits ?? []).map((p: any) => ({ sourceUrl: p.largeImageURL || p.webformatURL || '', tile128Url: p.webformatURL || p.previewURL || '' })).filter((p: any) => p.tile128Url); }
+                    } else {
+                      const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${alPerPage}&orientation=squarish`, { headers: { Authorization: `Client-ID ${alApiKey}` } });
+                      if (res.ok) { const data = await res.json() as any; alPhotos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb })); }
+                    }
+                    let alBatchImported = 0;
+                    for (let i = 0; i < alPhotos.length; i += AL_CONCURRENCY) {
+                      const batch = alPhotos.slice(i, i + AL_CONCURRENCY);
+                      await Promise.all(batch.map(async (photo) => {
+                        try {
+                          const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl);
+                          if (quality.rejected) return;
+                          const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                          const ins = await db.insertMosaicImage({ ...photo,
+                            avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
+                            tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
+                            trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
+                            blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
+                            brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
+                            theme: task.subject ?? 'general',
+                            subject: task.subject ?? 'general',
+                            sourceProvider: alSource,
+                            importQuery: task.query,
+                            tileType: lab?.tileType,
+                          });
+                          if (ins) { alImported++; alBatchImported++; smartImportJobs[jobKey].imported = alImported; totalImported++; }
+                        } catch { /* skip */ }
+                      }));
+                    }
+                    if (alBatchImported > 0) slog(`[${task.label}] +${alBatchImported}`);
+                  } catch { /* skip task */ }
+                }
+                slog(`[${alSource}] ${alImported} Bilder importiert`);
+                smartImportJobs[jobKey].finishedAt = new Date().toISOString();
+              } catch (e: unknown) {
+                smartImportJobs[jobKey].error = e instanceof Error ? e.message : String(e);
+              } finally {
+                smartImportJobs[jobKey].running = false;
+              }
+            }
+            await addStep('import', 'done', `Import abgeschlossen: ${totalImported} neue Bilder`);
+          }
+          // Step 4: Rebuild tile index (only unindexed tiles)
+          await addStep('reindex', 'running', 'Tile-Index neu aufbauen (LAB-Reindex)...');
+          if (!rebuildJobStatus.running) {
+            rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
+            const alPool = db.getPool();
+            const reindexRes = await alPool.query("SELECT id, tile128_url FROM mosaic_images WHERE tile128_url IS NOT NULL AND (indexed_at IS NULL OR indexed_at < NOW() - INTERVAL '7 days') LIMIT 2000");
+            let alIndexed = 0;
+            const AL_CONCURRENCY2 = 6;
+            for (let i = 0; i < reindexRes.rows.length; i += AL_CONCURRENCY2) {
+              const batch = reindexRes.rows.slice(i, i + AL_CONCURRENCY2);
+              await Promise.all(batch.map(async (row: any) => {
+                const lab = await computeLabFull(row.tile128_url);
+                if (lab) {
+                  await alPool.query(
+                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,indexed_at=NOW() WHERE id=$17',
+                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id]
+                  );
+                  alIndexed++;
+                }
+              }));
+            }
+            rebuildJobStatus.running = false;
+            rebuildJobStatus.finishedAt = new Date().toISOString();
+            await addStep('reindex', 'done', `${alIndexed} Tiles neu indexiert`);
+          } else {
+            await addStep('reindex', 'skipped', 'Reindex laeuft bereits - uebersprungen');
+          }
+          // Step 5: QA post-check
+          await addStep('qa-post', 'running', 'QA-Nachcheck (pool-balance)...');
+          const qaRunId3 = await db.startQualityRun('pool-balance', 'auto-learn');
+          await runQualityCheckAsync('pool-balance', qaRunId3);
+          await addStep('qa-post', 'done', 'QA-Nachcheck abgeschlossen');
+          await addStep('done', 'done', 'Auto-Learn-Zyklus erfolgreich abgeschlossen');
+          await db.finishAutoLearnRun(runId, 'success', { steps: steps.length });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          steps.push({ step: 'error', status: 'error', message: msg, ts: new Date().toISOString() });
+          await db.updateAutoLearnRun(runId, steps).catch(() => {});
+          await db.finishAutoLearnRun(runId, 'error', { error: msg }).catch(() => {});
+        }
+      })();
+      return { started: true, runId };
+    }),
+
+  // ── Auto-Learn: Get run status ─────────────────────────────────────────────
+  getAutoLearnRun: publicProcedure
+    .input(z.object({ runId: z.number() }))
+    .query(async ({ input }) => db.getAutoLearnRun(input.runId)),
+
+  // ── Auto-Learn: Get recent runs ────────────────────────────────────────────
+  getAutoLearnRuns: publicProcedure
+    .input(z.object({ limit: z.number().default(10) }))
+    .query(async ({ input }) => db.getAutoLearnRuns(input.limit)),
 });
 
 // ── Quality Check Async Runner ─────────────────────────────────────────────────
