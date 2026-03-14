@@ -556,23 +556,36 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const atlasW = cols * tileSize;
     const atlasH = rows2 * tileSize;
 
-    const CONCURRENCY = 20;
+    const CONCURRENCY = 30; // increased from 20 for faster atlas builds
+    const UPSTREAM_TIMEOUT = 12000; // 12s per tile fetch (was 8s)
     const tileBuffers = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (row: any) => {
         const url = row.tile128_url || row.source_url || '';
         if (!url) return;
+        // Check in-memory tile cache first (avoids upstream fetch)
+        const cacheKeyTile = `${row.id}-${tileSize}`;
+        const cachedTile = tileCacheMap.get(cacheKeyTile);
+        if (cachedTile) {
+          tileBuffers.set(Number(row.id), cachedTile.buf);
+          return;
+        }
         try {
           let imgBuf: Buffer | null = null;
           if (url.startsWith('data:')) { imgBuf = Buffer.from(url.split(',')[1], 'base64'); }
           else {
-            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(8000) });
+            const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT) });
             if (resp.ok) imgBuf = Buffer.from(await resp.arrayBuffer());
           }
           if (!imgBuf) return;
           const resized = await resizeTileJimp(imgBuf, tileSize);
-          if (resized) tileBuffers.set(Number(row.id), resized);
+          if (resized) {
+            tileBuffers.set(Number(row.id), resized);
+            // Store in tile cache for future requests
+            tileCacheMap.set(cacheKeyTile, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+            evictTileCache();
+          }
         } catch { /* skip */ }
       }));
     }
@@ -661,7 +674,7 @@ async function buildAtlasJimp(
   return { jpeg, map, cols, rows };
 }
 const atlasCacheMap = new Map<string, AtlasCache>();
-const ATLAS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const ATLAS_CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes (increased from 30)
 let atlasBuildInProgress = new Set<string>();
 
 app.get('/api/tile-atlas', async (req, res) => {
