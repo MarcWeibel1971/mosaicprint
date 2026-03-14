@@ -965,6 +965,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [qualityStatusFilter, setQualityStatusFilter] = useState('alle')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [sourceDeleting, setSourceDeleting] = useState(false)
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -1289,6 +1290,28 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     fetchDbStats()
   }
 
+  const handleDeleteBySource = async (source: string) => {
+    const count = dbStats.bySource?.[source] ?? 0
+    if (!confirm(`Alle ${count.toLocaleString()} ${source}-Tiles unwiderruflich löschen?\n\nDieser Vorgang kann nicht rückgängig gemacht werden!`)) return
+    setSourceDeleting(true)
+    try {
+      const res = await fetch('/api/trpc/deleteBySource', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source })
+      })
+      const data = await res.json()
+      const deleted = data.result?.data?.json?.deleted ?? data.result?.data?.deleted ?? 0
+      onMessage({ text: `✅ ${deleted.toLocaleString()} ${source}-Tiles gelöscht`, type: 'success' })
+      setSourceFilter('alle')
+      fetchImages(1)
+      fetchDbStats()
+    } catch (e) {
+      onMessage({ text: `❌ Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setSourceDeleting(false)
+    }
+  }
+
   const toggleSelect = (id: number) => {
     setSelectedIds(prev => {
       const n = new Set(prev)
@@ -1318,11 +1341,21 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <h3 className="text-sm font-semibold text-gray-700 mb-3 mt-4">Nach Quelle</h3>
               <div className="flex flex-wrap gap-3">
                 {Object.entries(dbStats.bySource).map(([src, cnt]) => (
-                  <button key={src} onClick={() => setSourceFilter(sourceFilter === src ? 'alle' : src)}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${sourceFilter === src ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-indigo-300'}`}>
-                    {src === 'picsum' ? '📷' : src === 'unsplash' ? '🌄' : src === 'pexels' ? '📸' : '🖼️'}
-                    {src} <span className="font-bold">{cnt.toLocaleString()}</span>
-                  </button>
+                  <div key={src} className="flex items-center gap-1">
+                    <button onClick={() => setSourceFilter(sourceFilter === src ? 'alle' : src)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${sourceFilter === src ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-indigo-300'}`}>
+                      {src === 'picsum' ? '📷' : src === 'unsplash' ? '🌄' : src === 'pexels' ? '📸' : '🖼️'}
+                      {src} <span className="font-bold">{cnt.toLocaleString()}</span>
+                    </button>
+                    <button
+                      onClick={() => handleDeleteBySource(src)}
+                      disabled={sourceDeleting}
+                      title={`Alle ${cnt.toLocaleString()} ${src}-Tiles löschen`}
+                      className="flex items-center justify-center w-6 h-6 rounded-full bg-red-100 hover:bg-red-200 text-red-600 disabled:opacity-40 transition-colors"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>

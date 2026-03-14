@@ -1471,6 +1471,18 @@ export const appRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => db.deleteMosaicImage(input.id)),
 
+  // Admin: Alle Tiles einer Quelle löschen
+  deleteBySource: publicProcedure
+    .input(z.object({ source: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      const pool = db.getPool();
+      const res = await pool.query(
+        `DELETE FROM mosaic_images WHERE source_provider = $1`,
+        [input.source]
+      );
+      return { deleted: res.rowCount ?? 0 };
+    }),
+
   // Admin: Get color distribution
   getColorDistribution: publicProcedure.query(async () => {
     const pool = db.getPool();
