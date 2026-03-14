@@ -2967,7 +2967,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         {testAnalysis && (
           <div className="space-y-4">
             {/* Feature Vector */}
-            {testAnalysis.featureVector && (
+            {testAnalysis.featureVector && (<>
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
                 <h4 className="text-sm font-bold text-blue-800 mb-3">🔬 Bild-Analyse (Feature-Vektor)</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
@@ -3046,7 +3046,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                   </div>
                 </div>
               )}
-            </div>
+            </>
             )}
             {/* LAB Gap Analysis */}
             {(testAnalysis.gapZones as unknown[])?.length > 0 && (
