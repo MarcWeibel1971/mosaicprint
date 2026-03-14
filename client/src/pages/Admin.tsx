@@ -2451,10 +2451,17 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         <div className="flex flex-wrap gap-2 mb-4">
           <span className="text-xs text-gray-400 self-center shrink-0">Beispiele:</span>
           {[
-            // Portraits – verschiedene Hauttöne & Beleuchtung
-            { label: '👩 Portrait hell', url: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400', cat: 'portrait' },
-            { label: '👨🏿 Portrait dunkel', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400', cat: 'portrait' },
-            { label: '👶 Kind', url: 'https://images.unsplash.com/photo-1555252333-9f8e92e65df9?w=400', cat: 'portrait' },
+            // Portraits – differenziert nach Hautton, Haarfarbe, Brille, Alter, Licht
+            { label: '👩🏻 Haut hell / blond', url: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400', cat: 'portrait' },
+            { label: '👨🏾 Haut mittel / braun', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400', cat: 'portrait' },
+            { label: '👨🏿 Haut dunkel', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400', cat: 'portrait' },
+            { label: '👩🏼 Haut oliv / dunkles Haar', url: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400', cat: 'portrait' },
+            { label: '👨🏻 Brille / graues Haar', url: 'https://images.unsplash.com/photo-1552058544-f2b08422138a?w=400', cat: 'portrait' },
+            { label: '👩🏽 Rotes Haar', url: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400', cat: 'portrait' },
+            { label: '👶 Kind / Baby', url: 'https://images.unsplash.com/photo-1555252333-9f8e92e65df9?w=400', cat: 'portrait' },
+            { label: '👴 Ältere Person', url: 'https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?w=400', cat: 'portrait' },
+            { label: '👩 Gegenlicht / Silhouette', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400', cat: 'portrait' },
+            { label: '👨🏻 Gruppe / mehrere Personen', url: 'https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=400', cat: 'portrait' },
             // Natur & Landschaft
             { label: '🌅 Sonnenuntergang', url: 'https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?w=400', cat: 'natur' },
             { label: '🌊 Ozean', url: 'https://images.unsplash.com/photo-1505118380757-91f5f5632de0?w=400', cat: 'natur' },
