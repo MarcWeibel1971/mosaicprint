@@ -3316,7 +3316,9 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         featureVector = result.featureVector
         if (labZones.length === 0) imageError = 'Canvas konnte Bild nicht lesen (CORS?)'
       } catch (e) {
-        imageError = String(e)
+        const err = e as Error
+        imageError = `${err?.name ?? 'Error'}: ${err?.message ?? String(e)} | stack: ${err?.stack?.split('\n').slice(0,3).join(' | ') ?? 'n/a'}`
+        console.error('[Admin] computeLabZonesFromImage failed:', e)
         featureVector = { sceneType: 'unknown', textureLevel: 'medium', edgeDensity: 0, brightnessRange: 'medium', avgL: 50, avgChroma: 0, dominantColors: [], facesDetected: false, skyDetected: false, waterDetected: false, tileType: 'medium' }
       }
       const body = {

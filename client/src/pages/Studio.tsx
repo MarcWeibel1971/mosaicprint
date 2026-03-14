@@ -10,34 +10,65 @@ import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } fro
 import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
 
 
-// MediaPipe FaceLandmarker - loaded lazily to avoid blocking initial render
-type FaceLandmarkerResult = { faceLandmarks: Array<Array<{x: number; y: number; z: number}>> };
-type FaceLandmarkerInstance = { detect: (image: HTMLCanvasElement) => FaceLandmarkerResult };
-let _faceLandmarker: FaceLandmarkerInstance | null = null;
-let _faceLandmarkerLoading = false;
-async function getFaceLandmarker(): Promise<FaceLandmarkerInstance | null> {
-  if (_faceLandmarker) return _faceLandmarker;
-  if (_faceLandmarkerLoading) return null;
-  _faceLandmarkerLoading = true;
+// Canvas-based face/skin detection (replaces MediaPipe to avoid WASM issues)
+// Detects skin-tone pixels using LAB color space heuristics and returns bounding boxes
+function detectFaceRegionsCanvas(img: HTMLImageElement): Array<{x: number; y: number; w: number; h: number}> {
   try {
-    const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision');
-    // Use local WASM files (copied to public/mediapipe-wasm/) to avoid CDN version mismatch
-    const wasmPath = '/mediapipe-wasm';
-    const vision = await FilesetResolver.forVisionTasks(wasmPath);
-    _faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-        delegate: 'CPU', // Use CPU to avoid WebGL context issues on some servers
-      },
-      runningMode: 'IMAGE',
-      numFaces: 3,
-    });
-    return _faceLandmarker;
-  } catch (e) {
-    console.warn('[MediaPipe] FaceLandmarker load failed:', e);
-    _faceLandmarkerLoading = false; // Reset so retry is possible
-    return null;
-  }
+    const SIZE = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = SIZE; canvas.height = SIZE;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0, SIZE, SIZE);
+    const { data } = ctx.getImageData(0, 0, SIZE, SIZE);
+    const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92; };
+    const rgbToLab = (r: number, g: number, b: number) => {
+      const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
+      const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
+      const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
+      const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
+      const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116;
+      return { L: 116*f(y) - 16, a: 500*(f(x)-f(y)), b: 200*(f(y)-f(z)) };
+    };
+    // Build skin-pixel mask: warm (a>3, b>5), medium brightness (L 30-85), low-medium chroma
+    const skinMask = new Uint8Array(SIZE * SIZE);
+    let skinCount = 0;
+    for (let i = 0; i < SIZE * SIZE; i++) {
+      const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+      const lab = rgbToLab(r, g, b);
+      const chroma = Math.sqrt(lab.a*lab.a + lab.b*lab.b);
+      if (lab.a > 2 && lab.b > 4 && lab.L > 28 && lab.L < 88 && chroma < 50) {
+        skinMask[i] = 1; skinCount++;
+      }
+    }
+    if (skinCount / (SIZE * SIZE) < 0.08) return []; // not enough skin pixels
+    // Find connected skin regions using simple flood-fill bounding boxes
+    const visited = new Uint8Array(SIZE * SIZE);
+    const regions: Array<{x: number; y: number; w: number; h: number}> = [];
+    for (let i = 0; i < SIZE * SIZE; i++) {
+      if (!skinMask[i] || visited[i]) continue;
+      // BFS to find connected region
+      const queue = [i]; visited[i] = 1;
+      let minX = SIZE, minY = SIZE, maxX = 0, maxY = 0, count = 0;
+      while (queue.length > 0) {
+        const idx = queue.pop()!;
+        const px = idx % SIZE, py = Math.floor(idx / SIZE);
+        if (px < minX) minX = px; if (px > maxX) maxX = px;
+        if (py < minY) minY = py; if (py > maxY) maxY = py;
+        count++;
+        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          const nx = px+dx, ny = py+dy;
+          if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+          const ni = ny*SIZE+nx;
+          if (skinMask[ni] && !visited[ni]) { visited[ni] = 1; queue.push(ni); }
+        }
+      }
+      if (count > 50) { // minimum region size
+        regions.push({ x: minX/SIZE, y: minY/SIZE, w: (maxX-minX)/SIZE, h: (maxY-minY)/SIZE });
+      }
+    }
+    // Merge overlapping regions
+    return regions.slice(0, 5); // max 5 face regions
+  } catch { return []; }
 }
 
 // Face subregion types for per-region matching weights
@@ -45,18 +76,7 @@ type FaceSubRegion = 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null;
 
 // MediaPipe Face Mesh landmark index groups (subset of 468 landmarks)
 // Reference: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
-const FACE_LANDMARK_GROUPS = {
-  // Left eye contour: 33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246
-  leftEye:    [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
-  // Right eye contour: 362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398
-  rightEye:   [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398],
-  // Lips: 61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146
-  mouth:      [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146],
-  // Nose tip and bridge: 1, 2, 5, 4, 195, 197, 6, 168, 8, 9, 151
-  nose:       [1, 2, 5, 4, 195, 197, 6, 168, 8, 9, 151, 48, 278, 115, 344],
-  // Eyebrows: 70, 63, 105, 66, 107, 336, 296, 334, 293, 300
-  eyebrow:    [70, 63, 105, 66, 107, 336, 296, 334, 293, 300],
-};
+// FACE_LANDMARK_GROUPS removed - using Canvas-based skin detection instead
 // -- Picsum fallback pool ------------------------------------------------------
 const PICSUM_IDS: number[] = (() => {
   // IDs that return 404 on picsum.photos (verified via API)
@@ -1546,109 +1566,34 @@ export default function Studio() {
       // -- Step 3b: Face Detection (MediaPipe FaceLandmarker) --------------------------
     }
     // Creates a subRegionMask with per-cell face subregion labels:
-    // 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null
-    // Each subregion gets different matching weights for optimal quality.
-    setProgressMsg("Gesichtserkennung (MediaPipe)...");
+    // 'cheek' (face region) | null
+    // Canvas-based skin-tone detection (no external dependencies)
+    setProgressMsg("Gesichtserkennung...");
     setProgress(48);
     const faceMask: boolean[] = new Array(TOTAL_TILES).fill(false);
     const subRegionMask: FaceSubRegion[] = new Array(TOTAL_TILES).fill(null);
     let _debugFacesDetected = 0;
     try {
-      const landmarker = await getFaceLandmarker();
-      if (landmarker) {
-        const faceCanvas = document.createElement('canvas');
-        // Use 640px for MediaPipe (optimal resolution for face detection)
-        const mpScale = Math.min(1, 640 / Math.max(targetImg.naturalWidth, targetImg.naturalHeight));
-        faceCanvas.width = Math.round(targetImg.naturalWidth * mpScale);
-        faceCanvas.height = Math.round(targetImg.naturalHeight * mpScale);
-        const fCtx = faceCanvas.getContext('2d')!;
-        fCtx.drawImage(targetImg, 0, 0, faceCanvas.width, faceCanvas.height);
-        const result = landmarker.detect(faceCanvas);
-        _debugFacesDetected = result.faceLandmarks?.length ?? 0;
-        console.log(`[MediaPipe] Detected ${_debugFacesDetected} face(s) with ${result.faceLandmarks?.[0]?.length ?? 0} landmarks`);
-
-        for (const landmarks of (result.faceLandmarks ?? [])) {
-          // Helper: get bounding box of a set of landmark indices
-          const getBBox = (indices: number[]) => {
-            let minX = 1, minY = 1, maxX = 0, maxY = 0;
-            for (const idx of indices) {
-              const lm = landmarks[idx];
-              if (!lm) continue;
-              if (lm.x < minX) minX = lm.x; if (lm.x > maxX) maxX = lm.x;
-              if (lm.y < minY) minY = lm.y; if (lm.y > maxY) maxY = lm.y;
-            }
-            return { minX, minY, maxX, maxY };
-          };
-          // Helper: mark cells in a bounding box with a subregion label
-          const markCells = (bbox: {minX:number;minY:number;maxX:number;maxY:number}, region: FaceSubRegion, expandPx = 0.02) => {
-            const c0 = Math.max(0, Math.floor((bbox.minX - expandPx) * COLS));
-            const c1 = Math.min(COLS - 1, Math.ceil((bbox.maxX + expandPx) * COLS));
-            const r0 = Math.max(0, Math.floor((bbox.minY - expandPx) * ROWS));
-            const r1 = Math.min(ROWS - 1, Math.ceil((bbox.maxY + expandPx) * ROWS));
-            for (let r = r0; r <= r1; r++) {
-              for (let c = c0; c <= c1; c++) {
-                const ci = r * COLS + c;
-                faceMask[ci] = true;
-                // Higher-priority regions override lower-priority ones
-                const priority: Record<string, number> = { eye: 5, mouth: 4, nose: 3, eyebrow: 3, cheek: 2, forehead: 1 };
-                const existing = subRegionMask[ci];
-                if (!existing || (priority[region!] ?? 0) > (priority[existing] ?? 0)) {
-                  subRegionMask[ci] = region;
-                }
-              }
-            }
-          };
-
-          // Mark specific subregions
-          markCells(getBBox(FACE_LANDMARK_GROUPS.leftEye), 'eye', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.rightEye), 'eye', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.eyebrow), 'eye', 0.01); // eyebrows treated as eye region
-          markCells(getBBox(FACE_LANDMARK_GROUPS.mouth), 'mouth', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.nose), 'nose', 0.01);
-
-          // Remaining face area (cheeks, forehead) = full face bbox minus specific regions
-          const allFaceLandmarks = Array.from({ length: Math.min(landmarks.length, 468) }, (_, i) => i);
-          const fullFaceBbox = getBBox(allFaceLandmarks);
-          // Mark entire face first as 'cheek', then specific regions will override
-          markCells(fullFaceBbox, 'cheek', 0.01);
-          // Re-mark specific regions to ensure priority (cheek may have overwritten)
-          markCells(getBBox(FACE_LANDMARK_GROUPS.leftEye), 'eye', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.rightEye), 'eye', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.eyebrow), 'eye', 0.01);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.mouth), 'mouth', 0.015);
-          markCells(getBBox(FACE_LANDMARK_GROUPS.nose), 'nose', 0.01);
-
-          // Forehead: top 25% of face bbox
-          const foreheadBbox = { minX: fullFaceBbox.minX, minY: fullFaceBbox.minY, maxX: fullFaceBbox.maxX, maxY: fullFaceBbox.minY + (fullFaceBbox.maxY - fullFaceBbox.minY) * 0.25 };
-          markCells(foreheadBbox, 'forehead', 0.01);
-        }
-        const faceCount = faceMask.filter(Boolean).length;
-        console.log(`[MediaPipe] Marked ${faceCount} cells with subregions: eye=${subRegionMask.filter(r=>r==='eye').length} mouth=${subRegionMask.filter(r=>r==='mouth').length} nose=${subRegionMask.filter(r=>r==='nose').length} cheek=${subRegionMask.filter(r=>r==='cheek').length} forehead=${subRegionMask.filter(r=>r==='forehead').length}`);
-      } else {
-        // Fallback: legacy FaceDetector API
-        if ('FaceDetector' in window) {
-          const faceDetector = new (window as any).FaceDetector({ fastMode: false, maxDetectedFaces: 10 });
-          const faceCanvas2 = document.createElement('canvas');
-          faceCanvas2.width = targetImg.naturalWidth; faceCanvas2.height = targetImg.naturalHeight;
-          const fCtx2 = faceCanvas2.getContext('2d')!;
-          fCtx2.drawImage(targetImg, 0, 0);
-          const faces = await faceDetector.detect(faceCanvas2);
-          _debugFacesDetected = faces.length;
-          for (const face of faces) {
-            const { x, y, width, height } = face.boundingBox;
-            const ex = x - width * 0.1, ey = y - height * 0.1;
-            const ew = width * 1.2, eh = height * 1.2;
-            const c0 = Math.max(0, Math.floor(ex / targetImg.naturalWidth * COLS));
-            const c1 = Math.min(COLS - 1, Math.ceil((ex + ew) / targetImg.naturalWidth * COLS));
-            const r0 = Math.max(0, Math.floor(ey / targetImg.naturalHeight * ROWS));
-            const r1 = Math.min(ROWS - 1, Math.ceil((ey + eh) / targetImg.naturalHeight * ROWS));
-            for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-              faceMask[r * COLS + c] = true;
-              subRegionMask[r * COLS + c] = 'cheek'; // generic face region
-            }
+      const faceRegions = detectFaceRegionsCanvas(targetImg);
+      _debugFacesDetected = faceRegions.length;
+      console.log(`[FaceDetect] Detected ${faceRegions.length} skin region(s) via Canvas heuristic`);
+      for (const region of faceRegions) {
+        // Expand region slightly for better coverage
+        const expand = 0.02;
+        const c0 = Math.max(0, Math.floor((region.x - expand) * COLS));
+        const c1 = Math.min(COLS - 1, Math.ceil((region.x + region.w + expand) * COLS));
+        const r0 = Math.max(0, Math.floor((region.y - expand) * ROWS));
+        const r1 = Math.min(ROWS - 1, Math.ceil((region.y + region.h + expand) * ROWS));
+        for (let r = r0; r <= r1; r++) {
+          for (let c = c0; c <= c1; c++) {
+            const ci = r * COLS + c;
+            faceMask[ci] = true;
+            subRegionMask[ci] = 'cheek'; // treat all face regions as cheek for matching
           }
         }
       }
+      const faceCount = faceMask.filter(Boolean).length;
+      console.log(`[FaceDetect] Marked ${faceCount} cells as face regions`);
     } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }
 
     // -- Progressive Rendering: Pass 1 (LAB-color preview) ---------------------
