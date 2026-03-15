@@ -298,6 +298,14 @@ export default function Admin() {
   const [recsJobs, setRecsJobs] = useState<Record<string, SmartImportJob>>({})
   const [recsRunning, setRecsRunning] = useState(false)
   const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
+  // Last image analysis result (from Quality tab) - persisted via localStorage for cross-tab use
+  interface LastAnalysis { keywords: Array<{keyword: string; reason: string; priority: string}>; sceneType: string; timestamp: string }
+  const [lastAnalysis, setLastAnalysis] = useState<LastAnalysis | null>(() => {
+    try { const s = localStorage.getItem('mosaicprint_last_analysis'); return s ? JSON.parse(s) : null } catch { return null }
+  })
+  const [analysisImportJobMain, setAnalysisImportJobMain] = useState<SmartImportJob | null>(null)
+  const [analysisImportRunningMain, setAnalysisImportRunningMain] = useState(false)
+  const [analysisImportSourceMain, setAnalysisImportSourceMain] = useState<'pexels' | 'unsplash' | 'pixabay'>('pexels')
   const [recsExpanded, setRecsExpanded] = useState(false)
 
   const fetchCronStatus = useCallback(async () => {
@@ -344,6 +352,43 @@ export default function Admin() {
     }
   }, [])
 
+  // Start analysis-based import from Import tab (uses lastAnalysis from localStorage)
+  const startAnalysisImportMain = useCallback(async () => {
+    if (!lastAnalysis || analysisImportRunningMain) return
+    const keywords = lastAnalysis.keywords
+    if (!keywords || keywords.length === 0) return
+    setAnalysisImportRunningMain(true)
+    setAnalysisImportJobMain({ running: true, log: [`🚀 Starte Bild-Import: ${keywords.length} Keywords via ${analysisImportSourceMain}...`], imported: 0, total: keywords.length * 30 })
+    try {
+      for (const kw of keywords) {
+        await fetch('/api/trpc/targetedImport', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sourceId: analysisImportSourceMain, keyword: kw.keyword, count: 30, subject: 'analysis' }),
+        })
+      }
+      // Poll status
+      let done = false
+      let attempts = 0
+      while (!done && attempts < 120) {
+        await new Promise(r => setTimeout(r, 2000))
+        attempts++
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: analysisImportSourceMain, isAnalysis: true }))
+          const res = await fetch(`/api/trpc/getImportStatus?input=${params}`)
+          const data = await res.json()
+          const job = data.result?.data ?? data
+          setAnalysisImportJobMain({ running: job.running, log: job.log ?? [], imported: job.imported ?? 0, total: job.total ?? 0, error: job.error, finishedAt: job.finishedAt })
+          if (!job.running) { done = true; fetchStats() }
+        } catch { /* ignore */ }
+      }
+    } catch (e) {
+      setAnalysisImportJobMain(prev => prev ? { ...prev, running: false, error: String(e) } : null)
+    } finally {
+      setAnalysisImportRunningMain(false)
+    }
+  }, [lastAnalysis, analysisImportSourceMain, fetchStats])
+
   const startRecsImport = async () => {
     if (recsRunning) return
     const queriesToRun = recommendations.filter(r => selectedRecs.has(r.query))
@@ -389,6 +434,15 @@ export default function Admin() {
   useEffect(() => { fetchStats() }, [fetchStats])
   useEffect(() => { fetchCronStatus() }, [fetchCronStatus])
   useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
+  // Sync lastAnalysis when switching to import tab (in case Quality tab updated it)
+  useEffect(() => {
+    if (activeTab === 'import') {
+      try {
+        const s = localStorage.getItem('mosaicprint_last_analysis')
+        if (s) setLastAnalysis(JSON.parse(s))
+      } catch { /* ignore */ }
+    }
+  }, [activeTab])
 
   // Poll import job status
   useEffect(() => {
@@ -667,6 +721,81 @@ export default function Admin() {
         {/* ── TAB: Import ── */}
         {activeTab === 'import' && (
           <div className="space-y-8">
+            {/* ── Bild-optimierter Import (wenn Analyse vorhanden) ── */}
+            {lastAnalysis && (
+              <div className="bg-gradient-to-r from-violet-50 to-indigo-50 rounded-2xl p-6 border-2 border-violet-300">
+                <div className="flex items-start justify-between mb-1">
+                  <h2 className="font-bold text-violet-900 flex items-center gap-2">
+                    <span className="text-xl">🔍</span>
+                    Bild-optimierter Import
+                    <span className="text-xs font-normal bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">Empfohlen</span>
+                  </h2>
+                  <button
+                    onClick={() => { localStorage.removeItem('mosaicprint_last_analysis'); setLastAnalysis(null) }}
+                    className="text-xs text-gray-400 hover:text-gray-600"
+                  >✕ Verwerfen</button>
+                </div>
+                <p className="text-sm text-violet-700 mb-1">
+                  Basierend auf der Bildanalyse vom {new Date(lastAnalysis.timestamp).toLocaleString('de-CH', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} Uhr
+                  <span className="ml-2 px-2 py-0.5 bg-violet-100 text-violet-600 rounded-full text-xs font-medium capitalize">{lastAnalysis.sceneType?.replace(/_/g, ' ')}</span>
+                </p>
+                <p className="text-xs text-violet-600 mb-3">Importiert Bilder die speziell für die fehlenden Farbbereiche deines Bildes geeignet sind.</p>
+                {/* Keywords */}
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {lastAnalysis.keywords.map((kw, i) => (
+                    <span key={i} className={`px-3 py-1 rounded-full text-xs font-medium border ${
+                      kw.priority === 'high' ? 'bg-red-50 border-red-200 text-red-700' :
+                      kw.priority === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                      'bg-violet-50 border-violet-200 text-violet-700'
+                    }`}>
+                      {kw.keyword}
+                      {kw.reason && <span className="ml-1 opacity-60">– {kw.reason}</span>}
+                    </span>
+                  ))}
+                </div>
+                {/* Controls */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <select
+                    value={analysisImportSourceMain}
+                    onChange={e => setAnalysisImportSourceMain(e.target.value as 'pexels' | 'unsplash' | 'pixabay')}
+                    className="text-sm border border-violet-200 rounded-lg px-3 py-2 bg-white text-violet-700"
+                    disabled={analysisImportRunningMain}
+                  >
+                    <option value="pexels">Pexels</option>
+                    <option value="unsplash">Unsplash</option>
+                    <option value="pixabay">Pixabay</option>
+                  </select>
+                  <button
+                    onClick={startAnalysisImportMain}
+                    disabled={analysisImportRunningMain}
+                    className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white font-semibold px-5 py-2 rounded-xl transition-colors text-sm"
+                  >
+                    {analysisImportRunningMain ? <><span className="animate-spin inline-block">⏳</span> Import läuft...</> : <><span>🚀</span> {lastAnalysis.keywords.length * 30} Bilder importieren</>}
+                  </button>
+                </div>
+                {/* Progress */}
+                {analysisImportJobMain && (
+                  <div className="mt-3 space-y-2">
+                    {(analysisImportJobMain.total ?? 0) > 0 && (
+                      <div className="w-full bg-violet-100 rounded-full h-2">
+                        <div className="bg-violet-500 h-2 rounded-full transition-all" style={{ width: `${Math.min(100, ((analysisImportJobMain.imported ?? 0) / (analysisImportJobMain.total ?? 1)) * 100)}%` }} />
+                      </div>
+                    )}
+                    <div className="text-xs text-violet-700 font-medium">
+                      {analysisImportJobMain.imported ?? 0} / {analysisImportJobMain.total ?? 0} Bilder importiert
+                      {analysisImportJobMain.finishedAt && <span className="ml-2 text-green-600">✅ Fertig</span>}
+                      {analysisImportJobMain.error && <span className="ml-2 text-red-600">❌ {analysisImportJobMain.error}</span>}
+                    </div>
+                    {analysisImportJobMain.log.length > 0 && (
+                      <div className="bg-white rounded-lg p-2 max-h-20 overflow-y-auto text-xs text-gray-500 font-mono">
+                        {analysisImportJobMain.log.slice(-4).map((l, i) => <div key={i}>{l}</div>)}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* API Key Status */}
             <div className="bg-white rounded-2xl p-6 border border-gray-200">
               <h2 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
@@ -912,8 +1041,8 @@ export default function Admin() {
               {/* Kategorie-Auswahl für gezielten Import */}
               <div className="mb-4 p-4 bg-amber-50 rounded-xl border border-amber-200">
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-semibold text-amber-900">🎯 Kategorie-Import (optional)</span>
-                  <span className="text-xs text-amber-600">Wähle eine Bildkategorie um gezielt Keywords für diese Kategorie zu importieren</span>
+                  <span className="text-sm font-semibold text-amber-900">🎯 Manueller Kategorie-Import</span>
+                  <span className="text-xs text-amber-600">Für spezifische Kategorien – oder nutze den Bild-optimierten Import oben für automatische Empfehlungen</span>
                 </div>
                 <select
                   value={importCategory}
@@ -3423,8 +3552,11 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 
         // ── 7. Heuristic scene detection ──
         // Skin tones: warm, medium L, low-medium chroma
-        const skinPixels = allLab.filter(p => p.a > 3 && p.b > 5 && p.L > 30 && p.L < 85 && Math.sqrt(p.a*p.a+p.b*p.b) < 45).length
-        const facesDetected = skinPixels / totalPx > 0.12
+        // Stricter filter: require both reddish (a>5) AND warm (b>8) to avoid warm rocks/sand
+        const skinPixels = allLab.filter(p => p.a > 5 && p.b > 8 && p.L > 35 && p.L < 80 && Math.sqrt(p.a*p.a+p.b*p.b) < 40).length
+        // Portrait requires significant skin area (>20%) AND no dominant sky/water context
+        const skinRatio = skinPixels / totalPx
+        const facesDetected = skinRatio > 0.20
 
         // Sky: top 25% of image, bright + blue/neutral
         const topQuarter = allLab.slice(0, Math.floor(totalPx * 0.25))
@@ -3436,18 +3568,26 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         const waterPixels = midRegion.filter(p => p.a < -2 && p.b < 0 && p.L > 25 && p.L < 75).length
         const waterDetected = waterPixels / midRegion.length > 0.2
 
+        // Green nature: significant green pixels
+        const greenPixels = allLab.filter(p => p.a < -8 && p.L > 25).length
+        const greenDetected = greenPixels / totalPx > 0.25
+
         // ── 8. Scene type ──
+        // Portrait: needs high skin ratio AND no dominant sky/water/green (to avoid false positives with warm nature scenes)
         let sceneType = 'unknown'
-        if (facesDetected && skinPixels / totalPx > 0.2) sceneType = 'portrait'
+        if (facesDetected && !skyDetected && !waterDetected && !greenDetected && skinRatio > 0.20) sceneType = 'portrait'
         else if (skyDetected && waterDetected) sceneType = 'seascape'
         else if (skyDetected && avgA < -5) sceneType = 'landscape'
+        else if (skyDetected && avgB > 5) sceneType = 'landscape' // warm sky (sunset)
         else if (avgL < 35 && avgChroma < 20) sceneType = 'cityscape_night'
         else if (edgeDensity > 0.35 && !facesDetected) sceneType = 'architecture'
         else if (avgA < -10 && avgB > 5) sceneType = 'nature_green'
+        else if (greenDetected) sceneType = 'nature_green'
         else if (avgA > 8 && avgB > 10 && avgL > 40) sceneType = 'nature_warm'
         else if (avgL > 72 && avgChroma < 12) sceneType = 'nature_snow'
         else if (avgChroma > 45) sceneType = 'abstract_colorful'
-        else if (facesDetected) sceneType = 'portrait'
+        // Only use facesDetected as last resort if really no other scene fits AND skin ratio is high
+        else if (facesDetected && skinRatio > 0.25) sceneType = 'portrait'
 
         resolve({
           labZones,
@@ -3534,16 +3674,24 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         ...(serverResult?.keywordSuggestions ?? []),
       ].filter((k, i, arr) => arr.findIndex(x => x.keyword === k.keyword) === i).slice(0, 15)
 
-      setTestAnalysis({
+      const analysisResult = {
         ...serverResult,
         featureVector,
-        // Only show imageError if fal.ai failed; suppress Canvas/LAB errors (non-critical when fal.ai succeeded)
         imageError: imageError || (falResult?.ok === false ? serverResult?.imageError : undefined),
         falDescription: falResult?.description,
         falSceneType: falResult?.sceneType,
         falAttributes: falResult?.attributes,
         keywordSuggestions: mergedKeywords,
-      })
+      }
+      setTestAnalysis(analysisResult)
+      // Persist analysis to localStorage so Import-Tab can use it
+      try {
+        localStorage.setItem('mosaicprint_last_analysis', JSON.stringify({
+          keywords: mergedKeywords,
+          sceneType: falResult?.sceneType ?? featureVector.sceneType,
+          timestamp: new Date().toISOString(),
+        }))
+      } catch { /* ignore storage errors */ }
       setDetectedCategory(falResult?.sceneType ?? (featureVector.sceneType !== 'unknown' ? featureVector.sceneType : detectCategory(labZones)))
     } catch (e) {
       onMessage({ text: `Analyse-Fehler: ${String(e)}`, type: 'error' })
@@ -3914,7 +4062,10 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
             {(testAnalysis.keywordSuggestions as unknown[])?.length > 0 && (
               <div className="bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-bold text-violet-800">🔍 Smart Import aus Analyse</h4>
+                  <div>
+                    <h4 className="text-sm font-bold text-violet-800">🔍 Smart Import aus Analyse</h4>
+                    <p className="text-xs text-violet-500 mt-0.5">Analyse wurde gespeichert – auch im <strong>Import-Tab</strong> verfügbar</p>
+                  </div>
                   <select
                     value={analysisImportSource}
                     onChange={e => setAnalysisImportSource(e.target.value as 'pexels' | 'unsplash' | 'pixabay')}
