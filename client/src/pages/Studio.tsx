@@ -633,7 +633,70 @@ export default function Studio() {
             return merged;
           };
 
+          // White-Hair detection: analyze top 30% of image for bright pixels
+          // Also check overall brightness (>40% bright pixels = bright background/skin)
+          let isWhiteHairPortrait = false;
           if (imageType === 'portrait') {
+            try {
+              const whCanvas = document.createElement('canvas');
+              whCanvas.width = 64; whCanvas.height = 64;
+              const whCtx = whCanvas.getContext('2d')!;
+              whCtx.drawImage(img, 0, 0, 64, 64);
+              const whData = whCtx.getImageData(0, 0, 64, 64).data;
+              let hairBright = 0, hairTotal = 0, allBright = 0, allTotal = 0;
+              let grayPixels = 0; // gray/silver pixels (desaturated mid-bright)
+              for (let pi = 0; pi < whData.length; pi += 4) {
+                const row = Math.floor((pi / 4) / 64);
+                const r = whData[pi], g = whData[pi+1], b = whData[pi+2];
+                const l = 0.299*r + 0.587*g + 0.114*b;
+                const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+                const sat = maxC === 0 ? 0 : (maxC - minC) / maxC;
+                allTotal++;
+                if (l > 160) allBright++; // bright pixel (lowered from 180)
+                // Gray/silver: mid-bright + low saturation = gray hair
+                if (l > 120 && l < 220 && sat < 0.20) grayPixels++;
+                if (row < 20) { // top 30% of image (was 25%)
+                  hairTotal++;
+                  if (l > 150) hairBright++; // bright in hair zone (lowered from 180)
+                }
+              }
+              const hairBrightRatio = hairTotal > 0 ? hairBright / hairTotal : 0;
+              const allBrightRatio = allTotal > 0 ? allBright / allTotal : 0;
+              const grayRatio = allTotal > 0 ? grayPixels / allTotal : 0;
+              // White/gray hair: top 30% mostly bright OR significant gray pixels overall
+              isWhiteHairPortrait = (hairBrightRatio > 0.28 && allBrightRatio > 0.35) || grayRatio > 0.25;
+              console.log('[Studio] White-hair check: hairBright=' + hairBrightRatio.toFixed(2) + ' allBright=' + allBrightRatio.toFixed(2) + ' gray=' + grayRatio.toFixed(2) + ' → isWhiteHair=' + isWhiteHairPortrait);
+            } catch { /* ignore */ }
+          }
+
+          if (isWhiteHairPortrait) {
+            // White/gray hair + light skin: special profile to prevent over-correction
+            const whiteHairPreset = {
+              baseTiles: 100,           // fewer cols: larger tiles = less noise on bright skin
+              tilePx: 9,               // larger tiles: smoother appearance for light areas
+              maxReuse: 6,
+              rotation: false,
+              neighborRadius: 5,
+              neighborPenalty: 160,     // lower: less aggressive anti-repetition for bright tiles
+              contrastBoost: 1.45,      // higher: compensate for low-contrast bright areas
+              histogramBlend: 0.07,     // low: prevent histogram from darkening whites
+              baseOverlay: 0.28,        // higher: strengthen mosaic structure
+              edgeBoost: 0.15,          // subtle edge enhancement
+              overlayMode: 'softlight',
+              labWeight: 0.30,          // color matching for subtle tones
+              brightnessWeight: 0.70,   // high: prioritize brightness matching for bright skin/hair
+              textureWeight: 0.05,
+              edgeWeight: 0.05,
+              saturationWeight: 0.20,   // low: allow desaturated tiles for white/gray areas
+              lBlend: 0.35,             // lower: less luminance shifting
+              abBlend: 0.12,            // much lower: preserve original pastel/neutral tones
+              portraitMode: true,
+            };
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(whiteHairPreset)));
+            localStorage.removeItem('mosaicprint_selected_theme');
+            setAutoPresetApplied('Weiße Haare');
+            console.log('[Studio] Auto-applied White Hair preset');
+          } else if (imageType === 'portrait') {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
               tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
