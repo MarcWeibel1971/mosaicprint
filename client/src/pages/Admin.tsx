@@ -395,17 +395,18 @@ export default function Admin() {
     if (!lastAnalysis || analysisImportRunningMain) return
     const keywords = lastAnalysis.keywords
     if (!keywords || keywords.length === 0) return
+    const kwStrings = keywords.map((kw: { keyword: string }) => kw.keyword)
+    const totalEstimate = kwStrings.length * 30
     setAnalysisImportRunningMain(true)
-    setAnalysisImportJobMain({ running: true, log: [`🚀 Starte Bild-Import: ${keywords.length} Keywords via ${analysisImportSourceMain}...`], imported: 0, total: keywords.length * 30 })
+    setAnalysisImportJobMain({ running: true, log: [`🚀 Starte Bild-Import: ${kwStrings.length} Keywords via ${analysisImportSourceMain}...`], imported: 0, total: totalEstimate })
     try {
-      for (const kw of keywords) {
-        await fetch('/api/trpc/targetedImport', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourceId: analysisImportSourceMain, keyword: kw.keyword, count: 30, subject: 'analysis' }),
-        })
-      }
-      // Poll status
+      // Use smartImport which supports keywords array and tracks status properly
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: analysisImportSourceMain, keywords: kwStrings, count: totalEstimate, targetPerBucket: 500, jobLabel: 'Analyse-Import' }),
+      })
+      // Poll status via getSmartImportStatus (supports isAnalysis flag)
       let done = false
       let attempts = 0
       while (!done && attempts < 120) {
@@ -413,7 +414,7 @@ export default function Admin() {
         attempts++
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: analysisImportSourceMain, isAnalysis: true }))
-          const res = await fetch(`/api/trpc/getImportStatus?input=${params}`)
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
           const data = await res.json()
           const job = data.result?.data ?? data
           setAnalysisImportJobMain({ running: job.running, log: job.log ?? [], imported: job.imported ?? 0, total: job.total ?? 0, error: job.error, finishedAt: job.finishedAt })
