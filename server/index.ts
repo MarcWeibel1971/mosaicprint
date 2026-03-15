@@ -281,12 +281,15 @@ app.get("/api/tile-urls", async (req, res) => {
     if (ids.length === 0 || ids.length > 2000) return res.status(400).json({ error: "Invalid ids" });
     const pool = db.getPool();
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id = ANY($1)`,
+      `SELECT id, tile128_url, source_url, r2_url FROM mosaic_images WHERE id = ANY($1)`,
       [ids]
     );
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
-      if (wantHiRes) {
+      if (row.r2_url) {
+        // R2 URL is permanent - always prefer it
+        urlMap[row.id] = row.r2_url;
+      } else if (wantHiRes) {
         // For print: prefer source_url (original hi-res from Unsplash/Pexels), fallback to tile128_url
         urlMap[row.id] = row.source_url || row.tile128_url || '';
       } else {
