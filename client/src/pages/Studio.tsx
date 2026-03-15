@@ -401,8 +401,6 @@ export default function Studio() {
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
-  // Viewport-culling offset: where the hi-res canvas starts relative to preview canvas origin
-  const [hiResOffset, setHiResOffset] = useState({ x: 0, y: 0, cssW: 0, cssH: 0 });
 
   // HI-RES: threshold for activating hi-res canvas
     // 3-tier resolution system for crisp detail at all zoom levels:
@@ -420,18 +418,9 @@ export default function Studio() {
     const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // 3-tier resolution: higher zoom -> larger tiles -> crisper detail
-    // CRITICAL: Canvas pixel limit to avoid iOS Safari OOM crash
-    // iOS kills tabs at ~150MB -> max ~4096x4096 canvas (67MB at 4 bytes/px)
-    // For 90x120 grid: 128px -> 11520x15360 (too big!) -> cap to fit
-    const _maxCanvasDim = _isMobileHR ? 5120 : 8192;
-    const _cols = mosaicParamsRef.current?.cols ?? 90;
-    const _rows = mosaicParamsRef.current?.rows ?? 120;
-    const _maxTilePxForCanvas = Math.floor(Math.min(_maxCanvasDim / _cols, _maxCanvasDim / _rows));
-    const _rawHiResTileSize = _isMobileHR
+    const hiResTileSize = _isMobileHR
       ? (zoom >= 5.0 ? 400 : zoom >= 3.0 ? 256 : 128)
       : (zoom >= 3.0 ? 400 : zoom >= 1.6 ? 200 : 128);
-    // Cap tile size so total canvas stays within memory limit
-    const hiResTileSize = Math.min(_rawHiResTileSize, _maxTilePxForCanvas);
     // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
     const hiResOpacity = showHiRes && hiResReady
       ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
@@ -452,153 +441,88 @@ export default function Studio() {
 
   // Track the last rendered hi-res tile size to re-render when zoom tier changes
   const lastHiResTileSizeRef = useRef<number>(0);
-  // Track viewport position for viewport-culling hi-res
-  const lastViewportKeyRef = useRef<string>('');
-  const hiResTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // VIEWPORT-CULLING HI-RES: Same-size canvas as preview, only draw visible tiles at 128px
-  // The hi-res canvas has the same pixel dimensions as the preview canvas but uses 128px
-  // per tile instead of 7px. To stay within memory limits, we only draw the tiles that
-  // are currently visible in the viewport. On pan/zoom, we clear and redraw.
-  // This gives sharp tiles at any zoom level without memory issues.
-  const hiResImgCacheRef = useRef<Map<number, HTMLImageElement>>(new Map());
-
+  // Render hi-res canvas when zoom crosses threshold or tier changes
   useEffect(() => {
-    if (!showHiRes) return;
+    if (!showHiRes || hiResLoading) return;
     if (!assignmentRef.current.length || !validImgsRef.current.length || !mosaicParamsRef.current) return;
-
-    // Debounce: wait 80ms after pan/zoom stops before re-rendering
-    if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current);
-    hiResTimerRef.current = setTimeout(() => {
-      renderViewportHiRes();
-    }, hiResReady ? 80 : 0); // instant on first render, debounced on pan/zoom
-
-    return () => { if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current); };
-
-    async function renderViewportHiRes() {
-      const { cols, rows, tilePx, canvasW, canvasH } = mosaicParamsRef.current!;
-      const displayScale = (mosaicParamsRef.current as any)._displayScale ?? 0.5;
+    // Only re-render if tile size tier changed (avoid redundant renders)
+    if (hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
+    const renderHiRes = async () => {
+      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+      setHiResLoading(true);
+      const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
+      const HIREZ_PX = hiResTileSize; // 128px at medium zoom, 200px at high zoom
+      const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
       const hc = hiResCanvasRef.current;
-      const container = containerRef.current;
-      if (!hc || !container) return;
-
-      // Container (viewport) dimensions
-      const containerW = container.clientWidth;
-      const containerH = container.clientHeight;
-
-      // Preview canvas CSS size
-      const cssW = canvasW * displayScale;
-      const cssH = canvasH * displayScale;
-      const tileCSS = tilePx * displayScale; // CSS size of one preview tile
-
-      // Calculate visible tile range from pan/zoom
-      // The canvas transform is: translate(pan.x, pan.y) scale(zoom) with origin at center
-      // A point (cx, cy) in canvas-CSS space maps to screen:
-      //   sx = containerW/2 + (cx - cssW/2) * zoom + pan.x
-      // Inverse:
-      //   cx = (sx - containerW/2 - pan.x) / zoom + cssW/2
-      const screenToCanvasX = (sx: number) => (sx - containerW / 2 - pan.x) / zoom + cssW / 2;
-      const screenToCanvasY = (sy: number) => (sy - containerH / 2 - pan.y) / zoom + cssH / 2;
-
-      const viewLeft = screenToCanvasX(0);
-      const viewTop = screenToCanvasY(0);
-      const viewRight = screenToCanvasX(containerW);
-      const viewBottom = screenToCanvasY(containerH);
-
-      // Convert to tile grid coords (with 2-tile margin for smooth panning)
-      const col0 = Math.max(0, Math.floor(viewLeft / tileCSS) - 2);
-      const row0 = Math.max(0, Math.floor(viewTop / tileCSS) - 2);
-      const col1 = Math.min(cols - 1, Math.ceil(viewRight / tileCSS) + 2);
-      const row1 = Math.min(rows - 1, Math.ceil(viewBottom / tileCSS) + 2);
-
-      const visCols = col1 - col0 + 1;
-      const visRows = row1 - row0 + 1;
-      if (visCols <= 0 || visRows <= 0) return;
-
-      // Viewport key to avoid redundant renders
-      const vKey = `${col0},${row0},${col1},${row1}`;
-      if (vKey === lastViewportKeyRef.current && hiResReady) return;
-      lastViewportKeyRef.current = vKey;
-
-      // Hi-res tile resolution: 128px (matches R2 thumbnails)
-      const TILE_RES = 128;
-      const canvasPixW = visCols * TILE_RES;
-      const canvasPixH = visRows * TILE_RES;
-
-      // Safety: max ~16M pixels (64MB RGBA)
-      if (canvasPixW * canvasPixH > 16_000_000) return;
-
-      // Collect unique tile indices for visible area
-      const assignment = assignmentRef.current;
-      const neededIndices = new Set<number>();
-      for (let r = row0; r <= row1; r++) {
-        for (let c = col0; c <= col1; c++) {
-          const idx = assignment[r * cols + c];
-          if (idx >= 0) neededIndices.add(idx);
-        }
-      }
-
-      // Load only tiles not yet in cache (typically 0-20 new tiles per pan)
-      const cache = hiResImgCacheRef.current;
-      const toLoad = Array.from(neededIndices).filter(idx => !cache.has(idx));
-      if (toLoad.length > 0) {
-        setHiResLoading(true);
-        const BATCH = 30;
-        for (let i = 0; i < toLoad.length; i += BATCH) {
-          const batch = toLoad.slice(i, i + BATCH);
-          const imgs = await Promise.all(
-            batch.map(idx => {
-              const tileId = tileIdsRef.current[idx];
-              if (!tileId || tileId <= 0) return Promise.resolve(null);
-              return loadImageCached(`/api/tile/${tileId}?size=128`, 8000);
-            })
-          );
-          for (let j = 0; j < batch.length; j++) {
-            if (imgs[j]) cache.set(batch[j], imgs[j]!);
-          }
-        }
-      }
-
-      // Setup canvas: sized to cover only the visible tile region
-      hc.width = canvasPixW;
-      hc.height = canvasPixH;
-      // CSS size matches the visible region in preview-canvas coordinates
-      hc.style.width = `${visCols * tileCSS}px`;
-      hc.style.height = `${visRows * tileCSS}px`;
-      // Position offset: shift canvas so visible tiles align with preview
-      // The preview canvas starts at (0,0) in its own coordinate space
-      // Our hi-res canvas covers [col0..col1] x [row0..row1]
-      // Offset in CSS coords from preview canvas origin:
-      const offsetX = col0 * tileCSS;
-      const offsetY = row0 * tileCSS;
-      // Store offset for JSX positioning (triggers re-render of canvas style)
-      setHiResOffset({ x: offsetX, y: offsetY, cssW, cssH });
-
+      if (!hc) { setHiResLoading(false); return; }
+      hc.width = hiW; hc.height = hiH;
+      hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
+      hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
       const hCtx = hc.getContext('2d')!;
-      hCtx.clearRect(0, 0, canvasPixW, canvasPixH);
+      const assignment = assignmentRef.current;
+      const TOTAL = cols * rows;
 
-      // Draw visible tiles at 128px resolution
-      for (let r = row0; r <= row1; r++) {
-        for (let c = col0; c <= col1; c++) {
-          const idx = assignment[r * cols + c];
-          const img = cache.get(idx) || validImgsRef.current[idx];
-          if (img && img.complete && img.naturalWidth > 0) {
-            try {
-              hCtx.drawImage(img, (c - col0) * TILE_RES, (r - row0) * TILE_RES, TILE_RES, TILE_RES);
-            } catch {
-              hCtx.fillStyle = '#888';
-              hCtx.fillRect((c - col0) * TILE_RES, (r - row0) * TILE_RES, TILE_RES, TILE_RES);
-            }
+      // FIX A: Load only UNIQUE tile indices (deduplicate) - massive speedup
+      // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
+      const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
+      // Mobile: limit unique tiles to avoid loading too many images at once
+      const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000; // Mobile: 800 tiles (was 300)
+      const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
+
+      // PERF: Use /api/tile/:id?size=N proxy for all tiles
+      // This ensures CORS-safe loading for all sources (Unsplash, Pexels, Pixabay)
+      // The server proxy handles all external URLs without CORS issues
+      let allUrls: string[];
+      if (tileIdsRef.current.length > 0) {
+        // Use server proxy for all tiles - avoids CORS issues with external URLs
+        // The proxy serves tile128_url for size<=128, source_url for size>128
+        allUrls = tileIdsRef.current.map(id => {
+          if (id <= 0) return '';
+          return `/api/tile/${id}?size=${HIREZ_PX}`;
+        });
+      } else {
+        allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
+      }
+
+      // Map: tile index -> loaded hi-res image
+      const hiResImgMap = new Map<number, HTMLImageElement>();
+      const BATCH = isMobileDevice ? 20 : 60; // smaller batch on mobile to avoid memory pressure
+      for (let i = 0; i < uniqueIndices.length; i += (BATCH)) {
+        const batchIndices = uniqueIndices.slice(i, i + BATCH);
+        const batchImgs = await Promise.all(
+          batchIndices.map(idx => {
+            const u = allUrls[idx];
+            return u ? loadImageCached(u, 10000) : Promise.resolve(null);
+          })
+        );
+        for (let j = 0; j < batchIndices.length; j++) {
+          if (batchImgs[j]) hiResImgMap.set(batchIndices[j], batchImgs[j]!);
+        }
+        await new Promise(r => setTimeout(r, 0));
+      }
+
+      // Draw hi-res tiles using the deduplicated map
+      for (let ci = 0; ci < (TOTAL); ci++) {
+        const col = ci % cols, row = Math.floor(ci / cols);
+        const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+          } catch (e) {
+            // Broken image - fill with neutral grey placeholder
+            hCtx.fillStyle = '#888888';
+            hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
           }
         }
       }
-
-      lastHiResTileSizeRef.current = hiResTileSize;
-      if (!hiResReady) setHiResReady(true);
+      lastHiResTileSizeRef.current = HIREZ_PX;
+      setHiResReady(true);
       setHiResLoading(false);
-    }
+    };
+    renderHiRes().catch(() => setHiResLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showHiRes, hiResTileSize, zoom, pan.x, pan.y]);
+  }, [showHiRes, hiResTileSize]);
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => { setHiResReady(false); setHiResLoading(false); };
@@ -709,58 +633,7 @@ export default function Studio() {
             return merged;
           };
 
-          // Quick hair-zone analysis BEFORE preset selection
-          // Check if top 25% of image is very bright (white/gray hair)
-          let _earlyHairBrightRatio = 0;
-          let _earlyBrightRatio = 0;
-          try {
-            const hzCanvas = document.createElement('canvas');
-            hzCanvas.width = 64; hzCanvas.height = 64;
-            const hzCtx = hzCanvas.getContext('2d')!;
-            hzCtx.drawImage(img, 0, 0, 64, 64);
-            const hzData = hzCtx.getImageData(0, 0, 64, 64).data;
-            let hBright = 0, hTotal = 0, allBright = 0, allTotal = 0;
-            for (let pi = 0; pi < hzData.length; pi += 4) {
-              const row = Math.floor((pi / 4) / 64);
-              const l = 0.299*hzData[pi] + 0.587*hzData[pi+1] + 0.114*hzData[pi+2];
-              allTotal++;
-              if (l > 180) allBright++;
-              if (row < 16) { hTotal++; if (l > 180) hBright++; }
-            }
-            _earlyHairBrightRatio = hTotal > 0 ? hBright / hTotal : 0;
-            _earlyBrightRatio = allTotal > 0 ? allBright / allTotal : 0;
-          } catch { /* ignore */ }
-
-          const isWhiteHairPortrait = imageType === 'portrait' && _earlyHairBrightRatio > 0.35 && _earlyBrightRatio > 0.50;
-
-          if (isWhiteHairPortrait) {
-            // White hair / light skin: special profile to prevent over-correction
-            // Synced with PROFILE_SCORES white_hair profileSettings
-            const whiteHairPreset = {
-              baseTiles: 100,           // fewer cols: larger tiles = less noise on bright skin
-              tilePx: 9,               // larger tiles: smoother appearance for light areas
-              maxReuse: 6,
-              rotation: false,
-              neighborRadius: 5,
-              neighborPenalty: 160,     // lower: less aggressive anti-repetition
-              contrastBoost: 1.45,      // higher: compensate for low-contrast bright areas
-              histogramBlend: 0.07,     // low: prevent histogram from darkening whites
-              baseOverlay: 0.28,        // higher: strengthen mosaic structure
-              edgeBoost: 0.15,          // subtle edge enhancement
-              overlayMode: 'softlight',
-              labWeight: 0.30,          // color matching for subtle tones
-              brightnessWeight: 0.70,   // high: prioritize brightness matching for bright skin
-              textureWeight: 0.05,
-              edgeWeight: 0.05,
-              saturationWeight: 0.20,   // low: allow desaturated tiles for white/gray areas
-              lBlend: 0.35,             // lower: less luminance shifting
-              abBlend: 0.12,            // much lower: preserve original pastel/neutral tones
-              portraitMode: true,
-            };
-            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(whiteHairPreset)));
-            localStorage.removeItem('mosaicprint_selected_theme');
-            setAutoPresetApplied('Weiße Haare');
-          } else if (imageType === 'portrait') {
+          if (imageType === 'portrait') {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
               tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
@@ -957,19 +830,7 @@ export default function Studio() {
                 // hairBrightRatio > 0.35: top of image is mostly bright = white/gray hair
                 // Also require overall brightRatio > 0.50 to avoid false positives from bright backgrounds
                 score: (imageType === 'portrait' && hairBrightRatio > 0.35 && brightRatio > 0.50) ? 2.0 : 0,
-                // OPTIMIZED for bright skin + white/silver hair (see Empfehlung_Analyse.md)
-                // Key changes: higher brightness weight (70%), lower saturation (20%),
-                // lower L-Blend (0.35) and AB-Blend (0.12) to avoid cool color shift,
-                // higher contrast boost (1.45), lower anti-repetition penalty (160),
-                // larger tiles (9px) for less noise, overlay with edge-boost for detail
-                profileSettings: {
-                  baseTiles: 100, tilePx: 9,
-                  brightnessWeight: 0.70, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, saturationWeight: 0.20,
-                  contrastBoost: 1.45, histogramBlend: 0.07,
-                  lBlend: 0.35, abBlend: 0.12,  // direct override: less color transfer = warmer skin
-                  baseOverlay: 0.28, edgeBoost: 0.15, overlayMode: 'softlight',
-                  enableRotation: false, neighborRadius: 5, neighborPenalty: 160
-                }
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.60, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, contrastBoost: 1.20, histogramBlend: 0.07, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 350 }
               },
               {
                 key: 'landscape', label: 'Landschaft', emoji: '🏔️',
@@ -2348,9 +2209,9 @@ export default function Studio() {
         facesDetected: _debugFacesDetected,
         faceCellCount,
         faceCellPct: (faceCellCount / TOTAL_TILES) * 100,
-        // Color transfer (show actual values used, including profile overrides)
-        lBlend: (savedSettings.lBlend != null && savedSettings.lBlend > 0) ? savedSettings.lBlend : (0.40 + 0.40 * blendFactor),
-        abBlend: (savedSettings.abBlend != null && savedSettings.abBlend > 0) ? savedSettings.abBlend : (0.20 + 0.20 * blendFactor),
+        // Color transfer
+        lBlend: 0.20 + 0.50 * blendFactor,
+        abBlend: 0.10 + 0.20 * blendFactor,
         maxColorShift: 12,
         histogramBlend: savedSettings.histogramBlend ?? 0.0,
         contrastBoost: savedSettings.contrastBoost ?? 1.30,
@@ -2488,13 +2349,12 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
-        // L_BLEND and AB_BLEND: can be directly overridden by profile settings
-        // If savedSettings.lBlend/abBlend are set (from profile), use them directly.
-        // Otherwise, compute from histogramBlend as before.
-        const _computedL = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-        const _computedAB = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
-        const L_BLEND  = (savedSettings.lBlend != null && savedSettings.lBlend > 0) ? savedSettings.lBlend : _computedL;
-        const AB_BLEND = (savedSettings.abBlend != null && savedSettings.abBlend > 0) ? savedSettings.abBlend : _computedAB;
+        // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
+        // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
+        const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
+        // AB_BLEND: minimum 0.20 always active (ensures color correction even without histogramBlend)
+        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.20+0.20*0.7=0.34
+        const AB_BLEND = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
         const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
@@ -3135,15 +2995,11 @@ export default function Studio() {
                 <button
                   key={key}
                   onClick={() => {
-                    // Apply profile settings to BOTH storage keys:
-                    // - mosaicprint_algo_settings: used by the renderer (Studio)
-                    // - mosaicSettings: used by Admin panel sync
+                    // Apply profile settings to mosaicSettings (same as Admin applyProfile)
                     if (profileSettings) {
                       try {
-                        const existingAlgo = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') ?? '{}');
-                        localStorage.setItem('mosaicprint_algo_settings', JSON.stringify({ ...existingAlgo, ...profileSettings }));
-                        const existingAdmin = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
-                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existingAdmin, ...profileSettings }));
+                        const existing = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
+                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existing, ...profileSettings }));
                         window.dispatchEvent(new Event('mosaicSettingsChanged'));
                       } catch { /* ignore */ }
                     }
@@ -3271,36 +3127,24 @@ export default function Studio() {
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
-                     imageRendering: "auto",  // smooth interpolation for zoomed tiles
+                     imageRendering: zoom > 1 ? "pixelated" : "auto",  // pixelated = crisp tiles when zoomed in
                     maxWidth: "none",
                   }}
                 />
-                {/* Hi-Res viewport canvas: covers only visible tiles at 128px resolution */}
-                {/* Positioned relative to preview canvas using offset from viewport culling */}
+                {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
+                {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
                 <canvas
                   ref={hiResCanvasRef}
                   style={{
                     display: showHiRes ? "block" : "none",
                     position: "absolute",
-                    // The hi-res canvas covers a sub-region of the full mosaic.
-                    // We need to position it so it aligns with the preview canvas.
-                    // The preview canvas is centered in the flex container.
-                    // Preview canvas CSS origin is at its top-left corner.
-                    // Our hi-res canvas starts at (hiResOffset.x, hiResOffset.y) in preview-CSS coords.
-                    // Both canvases share the same transform (pan + zoom).
-                    // We use the same transform as preview but add the tile offset.
-                    // Since transformOrigin is "center center" of each canvas, we need to account
-                    // for the size difference. The simplest approach: use left/top for the offset
-                    // within the transformed coordinate space.
-                    left: `calc(50% - ${hiResOffset.cssW / 2}px + ${hiResOffset.x}px)`,
-                    top: `calc(50% - ${hiResOffset.cssH / 2}px + ${hiResOffset.y}px)`,
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
                     maxWidth: "none",
                     opacity: hiResOpacity,
                     pointerEvents: "none",
-                    imageRendering: "auto",
+                    imageRendering: zoom > 1 ? "pixelated" : "auto",  // crisp hi-res tiles when zoomed
                   }}
                 />
                 {hiResLoading && showHiRes && (
