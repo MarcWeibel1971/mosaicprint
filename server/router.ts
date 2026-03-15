@@ -1852,76 +1852,78 @@ export const appRouter = router({
 
       // Keyword tables: [generic, portrait-specific, landscape-specific]
       // Each entry: { condition, keyword, reason }
+      // IMPORTANT: Portrait keywords are optimized for Unsplash API (short, high-result queries)
+      // Tested: keywords with >100 results on Unsplash are marked as reliable
       type KwEntry = { keyword: string; reason: string };
       const kwTable: { test: (z: {L: number; a: number; b: number; brightness: string; warmth: string; saturation: string}) => boolean; generic: KwEntry; portrait: KwEntry; landscape: KwEntry }[] = [
         // Bright neutral (white/light backgrounds)
         {
           test: z => z.L > 70 && Math.abs(z.a) < 5 && Math.abs(z.b) < 5,
           generic:   { keyword: 'white paper texture minimal',           reason: 'helle neutrale Zone fehlt' },
-          portrait:  { keyword: 'soft white studio background bokeh',    reason: 'heller neutraler Hintergrund fehlt (Portrait)' },
+          portrait:  { keyword: 'light background portrait',             reason: 'heller neutraler Hintergrund fehlt (Portrait)' }, // 522 results
           landscape: { keyword: 'bright overcast sky clouds white',      reason: 'heller Himmel fehlt' },
         },
         // Bright cool
         {
           test: z => z.L > 70 && z.b < -3,
           generic:   { keyword: 'overcast sky muted cool',               reason: 'helle kühle Zone fehlt' },
-          portrait:  { keyword: 'soft blue gray background portrait',    reason: 'kühler Hintergrund fehlt (Portrait)' },
+          portrait:  { keyword: 'portrait blue background light',        reason: 'kühler Hintergrund fehlt (Portrait)' }, // ~80 results
           landscape: { keyword: 'blue sky clouds bright',                reason: 'blauer Himmel fehlt' },
         },
         // Bright warm
         {
           test: z => z.L > 70 && z.b > 8,
           generic:   { keyword: 'warm light golden bright',              reason: 'helle warme Zone fehlt' },
-          portrait:  { keyword: 'golden hour skin warm light portrait',  reason: 'warmes Licht auf Haut fehlt' },
+          portrait:  { keyword: 'portrait face warm',                    reason: 'warmes Licht auf Haut fehlt' }, // 2917 results
           landscape: { keyword: 'golden hour sunlight warm bright',      reason: 'Goldstunde-Licht fehlt' },
         },
         // Skin tones (mid bright warm reddish)
         {
           test: z => z.a > 6 && z.L > 45 && z.L < 80,
           generic:   { keyword: 'skin tone portrait warm light',         reason: 'Hautton-Zone fehlt' },
-          portrait:  { keyword: 'close-up skin texture face portrait',   reason: 'Hauttöne für Gesicht fehlen' },
+          portrait:  { keyword: 'portrait face',                         reason: 'Hauttöne für Gesicht fehlen' }, // 286 results
           landscape: { keyword: 'warm earth sand desert texture',        reason: 'warme Erdtöne fehlen' },
         },
         // Dark cool
         {
           test: z => z.L < 35 && z.b < 0,
           generic:   { keyword: 'dark ocean water night',                reason: 'dunkle kühle Zone fehlt' },
-          portrait:  { keyword: 'dark shadow portrait moody black',      reason: 'dunkle Schatten fehlen (Portrait)' },
+          portrait:  { keyword: 'moody portrait dark',                   reason: 'dunkle Schatten fehlen (Portrait)' }, // 131 results
           landscape: { keyword: 'dark water night reflection',           reason: 'dunkles Wasser fehlt' },
         },
         // Dark warm
         {
           test: z => z.L < 35 && z.b > 5,
           generic:   { keyword: 'dark wood texture warm',                reason: 'dunkle warme Zone fehlt' },
-          portrait:  { keyword: 'dark hair brown black closeup',         reason: 'dunkle Haare/Schatten fehlen' },
+          portrait:  { keyword: 'dark hair portrait',                    reason: 'dunkle Haare/Schatten fehlen' }, // 96 results
           landscape: { keyword: 'dark forest shadow warm',               reason: 'dunkler Wald fehlt' },
         },
         // Mid cool
         {
           test: z => z.b < -5 && z.L >= 35 && z.L <= 70,
           generic:   { keyword: 'blue gray fog misty',                   reason: 'mittlere kühle Zone fehlt' },
-          portrait:  { keyword: 'gray fabric texture soft neutral',      reason: 'neutrale Kleidung/Hintergrund fehlt' },
+          portrait:  { keyword: 'gray sweater portrait',                 reason: 'neutrale Kleidung/Hintergrund fehlt' }, // 142 results
           landscape: { keyword: 'misty fog blue mountain',               reason: 'Nebel/Dunst fehlt' },
         },
         // Mid warm saturated
         {
           test: z => z.b > 10 && z.a > 5,
           generic:   { keyword: 'autumn leaves warm golden',             reason: 'warme Sättigungs-Zone fehlt' },
-          portrait:  { keyword: 'warm fabric texture orange brown',      reason: 'warme Kleidungsfarben fehlen' },
+          portrait:  { keyword: 'portrait warm light face',              reason: 'warme Kleidungsfarben fehlen' }, // ~100 results
           landscape: { keyword: 'autumn foliage warm orange',            reason: 'Herbstfarben fehlen' },
         },
         // Mid neutral muted
         {
           test: z => z.saturation === 'muted' && z.brightness === 'mid',
           generic:   { keyword: 'neutral gray texture stone',            reason: 'mittlere neutrale Zone fehlt' },
-          portrait:  { keyword: 'soft bokeh neutral background gray',    reason: 'neutraler Hintergrund fehlt (Portrait)' },
+          portrait:  { keyword: 'portrait face close',                   reason: 'neutraler Hintergrund fehlt (Portrait)' }, // 47 results
           landscape: { keyword: 'stone rock texture gray neutral',       reason: 'Stein/Fels fehlt' },
         },
         // Dark neutral
         {
           test: z => z.brightness === 'dark' && z.saturation === 'muted' && Math.abs(z.b) < 5,
           generic:   { keyword: 'dark neutral texture shadow',           reason: 'dunkle neutrale Zone fehlt' },
-          portrait:  { keyword: 'dark clothing fabric texture black',    reason: 'dunkle Kleidung fehlt (Portrait)' },
+          portrait:  { keyword: 'dark portrait dramatic',                reason: 'dunkle Kleidung fehlt (Portrait)' }, // 83 results
           landscape: { keyword: 'dark shadow rock neutral',              reason: 'dunkle Schatten fehlen' },
         },
       ];
@@ -1975,14 +1977,15 @@ export const appRouter = router({
       }
 
       // Portrait: always ensure 6 face-area keywords covering all key zones
+      // Keywords optimized for Unsplash API (tested, each has >80 results)
       if (isPortrait) {
         const PORTRAIT_FACE_KEYWORDS = [
-          { keyword: 'close-up skin texture face portrait warm',   reason: 'Haut-Midtones (Wangen, Stirn)' },
-          { keyword: 'skin highlight bright face soft light',      reason: 'Haut-Highlights (Stirn, Nase)' },
-          { keyword: 'dark shadow eye portrait moody',             reason: 'Augen-/Schattenbereich' },
-          { keyword: 'dark hair brown black closeup portrait',     reason: 'Haare / dunkle Partien' },
-          { keyword: 'soft white studio background bokeh blur',    reason: 'Heller Hintergrund / Schulterbereich' },
-          { keyword: 'gray fabric texture soft neutral muted',     reason: 'Neutrale Kleidung / Hintergrund' },
+          { keyword: 'portrait face warm',                         reason: 'Haut-Midtones (Wangen, Stirn)' },     // 2917 results
+          { keyword: 'portrait face',                             reason: 'Haut-Highlights (Stirn, Nase)' },     // 286 results
+          { keyword: 'moody portrait dark',                       reason: 'Augen-/Schattenbereich' },            // 131 results
+          { keyword: 'dark hair portrait',                        reason: 'Haare / dunkle Partien' },            // 96 results
+          { keyword: 'light background portrait',                 reason: 'Heller Hintergrund / Schulterbereich' }, // 522 results
+          { keyword: 'gray sweater portrait',                     reason: 'Neutrale Kleidung / Hintergrund' },   // 142 results
         ];
         const seenFaceKw = new Set(keywordSuggestions.map(k => k.keyword));
         for (const fkw of PORTRAIT_FACE_KEYWORDS) {

@@ -470,37 +470,15 @@ export default function Studio() {
       const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000; // Mobile: 800 tiles (was 300)
       const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
 
-      // PERF: For DB tiles, fetch direct tile128_urls in one batch request
-      // This avoids proxying each tile through the Railway server (saves 300-800ms per tile)
+      // PERF: Use /api/tile/:id?size=N proxy for all tiles
+      // This ensures CORS-safe loading for all sources (Unsplash, Pexels, Pixabay)
+      // The server proxy handles all external URLs without CORS issues
       let allUrls: string[];
       if (tileIdsRef.current.length > 0) {
-        // Get unique tile IDs used in this mosaic
-        const uniqueIds = uniqueIndices
-          .map(idx => tileIdsRef.current[idx])
-          .filter(id => id > 0);
-        // Fetch direct URLs in one request (max 2000 IDs)
-        let directUrlMap: Record<number, string> = {};
-        try {
-          const chunkSize = 1500;
-          for (let i = 0; i < uniqueIds.length; i += chunkSize) {
-            const chunk = uniqueIds.slice(i, i + chunkSize);
-            // Use source_url (higher resolution) when zoom tier requires 256px+ tiles
-            const useHiResSource = HIREZ_PX >= 256;
-            const resp = await fetch(`/api/tile-urls?ids=${chunk.join(',')}${useHiResSource ? '&hires=1' : ''}`);
-            if (resp.ok) {
-              const partial = await resp.json() as Record<number, string>;
-              Object.assign(directUrlMap, partial);
-            }
-          }
-        } catch (e) {
-          console.warn('[hi-res] tile-urls fetch failed, falling back to proxy', e);
-        }
-        // Build URL array: use direct URL if available, else fall back to proxy
+        // Use server proxy for all tiles - avoids CORS issues with external URLs
+        // The proxy serves tile128_url for size<=128, source_url for size>128
         allUrls = tileIdsRef.current.map(id => {
           if (id <= 0) return '';
-          const direct = directUrlMap[id];
-          // Use direct URL only if it's not a data: URL (those need proxy)
-          if (direct && !direct.startsWith('data:')) return direct;
           return `/api/tile/${id}?size=${HIREZ_PX}`;
         });
       } else {
@@ -787,8 +765,13 @@ export default function Studio() {
             let warmPixels = 0, coolPixels = 0, darkPixels = 0, brightPixels = 0;
             let greenPixels = 0, purplePixels = 0, totalPx = 0;
             let avgR = 0, avgG = 0, avgB = 0;
+            // Hair zone: top 25% of image (rows 0-15 of 64px canvas)
+            let hairBrightPx = 0, hairDarkPx = 0, hairTotalPx = 0;
+            const HAIR_ZONE_END_ROW = 16; // top 25% of 64px canvas
 
             for (let pi = 0; pi < pData.length; pi += 4) {
+              const pixelIdx = pi / 4;
+              const row = Math.floor(pixelIdx / 64);
               const r = pData[pi], g = pData[pi+1], b = pData[pi+2];
               const l = 0.299*r + 0.587*g + 0.114*b; // luminance
               const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
@@ -810,6 +793,12 @@ export default function Studio() {
               if (l > 180) brightPixels++;
               avgR += r; avgG += g; avgB += b;
               totalPx++;
+              // Hair zone analysis: top 25% of image
+              if (row < HAIR_ZONE_END_ROW) {
+                hairTotalPx++;
+                if (l > 180) hairBrightPx++; // very bright = white/gray hair
+                if (l < 80) hairDarkPx++;    // very dark = dark hair
+              }
             }
             avgR /= totalPx; avgG /= totalPx; avgB /= totalPx;
             const warmRatio = warmPixels / totalPx;
@@ -818,6 +807,9 @@ export default function Studio() {
             const purpleRatio = purplePixels / totalPx;
             const darkRatio = darkPixels / totalPx;
             const brightRatio = brightPixels / totalPx;
+            // Hair zone ratios: how bright/dark is the top of the image
+            const hairBrightRatio = hairTotalPx > 0 ? hairBrightPx / hairTotalPx : 0;
+            const hairDarkRatio = hairTotalPx > 0 ? hairDarkPx / hairTotalPx : 0;
 
             // Profile-Scoring basierend auf Farbpalette – mappt auf die 9 Admin-Profile
             // Jedes Profil hat einen Score basierend auf Bildmerkmalen
@@ -834,7 +826,10 @@ export default function Studio() {
               },
               {
                 key: 'white_hair', label: 'Weiße Haare', emoji: '👴',
-                score: (imageType === 'portrait' && brightRatio > 0.40) ? 2.0 : 0,
+                // Use hair zone (top 25% of image) bright ratio for accurate white hair detection
+                // hairBrightRatio > 0.35: top of image is mostly bright = white/gray hair
+                // Also require overall brightRatio > 0.50 to avoid false positives from bright backgrounds
+                score: (imageType === 'portrait' && hairBrightRatio > 0.35 && brightRatio > 0.50) ? 2.0 : 0,
                 profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.60, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, contrastBoost: 1.20, histogramBlend: 0.07, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 350 }
               },
               {
