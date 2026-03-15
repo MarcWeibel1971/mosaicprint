@@ -229,9 +229,11 @@ app.get("/api/tile/:id", async (req, res) => {
       );
       if (!result.rows[0]) return res.status(404).json({ error: "Not found" });
       const row = result.rows[0];
-      // Prefer R2 URL (permanent) over CDN URLs (may expire)
+      // For tile128 (≤128px): prefer R2 URL (permanent, fast CDN)
       const effectiveTile128 = row.r2_url || row.tile128_url || '';
-      const effectiveSource = row.r2_url || row.source_url || '';
+      // For hi-res (>128px): prefer original source_url (full resolution from Pexels/Unsplash)
+      // R2 only stores 128px thumbnails, so source_url gives much better quality at zoom
+      const effectiveSource = row.source_url || row.r2_url || '';
       tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
       // Evict if too large
@@ -288,14 +290,15 @@ app.get("/api/tile-urls", async (req, res) => {
     );
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
-      if (row.r2_url) {
-        // R2 URL is permanent - always prefer it
+      if (wantHiRes) {
+        // For hi-res/print: prefer original source_url (full resolution from Pexels/Unsplash ~940px)
+        // R2 only stores 128px thumbnails - source_url gives much better zoom quality
+        urlMap[row.id] = row.source_url || row.r2_url || row.tile128_url || '';
+      } else if (row.r2_url) {
+        // For screen preview: R2 URL is permanent and fast (128px thumbnail)
         urlMap[row.id] = row.r2_url;
-      } else if (wantHiRes) {
-        // For print: prefer source_url (original hi-res from Unsplash/Pexels), fallback to tile128_url
-        urlMap[row.id] = row.source_url || row.tile128_url || '';
       } else {
-        // For screen zoom: tile128_url is fast and sufficient
+        // Fallback: tile128_url or source_url
         urlMap[row.id] = row.tile128_url || row.source_url || '';
       }
     }
