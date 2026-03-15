@@ -1933,20 +1933,6 @@ export default function Studio() {
     const sortedByL = Array.from({ length: filteredValidImgs.length }, (_, i) => i)
       .sort((a, b) => filteredImgFeatures[a].lab[0] - filteredImgFeatures[b].lab[0]);
 
-    // ── Dynamic Face Brightness Analysis (Empfehlung: mittelfristige Lösung) ──
-    // Compute average face luminance to dynamically adjust weights for light/dark faces
-    // If avgFaceL > 70 → boost brightness weight, reduce saturation weight, boost contrast
-    let avgFaceL = 0;
-    let facePixelCount = 0;
-    for (let i = 0; i < TOTAL_TILES; i++) {
-      if (faceMask[i]) { avgFaceL += cellFeatures[i].lab[0]; facePixelCount++; }
-    }
-    avgFaceL = facePixelCount > 0 ? avgFaceL / facePixelCount : 50;
-    const isLightFace = avgFaceL > 60;
-    // lightFaceBoost: 0 at avgL=60, 1.0 at avgL=90 (smooth ramp)
-    const lightFaceBoost = isLightFace ? Math.min(1.0, (avgFaceL - 60) / 30) : 0;
-    console.log(`[Studio] Face brightness analysis: avgL=${avgFaceL.toFixed(1)}, isLight=${isLightFace}, boost=${lightFaceBoost.toFixed(2)}, faceCells=${facePixelCount}`);
-
     for (let ti = 0; ti < (TOTAL_TILES); ti++) {
       const ci = tileOrder[ti];
       const tf = cellFeatures[ci];
@@ -2050,16 +2036,9 @@ export default function Studio() {
           // Higher SSD weight = tiles that look most like the target region (color + luminance)
           const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
           const wSsdBase = noOverlay ? 0.45 : 0.30; // 45% SSD when no overlay (pure tile rendering)
-          let wLabBase = savedSettings.labWeight ?? 0.15;
-          let wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
-          let wTextureBase = savedSettings.textureWeight ?? 0.08;
-          // ── Dynamic weight adjustment for light faces (Empfehlung) ──
-          // Light face (avgFaceL > 60): boost brightness weight, reduce LAB weight
-          // This prevents the algorithm from forcing dark/cool tiles onto bright skin/hair
-          if (isLightFace && inFace) {
-            wBrightBase *= (1 + lightFaceBoost * 0.5); // up to 1.5× brightness weight
-            wLabBase *= (1 - lightFaceBoost * 0.4);    // up to 0.6× LAB weight (less color forcing)
-          }
+          const wLabBase = savedSettings.labWeight ?? 0.15;
+          const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
+          const wTextureBase = savedSettings.textureWeight ?? 0.08;
           // 6. Saturation difference
           // Prevents gray tiles in colorful areas and vice versa
           // saturation = sqrt(a^2+b^2), range 0-100
@@ -2067,12 +2046,7 @@ export default function Studio() {
           const tileSatC = mf.saturation;
           const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0-1
           // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
-          let wSatBase = savedSettings.saturationWeight ?? 0.25;
-          // ── Dynamic saturation adjustment for light faces (Empfehlung) ──
-          // Light face: reduce saturation penalty so light/neutral tiles aren't penalized
-          if (isLightFace && inFace) {
-            wSatBase *= (1 - lightFaceBoost * 0.4); // up to 0.6× saturation weight
-          }
+          const wSatBase = savedSettings.saturationWeight ?? 0.25;
           // Repetition penalty: exponential growth to strongly discourage reuse
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
@@ -2080,40 +2054,23 @@ export default function Studio() {
           // Face region: per-subregion weights for sharper eye/nose/mouth/cheek/forehead
           if (inFace) {
             // Per-subregion weight multipliers (MediaPipe Face Mesh)
-            // ── Empfehlung: Regionale Gewichte ──
-            // Wangen/Stirn: Sättigung 45%, LAB 40% (skin-tone matching priority)
-            // Augen/Mund/Bart: Helligkeit 65%, Kanten 30%, Kontrast 1.60× (detail priority)
+            // eye: max edge sharpness, high SSD, moderate sat penalty (eyes have color)
+            // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
+            // nose: high brightness, moderate edge, strong sat penalty (skin area)
+            // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
             const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-            // LAB weight: Wangen/Stirn get 40% LAB (skin-tone matching), eyes/mouth get higher for color accuracy
-            const wLabF      = subRegion === 'cheek' || subRegion === 'forehead'
-              ? Math.max(wLabBase * 1.2, 0.40 * (1 - lightFaceBoost * 0.3))  // Empfehlung: 40% LAB for skin, reduced for light faces
-              : subRegion === 'eye' ? wLabBase * 1.5
-              : subRegion === 'mouth' ? wLabBase * 1.4
-              : wLabBase * 1.2;
+            const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
             // Dynamic brightness weight:
             // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
             //   so the algorithm picks light tiles, not dark/cool ones
             // - Moderately bright areas (L>65): slight reduction to prevent over-darkening warm faces
-            // - Empfehlung: Augen/Mund/Bart get 65% brightness weight for detail
             const isVeryBright = tf.brightness > 75; // white hair, beard, bright highlights
             const faceBrightBoost = isVeryBright ? 1.6 : (tf.brightness > 65 ? 0.85 : 1.0);
-            const wBrightF = (subRegion === 'eye' || subRegion === 'mouth'
-              ? Math.max(wBrightBase * 1.3, 0.65)  // Empfehlung: 65% brightness for eye/mouth detail
-              : subRegion === 'cheek' || subRegion === 'forehead'
-              ? wBrightBase * 1.5
-              : wBrightBase * 1.3) * faceBrightBoost;
-            // Edge weight: Empfehlung: Augen/Mund/Bart get 30% edge weight for sharp features
-            const faceEdgeWeight = subRegion === 'eye' ? Math.max(edgeWeight * 3.0, 0.30)
-              : subRegion === 'mouth' ? Math.max(edgeWeight * 2.5, 0.30)
-              : subRegion === 'nose' ? edgeWeight * 2.0
-              : edgeWeight * 1.5;
+            const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.5 : wBrightBase * 1.3) * faceBrightBoost;
+            const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
             const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
-            // Saturation weight: Empfehlung: Wangen/Stirn get 45% saturation for skin-tone matching
-            // Reduced for light faces to allow neutral tiles
-            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead'
-              ? Math.max(wSatBase * 1.5, 0.45 * (1 - lightFaceBoost * 0.3))  // Empfehlung: 45% sat for skin, reduced for light
-              : subRegion === 'nose' ? wSatBase * 1.3
-              : wSatBase * 1.1;
+            // Saturation weight: reduced to allow warmer tiles in face (was ×2.5/×2.0/×1.5 → too aggressive)
+            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.5 : subRegion === 'nose' ? wSatBase * 1.3 : wSatBase * 1.1;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
@@ -2644,12 +2601,8 @@ export default function Studio() {
           const tr = targetData[i], tg = targetData[i+1], tb = targetData[i+2];
           const edge = edgeMap[ci];
           // Adaptive strength: BASE_OVERLAY at flat areas, +EDGE_BOOST at edges
-          // In face regions: extra +0.25 boost for better portrait visibility
-          // Empfehlung: Augen/Mund/Bart get stronger overlay for Kontrast 1.60× effect
-          const subR = subRegionMask[ci];
-          const faceBoost = faceMask[ci]
-            ? (subR === 'eye' || subR === 'mouth' ? 0.35 : 0.25)  // Empfehlung: stronger overlay on detail regions
-            : 0;
+          // In face regions: extra +0.25 boost for better portrait visibility (was +0.15)
+          const faceBoost = faceMask[ci] ? 0.25 : 0;
           const strength = Math.min(0.85, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);
           for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < (CANVAS_H); py++) {
             for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < (CANVAS_W); px++) {
