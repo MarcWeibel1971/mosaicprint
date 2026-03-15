@@ -1642,6 +1642,31 @@ export default function Studio() {
       console.log(`[FaceDetect] Marked ${faceCount} cells as face regions`);
     } catch (e) { console.warn('[FaceDetect] Failed:', e); /* continue without */ }
 
+    // -- Soft-Border Zone: 2-tile transition band around face mask ----------------
+    // Cells in this zone get blended scoring (face+background) for smooth roundings
+    // This prevents the hard rectangular edge that makes head/chin/cheek look blocky
+    const SOFT_BORDER_RADIUS = 2; // tiles of transition zone
+    const softBorderMask: number[] = new Array(TOTAL_TILES).fill(0); // 0=none, 1=outer, 2=inner
+    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      if (faceMask[ci]) continue; // already a face cell
+      const col = ci % COLS, row = Math.floor(ci / COLS);
+      let minDist = Infinity;
+      for (let dr = -SOFT_BORDER_RADIUS; dr <= SOFT_BORDER_RADIUS; dr++) {
+        for (let dc = -SOFT_BORDER_RADIUS; dc <= SOFT_BORDER_RADIUS; dc++) {
+          const nr = row + dr, nc = col + dc;
+          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+            const ni = nr * COLS + nc;
+            if (faceMask[ni]) {
+              const d = Math.sqrt(dr*dr + dc*dc);
+              if (d < minDist) minDist = d;
+            }
+          }
+        }
+      }
+      if (minDist <= 1.5) softBorderMask[ci] = 2; // inner border: 70% face scoring
+      else if (minDist <= SOFT_BORDER_RADIUS) softBorderMask[ci] = 1; // outer border: 35% face scoring
+    }
+
     // -- Progressive Rendering: Pass 1 (LAB-color preview) ---------------------
     // Before running the expensive SSD matching loop, draw a fast LAB-color preview:
     // each cell gets the average color of its best k-NN candidate (from Stage A).
@@ -1733,6 +1758,7 @@ export default function Studio() {
       const col = ci % COLS, row = Math.floor(ci / COLS);
       const inFace = faceMask[ci];
       const subRegion = subRegionMask[ci]; // 'eye' | 'mouth' | 'nose' | 'cheek' | 'forehead' | null
+      const softBorder = softBorderMask[ci]; // 0=none, 1=outer(35%), 2=inner(70%)
 
       // Collect neighbor tile IDs for anti-repetition
       const neighborIds = new Set<number>();
@@ -2040,6 +2066,22 @@ export default function Studio() {
             if (tileBr > targetBr + 40) {
               dist += (tileBr - targetBr - 40) * 3; // up to ~180 for very bright tile in dark area
             }
+          }
+
+          // SOFT-BORDER ZONE: blend face+background scoring for smooth roundings
+          // Cells at the edge of the face mask get partial face scoring to avoid blocky transitions
+          if (softBorder > 0) {
+            const blendFaceWeight = softBorder === 2 ? 0.70 : 0.35; // inner: 70%, outer: 35%
+            // Skin-tone bonus: prefer warm tiles in transition zone (matches face edge)
+            const isTargetSkinBorder = tf.lab[0] >= 30 && tf.lab[0] <= 85 && tf.lab[1] >= 2 && tf.lab[1] <= 32 && tf.lab[2] >= 3 && tf.lab[2] <= 42;
+            const isTileSkinBorder = mf.lab[0] >= 30 && mf.lab[0] <= 85 && mf.lab[1] >= 2 && mf.lab[1] <= 32 && mf.lab[2] >= 3 && mf.lab[2] <= 42;
+            if (isTargetSkinBorder && isTileSkinBorder) dist -= 12 * blendFaceWeight; // skin-tone bonus
+            if (isTargetSkinBorder && !isTileSkinBorder) dist += 30 * blendFaceWeight; // skin mismatch penalty
+            // Penalize green/cool tiles in transition zone (same as face region)
+            if (!isTargetSkinBorder && mf.lab[1] < -3) dist += Math.min(400, (-mf.lab[1] - 3) * 30) * blendFaceWeight;
+            // Brightness matching: transition zone needs smooth brightness gradient
+            const borderBrightPenalty = brightDiff * 0.4 * blendFaceWeight;
+            dist += borderBrightPenalty;
           }
 
           // Anti-repetition penalties
