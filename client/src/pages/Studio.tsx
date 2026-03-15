@@ -418,9 +418,18 @@ export default function Studio() {
     const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // 3-tier resolution: higher zoom -> larger tiles -> crisper detail
-    const hiResTileSize = _isMobileHR
+    // CRITICAL: Canvas pixel limit to avoid iOS Safari OOM crash
+    // iOS kills tabs at ~150MB -> max ~4096x4096 canvas (67MB at 4 bytes/px)
+    // For 90x120 grid: 128px -> 11520x15360 (too big!) -> cap to fit
+    const _maxCanvasDim = _isMobileHR ? 5120 : 8192;
+    const _cols = mosaicParamsRef.current?.cols ?? 90;
+    const _rows = mosaicParamsRef.current?.rows ?? 120;
+    const _maxTilePxForCanvas = Math.floor(Math.min(_maxCanvasDim / _cols, _maxCanvasDim / _rows));
+    const _rawHiResTileSize = _isMobileHR
       ? (zoom >= 5.0 ? 400 : zoom >= 3.0 ? 256 : 128)
       : (zoom >= 3.0 ? 400 : zoom >= 1.6 ? 200 : 128);
+    // Cap tile size so total canvas stays within memory limit
+    const hiResTileSize = Math.min(_rawHiResTileSize, _maxTilePxForCanvas);
     // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
     const hiResOpacity = showHiRes && hiResReady
       ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
@@ -452,7 +461,7 @@ export default function Studio() {
       const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
       setHiResLoading(true);
       const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
-      const HIREZ_PX = hiResTileSize; // 128px at medium zoom, 200px at high zoom
+      const HIREZ_PX = hiResTileSize; // capped by canvas memory limit (42px mobile, 68px desktop for 90x120 grid)
       const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
       const hc = hiResCanvasRef.current;
       if (!hc) { setHiResLoading(false); return; }
@@ -476,10 +485,10 @@ export default function Studio() {
       let allUrls: string[];
       if (tileIdsRef.current.length > 0) {
         // Use server proxy for all tiles - avoids CORS issues with external URLs
-        // The proxy serves tile128_url for size<=128, source_url for size>128
+        // Always request size=128 to get the R2 thumbnail (fast CDN, 128px is plenty for 42-68px tiles)
         allUrls = tileIdsRef.current.map(id => {
           if (id <= 0) return '';
-          return `/api/tile/${id}?size=${HIREZ_PX}`;
+          return `/api/tile/${id}?size=128`;
         });
       } else {
         allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
@@ -3127,7 +3136,7 @@ export default function Studio() {
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
-                     imageRendering: zoom > 1 ? "pixelated" : "auto",  // pixelated = crisp tiles when zoomed in
+                     imageRendering: "auto",  // smooth interpolation for zoomed tiles
                     maxWidth: "none",
                   }}
                 />
@@ -3144,7 +3153,7 @@ export default function Studio() {
                     maxWidth: "none",
                     opacity: hiResOpacity,
                     pointerEvents: "none",
-                    imageRendering: zoom > 1 ? "pixelated" : "auto",  // crisp hi-res tiles when zoomed
+                    imageRendering: "auto",  // smooth interpolation for hi-res tiles
                   }}
                 />
                 {hiResLoading && showHiRes && (
