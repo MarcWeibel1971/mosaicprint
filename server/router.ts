@@ -1924,12 +1924,15 @@ export const appRouter = router({
       const gapZones: Array<{zone: string; needed: number; available: number; deficit: number}> = [];
       const keywordSuggestions: Array<{keyword: string; reason: string; priority: string}> = [];
 
+      // Portrait: use tighter LAB threshold (18 vs 12) to detect finer face-area gaps
+      const labGapThreshold = isPortrait ? 18 : 12;
+
       if (imageLABZones.length > 0) {
         for (const zone of imageLABZones.slice(0, 15)) {
-          // Find pool tiles within LAB distance 12 of this zone
+          // Find pool tiles within LAB distance of this zone
           const nearby = poolStats.filter((p: {avgL: number; avgA: number; avgB: number}) => {
             const dL = p.avgL - zone.L, dA = p.avgA - zone.a, dB = p.avgB - zone.b;
-            return Math.sqrt(dL*dL + dA*dA + dB*dB) < 12;
+            return Math.sqrt(dL*dL + dA*dA + dB*dB) < labGapThreshold;
           });
           const needed = Math.max(50, zone.count * 10);
           const available = nearby.reduce((s: number, p: {count: number}) => s + p.count, 0);
@@ -1965,6 +1968,26 @@ export const appRouter = router({
         }
       }
 
+      // Portrait: always ensure 6 face-area keywords covering all key zones
+      if (isPortrait) {
+        const PORTRAIT_FACE_KEYWORDS = [
+          { keyword: 'close-up skin texture face portrait warm',   reason: 'Haut-Midtones (Wangen, Stirn)' },
+          { keyword: 'skin highlight bright face soft light',      reason: 'Haut-Highlights (Stirn, Nase)' },
+          { keyword: 'dark shadow eye portrait moody',             reason: 'Augen-/Schattenbereich' },
+          { keyword: 'dark hair brown black closeup portrait',     reason: 'Haare / dunkle Partien' },
+          { keyword: 'soft white studio background bokeh blur',    reason: 'Heller Hintergrund / Schulterbereich' },
+          { keyword: 'gray fabric texture soft neutral muted',     reason: 'Neutrale Kleidung / Hintergrund' },
+        ];
+        const seenFaceKw = new Set(keywordSuggestions.map(k => k.keyword));
+        for (const fkw of PORTRAIT_FACE_KEYWORDS) {
+          if (!seenFaceKw.has(fkw.keyword)) {
+            keywordSuggestions.push({ keyword: fkw.keyword, reason: fkw.reason, priority: 'medium' });
+            seenFaceKw.add(fkw.keyword);
+          }
+          if (keywordSuggestions.length >= 6) break;
+        }
+      }
+
       // Deduplicate keyword suggestions
       const seenKw = new Set<string>();
       const uniqueKeywords = keywordSuggestions.filter(k => {
@@ -1977,7 +2000,7 @@ export const appRouter = router({
         imageError: imageError,
         dominantZones: imageLABZones.slice(0, 10),
         gapZones: gapZones.slice(0, 10),
-        keywordSuggestions: uniqueKeywords.slice(0, 12),
+        keywordSuggestions: uniqueKeywords.slice(0, isPortrait ? 6 : 12),
         poolSize: poolStats.reduce((s: number, p: {count: number}) => s + p.count, 0),
       };
     }),
