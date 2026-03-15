@@ -410,10 +410,10 @@ export default function Studio() {
     // Mobile: höherer Threshold + kleinere Tiles = deutlich schneller
     const _isMobileHR = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
     const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;  // LOWERED: hi-res activates immediately on desktop
-    const ULTRA_RES_THRESHOLD = _isMobileHR ? 3.0 : 1.6;
+    const ULTRA_RES_THRESHOLD = _isMobileHR ? 2.0 : 1.6; // Mobile: 2x zoom → 128px (was 3.0)
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
     // Determine which resolution tier to use
-    // Mobile: 64px (schnell) oder 128px (sehr hoher Zoom), Desktop: 128px oder 200px
+    // Mobile: 128px ab 2x Zoom (war 64px bis 3x), Desktop: 128px oder 200px
     const hiResTileSize = _isMobileHR
       ? (zoom >= (ULTRA_RES_THRESHOLD) ? 128 : 64)
       : (zoom >= (ULTRA_RES_THRESHOLD) ? 200 : 128);
@@ -463,7 +463,7 @@ export default function Studio() {
       // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
       const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
       // Mobile: limit unique tiles to avoid loading too many images at once
-      const MAX_HIRES_TILES = isMobileDevice ? 300 : 2000;
+      const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000; // Mobile: 800 tiles (was 300)
       const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
 
       // PERF: For DB tiles, fetch direct tile128_urls in one batch request
@@ -639,14 +639,14 @@ export default function Studio() {
 
           if (imageType === 'portrait') {
             const portraitPreset = {
-              baseTiles: 100,         // 100 cols: good detail without being too fine
-              tilePx: 8,              // 8px tiles: recognizable photos, good color signal
-              neighborRadius: 4,
-              neighborPenalty: 160,
-              contrastBoost: 1.20,
-              histogramBlend: 0.07,   // L_BLEND~0.68, AB_BLEND~0.34
-              baseOverlay: 0.18,
-              edgeBoost: 0.22,
+              baseTiles: 120,         // 120 cols: more tiles = sharper facial features
+              tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
+              neighborRadius: 5,
+              neighborPenalty: 280,   // higher penalty: less tile repetition = more detail
+              contrastBoost: 1.35,    // stronger contrast for crisp edges
+              histogramBlend: 0.09,   // slightly more blend for smoother skin tones
+              baseOverlay: 0.22,      // stronger overlay for clearer mosaic structure
+              edgeBoost: 0.28,        // more edge sharpening on facial features
               overlayMode: 'softlight',
               labWeight: 0.15,
               brightnessWeight: 0.55, // slightly reduced: prevents over-darkening warm faces
@@ -726,7 +726,7 @@ export default function Studio() {
                 const mergeWithAdmin2 = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides2 });
                 if (falHasFace && imageType !== 'portrait') {
                   // fal.ai found a face but heuristic missed it
-                  const portraitPreset = { baseTiles: 100, tilePx: 8, neighborRadius: 4, neighborPenalty: 160, contrastBoost: 1.20, histogramBlend: 0.07, baseOverlay: 0.18, edgeBoost: 0.22, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
+                  const portraitPreset = { baseTiles: 120, tilePx: 7, neighborRadius: 5, neighborPenalty: 280, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
                   localStorage.removeItem('mosaicprint_selected_theme');
                   setAutoPresetApplied('Portrait');
