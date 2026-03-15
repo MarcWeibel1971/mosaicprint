@@ -71,10 +71,18 @@ interface DbStatsDetail {
 }
 interface CronStatus {
   enabled: boolean; current: number; target: number; remaining: number; intervalHours: number
+  cronRunning?: boolean; lastCronRun?: string | null; lastCronResult?: string | null
 }
 interface SmartImportJob {
   running: boolean; imported?: number; total?: number
   log: string[]; error?: string | null; finishedAt?: string | null
+}
+
+// ── Last image analysis result (persisted via localStorage for cross-tab use) ──
+interface LastAnalysisData {
+  keywords: Array<{keyword: string; reason: string; priority: string}>
+  sceneType: string
+  timestamp: string
 }
 
 // ── Algorithm settings stored in localStorage ─────────────────────────────────
@@ -299,8 +307,7 @@ export default function Admin() {
   const [recsRunning, setRecsRunning] = useState(false)
   const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
   // Last image analysis result (from Quality tab) - persisted via localStorage for cross-tab use
-  interface LastAnalysis { keywords: Array<{keyword: string; reason: string; priority: string}>; sceneType: string; timestamp: string }
-  const [lastAnalysis, setLastAnalysis] = useState<LastAnalysis | null>(() => {
+  const [lastAnalysis, setLastAnalysis] = useState<LastAnalysisData | null>(() => {
     try { const s = localStorage.getItem('mosaicprint_last_analysis'); return s ? JSON.parse(s) : null } catch { return null }
   })
   const [analysisImportJobMain, setAnalysisImportJobMain] = useState<SmartImportJob | null>(null)
@@ -850,11 +857,22 @@ export default function Admin() {
                     <div className="text-xs text-gray-400">{cronStatus.remaining.toLocaleString()} fehlen noch</div>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500">
-                  {cronStatus.enabled
-                    ? `Der Server importiert automatisch bis zu 200 neue Bilder pro Stunde, priorisiert unterrepräsentierte Farben.`
-                    : `Alle ${cronStatus.target.toLocaleString()} Bilder erreicht! Der Cron-Job ist pausiert.`}
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs text-gray-500">
+                    {cronStatus.enabled
+                      ? `Der Server importiert automatisch bis zu 300 neue Bilder pro Stunde, priorisiert unterrepräsentierte Farben (Gap-basiert).`
+                      : `Alle ${cronStatus.target.toLocaleString()} Bilder erreicht! Der Cron-Job ist pausiert.`}
+                  </p>
+                  {cronStatus.cronRunning && (
+                    <p className="text-xs text-indigo-600 font-medium">⚙️ Import läuft gerade...</p>
+                  )}
+                  {cronStatus.lastCronResult && (
+                    <p className="text-xs text-gray-400">Letztes Ergebnis: {cronStatus.lastCronResult}</p>
+                  )}
+                  {cronStatus.lastCronRun && (
+                    <p className="text-xs text-gray-400">Letzter Lauf: {new Date(cronStatus.lastCronRun).toLocaleString('de-CH')}</p>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1408,16 +1426,19 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         return
       }
 
-      // Pre-load all images in parallel batches of 30
-      const BATCH = 30
+      // Pre-load all images in sequential batches of 8 (browser connection limit)
+      const BATCH = 8
       const b64Map = new Map<number, string>()
       for (let i = 0; i < allImages.length; i += BATCH) {
         const batch = allImages.slice(i, i + BATCH)
         const pct = Math.round((i / allImages.length) * 80)
-        onMessage({ text: `PDF: Lade Bilder... ${pct}% (${i}/${allImages.length})`, type: 'info' })
+        if (i % 80 === 0) onMessage({ text: `PDF: Lade Bilder... ${pct}% (${i}/${allImages.length})`, type: 'info' })
         await Promise.all(batch.map(async (img) => {
           try {
-            const imgRes = await fetch(`/api/tile/${img.id}?size=64`)
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 8000)
+            const imgRes = await fetch(`/api/tile/${img.id}?size=64`, { signal: controller.signal })
+            clearTimeout(timeout)
             if (!imgRes.ok) return
             const blob = await imgRes.blob()
             const b64 = await new Promise<string>((resolve, reject) => {

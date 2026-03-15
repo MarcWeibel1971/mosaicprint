@@ -26,6 +26,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
 import { createContext } from "./context.js";
 import * as db from "./db.js";
+import { cronState } from "./cron-state.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
 
@@ -1125,3 +1126,133 @@ db.ensureSchema()
   .catch((e) => {
     console.error("[MosaicPrint] DB init failed (non-fatal):", e.message);
   });
+
+// ── Hourly Auto-Import Cron-Job ────────────────────────────────────────────────
+// Runs every hour, uses gap-based analysis to fill most-needed color buckets first
+// Uses Pexels as primary source (25k req/month), Pixabay as fallback
+const CRON_TILE_TARGET = 100_000;
+const CRON_IMPORT_PER_RUN = 300;  // max tiles per hourly run
+const CRON_INTERVAL_MS_LOCAL = 60 * 60 * 1000; // 1 hour
+
+async function runAutoImportCron() {
+  if (cronState.running) {
+    console.log('[cron] Auto-import already running, skipping');
+    return;
+  }
+  try {
+    const pool = db.getPool();
+    const countRes = await pool.query('SELECT COUNT(*) FROM mosaic_images');
+    const current = Number(countRes.rows[0].count);
+    if (current >= CRON_TILE_TARGET) {
+      console.log(`[cron] Target reached (${current}/${CRON_TILE_TARGET}), skipping auto-import`);
+      cronState.lastResult = `Ziel erreicht: ${current.toLocaleString()}/${CRON_TILE_TARGET.toLocaleString()} Bilder`;
+      return;
+    }
+    cronState.running = true;
+    cronState.lastRun = new Date().toISOString();
+    console.log(`[cron] Auto-import starting: ${current}/${CRON_TILE_TARGET} tiles, importing ${CRON_IMPORT_PER_RUN}`);
+
+    // Gap analysis: find most-needed color buckets
+    const { analyzeDbGapsForCron } = await import('./router.js');
+    const gapTasks = await analyzeDbGapsForCron(200);
+    const keywords = gapTasks.slice(0, 20).map((t: any) => t.query);
+    console.log(`[cron] Top gaps: ${keywords.slice(0, 5).join(', ')}...`);
+
+    // Try Pexels first, Pixabay as fallback
+    const sources = [
+      { name: 'pexels', key: process.env.PEXELS_API_KEY, perPage: 80, baseUrl: 'https://api.pexels.com/v1/search' },
+      { name: 'pixabay', key: process.env.PIXABAY_API_KEY, perPage: 100, baseUrl: 'https://pixabay.com/api/' },
+    ];
+
+    let totalImported = 0;
+    for (const source of sources) {
+      if (totalImported >= CRON_IMPORT_PER_RUN) break;
+      if (!source.key) { console.log(`[cron] ${source.name} API key missing, skipping`); continue; }
+
+      for (const keyword of keywords) {
+        if (totalImported >= CRON_IMPORT_PER_RUN) break;
+        try {
+          const page = Math.floor(Math.random() * 5) + 1;
+          let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
+
+          if (source.name === 'pexels') {
+            const res = await fetch(
+              `${source.baseUrl}?query=${encodeURIComponent(keyword)}&per_page=${source.perPage}&page=${page}&orientation=square`,
+              { headers: { Authorization: source.key } }
+            );
+            if (!res.ok) { console.log(`[cron] Pexels ${res.status} for "${keyword}"`); continue; }
+            const data = await res.json() as any;
+            photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+          } else if (source.name === 'pixabay') {
+            const res = await fetch(
+              `${source.baseUrl}?key=${encodeURIComponent(source.key)}&q=${encodeURIComponent(keyword)}&per_page=${source.perPage}&page=${page}&image_type=photo&safesearch=true`,
+              { headers: { 'Accept': 'application/json' } }
+            );
+            if (!res.ok) { console.log(`[cron] Pixabay ${res.status} for "${keyword}"`); continue; }
+            const data = await res.json() as any;
+            photos = (data.hits ?? []).map((p: any) => ({
+              sourceUrl: p.largeImageURL || p.webformatURL || '',
+              tile128Url: p.webformatURL || p.previewURL || '',
+            })).filter((p: any) => p.tile128Url);
+          }
+
+          // Insert new photos (dedup by source_url)
+          let batchNew = 0;
+          for (const photo of photos) {
+            if (totalImported >= CRON_IMPORT_PER_RUN) break;
+            if (!photo.tile128Url) continue;
+            try {
+              // Fetch and process the tile image
+              const imgRes = await fetch(photo.tile128Url);
+              if (!imgRes.ok) continue;
+              const imgBuf = Buffer.from(await imgRes.arrayBuffer());
+              // Resize to 128px and compute LAB
+              const resized = await sharp(imgBuf).resize(128, 128, { fit: 'cover' }).raw().toBuffer({ resolveWithObject: true });
+              const { data: px, info } = resized;
+              const pixelCount = info.width * info.height;
+              // Compute average LAB
+              let rSum = 0, gSum = 0, bSum2 = 0;
+              for (let j = 0; j < px.length; j += 3) { rSum += px[j]; gSum += px[j + 1]; bSum2 += px[j + 2]; }
+              const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+              const rl = toLinear(rSum / pixelCount), gl = toLinear(gSum / pixelCount), bl2 = toLinear(bSum2 / pixelCount);
+              const X = rl * 0.4124564 + gl * 0.3575761 + bl2 * 0.1804375;
+              const Y = rl * 0.2126729 + gl * 0.7151522 + bl2 * 0.0721750;
+              const Z = rl * 0.0193339 + gl * 0.1191920 + bl2 * 0.9503041;
+              const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+              const avgL = 116 * f(Y / 1.0) - 16;
+              const avgA = 500 * (f(X / 0.95047) - f(Y / 1.0));
+              const avgB = 200 * (f(Y / 1.0) - f(Z / 1.08883));
+              // Insert into DB (ignore duplicates)
+              const result = await pool.query(
+                `INSERT INTO mosaic_images (tile128_url, source_url, avg_l, avg_a, avg_b, source_name)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (source_url) DO NOTHING
+                 RETURNING id`,
+                [photo.tile128Url, photo.sourceUrl || photo.tile128Url, avgL, avgA, avgB, source.name]
+              );
+              if (result.rows.length > 0) { totalImported++; batchNew++; }
+            } catch { /* skip failed tiles */ }
+          }
+          if (batchNew > 0) console.log(`[cron] "${keyword}" (${source.name}): +${batchNew}`);
+        } catch (e) { console.log(`[cron] Error for "${keyword}": ${e}`); }
+      }
+    }
+
+    cronState.lastResult = `+${totalImported} Bilder importiert (${new Date().toLocaleTimeString('de-CH')})`;
+    console.log(`[cron] Auto-import done: +${totalImported} tiles (total: ${current + totalImported}/${CRON_TILE_TARGET})`);
+    // Invalidate tile index cache after import
+    if (totalImported > 0) invalidateIndexCache();
+  } catch (e) {
+    console.error('[cron] Auto-import error:', e);
+    cronState.lastResult = `Fehler: ${e}`;
+  } finally {
+    cronState.running = false;
+  }
+}
+
+// Start cron after 2 minute delay (let server stabilize first)
+setTimeout(() => {
+  console.log('[cron] Auto-import cron-job initialized (runs every hour)');
+  runAutoImportCron(); // First run immediately after startup delay
+  setInterval(runAutoImportCron, CRON_INTERVAL_MS_LOCAL);
+}, 2 * 60 * 1000);

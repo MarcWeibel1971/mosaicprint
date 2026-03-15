@@ -3,6 +3,7 @@ import { router, publicProcedure } from "./trpc.js";
 import * as db from "./db.js";
 import { renderMosaicOnServer, type TileData } from "./mosaicExport.js";
 import Stripe from "stripe";
+import { cronState } from "./cron-state.js";
 
 // ---- Constants ----
 const TILE_TARGET = 100_000;
@@ -319,6 +320,11 @@ function getBrightnessCategory(avgL: number): string {
 
 // Analyse the full database and return prioritized import tasks
 // NEW: Uses REAL DB proportions (score metrics) to set priorities, not just bucket counts
+export async function analyzeDbGapsForCron(targetPerBucket = 200): Promise<Array<{query: string; priority: number; deficit: number; label: string; subject: string}>>
+{
+  return analyzeDbGaps(targetPerBucket);
+}
+
 async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: string; priority: number; deficit: number; label: string; subject: string}>> {
   const pool = db.getPool();
 
@@ -984,9 +990,19 @@ export const appRouter = router({
   getCronStatus: publicProcedure.query(async () => {
     try {
       const current = await db.getMosaicImageCount();
-      return { enabled: current < TILE_TARGET, current, target: TILE_TARGET, remaining: Math.max(0, TILE_TARGET - current), intervalHours: 1, nextRunIn: CRON_INTERVAL_MS };
+      return {
+        enabled: current < TILE_TARGET,
+        current,
+        target: TILE_TARGET,
+        remaining: Math.max(0, TILE_TARGET - current),
+        intervalHours: 1,
+        nextRunIn: CRON_INTERVAL_MS,
+        cronRunning: cronState.running,
+        lastCronRun: cronState.lastRun,
+        lastCronResult: cronState.lastResult,
+      };
     } catch {
-      return { enabled: false, current: 0, target: TILE_TARGET, remaining: TILE_TARGET, intervalHours: 1, nextRunIn: CRON_INTERVAL_MS };
+      return { enabled: false, current: 0, target: TILE_TARGET, remaining: TILE_TARGET, intervalHours: 1, nextRunIn: CRON_INTERVAL_MS, cronRunning: false, lastCronRun: null, lastCronResult: null };
     }
   }),
 
