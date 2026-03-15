@@ -403,20 +403,24 @@ export default function Studio() {
   const [hiResLoading, setHiResLoading] = useState(false);
 
   // HI-RES: threshold for activating hi-res canvas
-    // Multi-tier zoom thresholds:
-    // zoom < 1.2 -> 64px tiles (preview, already loaded)
-    // zoom 1.2-1.8 -> 128px tiles (medium zoom)
-    // zoom > 1.8 -> 200px tiles (high zoom, crisp detail)
-    // Mobile: höherer Threshold + kleinere Tiles = deutlich schneller
+    // 3-tier resolution system for crisp detail at all zoom levels:
+    // Mobile:
+    //   zoom < 1.5  -> no hi-res (64px preview canvas)
+    //   zoom 1.5-3x -> 128px tiles
+    //   zoom 3-5x   -> 256px tiles (new tier for medium-high zoom)
+    //   zoom > 5x   -> 400px tiles (max quality for extreme zoom like 800%)
+    // Desktop:
+    //   zoom < 1.0  -> no hi-res
+    //   zoom 1.0-1.6 -> 128px tiles
+    //   zoom 1.6-3x  -> 200px tiles
+    //   zoom > 3x    -> 400px tiles
     const _isMobileHR = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
-    const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;  // LOWERED: hi-res activates immediately on desktop
-    const ULTRA_RES_THRESHOLD = _isMobileHR ? 2.0 : 1.6; // Mobile: 2x zoom → 128px (was 3.0)
+    const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;
     const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
-    // Determine which resolution tier to use
-    // Mobile: 128px ab 2x Zoom (war 64px bis 3x), Desktop: 128px oder 200px
+    // 3-tier resolution: higher zoom -> larger tiles -> crisper detail
     const hiResTileSize = _isMobileHR
-      ? (zoom >= (ULTRA_RES_THRESHOLD) ? 128 : 64)
-      : (zoom >= (ULTRA_RES_THRESHOLD) ? 200 : 128);
+      ? (zoom >= 5.0 ? 400 : zoom >= 3.0 ? 256 : 128)
+      : (zoom >= 3.0 ? 400 : zoom >= 1.6 ? 200 : 128);
     // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
     const hiResOpacity = showHiRes && hiResReady
       ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
@@ -480,7 +484,9 @@ export default function Studio() {
           const chunkSize = 1500;
           for (let i = 0; i < uniqueIds.length; i += chunkSize) {
             const chunk = uniqueIds.slice(i, i + chunkSize);
-            const resp = await fetch(`/api/tile-urls?ids=${chunk.join(',')}`);
+            // Use source_url (higher resolution) when zoom tier requires 256px+ tiles
+            const useHiResSource = HIREZ_PX >= 256;
+            const resp = await fetch(`/api/tile-urls?ids=${chunk.join(',')}${useHiResSource ? '&hires=1' : ''}`);
             if (resp.ok) {
               const partial = await resp.json() as Record<number, string>;
               Object.assign(directUrlMap, partial);

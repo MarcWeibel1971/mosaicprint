@@ -709,7 +709,7 @@ type QualityResult = {
   reason: string;
 };
 
-async function checkTileQuality(url: string): Promise<QualityResult> {
+async function checkTileQuality(url: string, subject?: string): Promise<QualityResult> {
   const defaultPass: QualityResult = { saturation: 0, edgeEnergy: 0, hasBrightBand: false, rejected: false, reason: '' };
   try {
     const { Jimp } = await import('jimp');
@@ -782,9 +782,15 @@ async function checkTileQuality(url: string): Promise<QualityResult> {
     const hasBrightBand = (brightCount / totalBandPx) > 0.55;
 
     // ── Decision ──
+    // Portrait/face images have high edge energy by nature (facial features, hair)
+    // Use relaxed thresholds for portrait subjects to avoid over-filtering
+    const isPortraitSubject = subject === 'portrait' || subject === 'portrait_nature' ||
+      subject === 'analysis' || subject === 'face';
+    const satThreshold = isPortraitSubject ? 0.65 : 0.55;  // portraits can be more saturated
+    const edgeThreshold = isPortraitSubject ? 0.75 : 0.45;  // portraits have high edge energy
     const reasons: string[] = [];
-    if (saturation > 0.55) reasons.push(`sat=${saturation.toFixed(2)}>0.55`);
-    if (edgeEnergy  > 0.45) reasons.push(`edge=${edgeEnergy.toFixed(2)}>0.45`);
+    if (saturation > satThreshold) reasons.push(`sat=${saturation.toFixed(2)}>${satThreshold}`);
+    if (edgeEnergy  > edgeThreshold) reasons.push(`edge=${edgeEnergy.toFixed(2)}>${edgeThreshold}`);
     if (hasBrightBand)       reasons.push('watermark-band');
     const rejected = reasons.length > 0;
 
@@ -1184,7 +1190,7 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     // ── Post-Import Quality Check ──
-                    const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl);
+                    const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl, task.subject);
                     if (quality.rejected) {
                       batchRejected++;
                       return; // discard – too vivid / noisy / watermarked
@@ -2074,7 +2080,7 @@ export const appRouter = router({
                       const batch = alPhotos.slice(i, i + AL_CONCURRENCY);
                       await Promise.all(batch.map(async (photo) => {
                         try {
-                          const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl);
+                          const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl, task.subject);
                           if (quality.rejected) return;
                           const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
                           const ins = await db.insertMosaicImage({ ...photo,
