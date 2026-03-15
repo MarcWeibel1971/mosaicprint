@@ -248,8 +248,11 @@ function loadSettings(): AlgoSettings {
   } catch { return { ...DEFAULT_SETTINGS } }
 }
 function saveSettings(s: AlgoSettings) {
+  // Save to SETTINGS_KEY for Admin panel state persistence
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
-  // Also save as overrides so Studio preset-merge respects manual Admin changes
+  // Save as overrides so Studio preset-merge respects manual Admin changes.
+  // NOTE: Studio's renderMosaic reads SETTINGS_KEY directly, but portrait-critical
+  // parameters (tilePx, enableRotation) are enforced at render time regardless.
   localStorage.setItem(OVERRIDES_KEY, JSON.stringify(s))
 }
 

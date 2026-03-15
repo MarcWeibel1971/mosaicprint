@@ -1076,6 +1076,22 @@ export default function Studio() {
     // iOS Safari kills tabs at ~150 MB RAM. Each tile image ~20 KB -> max ~400 tiles in memory.
     // With baseTiles=40, tilePx=12: 40x50x12px = 480x600px canvas, ~2000 cells
     // TOP_K=15 -> ~1200 unique tiles needed (well within 400 LRU cache limit)
+    // Portrait mode: enforce critical parameters regardless of device or Admin overrides.
+    // Admin may have saved tilePx:16 into mosaicprint_algo_settings, which would override the preset.
+    // We enforce portrait-critical caps here at render time so they always apply.
+    if (savedSettings.portraitMode === true) {
+      // tilePx: portrait needs fine tiles (max 8px) for face detail
+      if ((savedSettings.tilePx ?? 16) > 8) {
+        console.log('[Studio] Portrait: capping tilePx from', savedSettings.tilePx, '→ 8');
+        savedSettings.tilePx = 8;
+      }
+      // enableRotation: portrait tiles must not rotate (ruins face structure)
+      if (savedSettings.enableRotation !== false) {
+        console.log('[Studio] Portrait: disabling rotation (was', savedSettings.enableRotation, ')');
+        savedSettings.enableRotation = false;
+      }
+    }
+
     if (isMobile) {
       // Mobile caps: portrait gets more tiles/smaller tiles for face sharpness
       // Portrait: 90 tiles x 8px = 720x960px canvas, ~8100 cells -> ~26 MB RAM (safe)
