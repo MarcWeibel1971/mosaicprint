@@ -49,7 +49,7 @@ export function invalidateIndexCache() {
 
 // 2. Tile proxy cache: avoids DB query + upstream fetch for repeated tile requests
 //    LRU-style: evict oldest when over limit
-const TILE_CACHE_MAX = 3000; // max tiles in memory (~60 MB at 20 KB/tile)
+const TILE_CACHE_MAX = 15000; // max tiles in memory (~300 MB at 20 KB/tile) – Pro plan has 32 GB
 const tileCacheMap = new Map<string, { buf: Buffer; contentType: string; ts: number }>();
 
 function evictTileCache() {
@@ -656,8 +656,8 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const atlasW = cols * tileSize;
     const atlasH = rows2 * tileSize;
 
-    const CONCURRENCY = 50; // Sharp is fast enough to handle 50 concurrent fetches
-    const UPSTREAM_TIMEOUT = 10000; // 10s per tile fetch
+    const CONCURRENCY = 100; // Pro plan: higher concurrency for faster atlas builds
+    const UPSTREAM_TIMEOUT = 15000; // 15s per tile fetch
     const tileBuffers = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
@@ -779,7 +779,7 @@ async function buildAtlasJimp(
   return { jpeg, map, cols, rows };
 }
 const atlasCacheMap = new Map<string, AtlasCache>();
-const ATLAS_CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes (increased from 30)
+const ATLAS_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours – Pro plan: longer cache TTL
 let atlasBuildInProgress = new Set<string>();
 
 app.get('/api/tile-atlas', async (req, res) => {
@@ -835,7 +835,7 @@ app.get('/api/tile-atlas', async (req, res) => {
     const atlasH = rows2 * tileSize;
 
     // Build atlas using Jimp (pure JS, no native binaries)
-    const CONCURRENCY = 20;
+    const CONCURRENCY = 50; // Pro plan: higher concurrency
     const tileBuffers2 = new Map<number, Buffer>();
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
@@ -935,7 +935,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
 
     // Load tile images in parallel batches with disk cache
     const tileBuffers: Record<number, Buffer> = {};
-    const CONCURRENCY = 10; // lower concurrency for large images
+    const CONCURRENCY = 20; // Pro plan: higher concurrency for print rendering
     for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
       const batch = uniqueIds.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (id) => {

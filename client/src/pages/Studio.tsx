@@ -1340,8 +1340,8 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
       const neededArray = Array.from(neededTileIds);
-      const ATLAS_CHUNK = isMobileOrSlow ? 150 : 1000; // Mobile: smaller chunks to avoid timeout
-      const ATLAS_TIMEOUT = isMobileOrSlow ? 15000 : 45000; // Mobile: 15s timeout for faster fallback
+      const ATLAS_CHUNK = isMobileOrSlow ? 200 : 2500; // Pro plan: larger chunks (2500 tiles/chunk)
+      const ATLAS_TIMEOUT = isMobileOrSlow ? 20000 : 90000; // Pro plan: 90s timeout for large chunks
 
       // Helper: fetch one atlas chunk and extract tiles into tileImgMap
       const fetchAtlasChunk = async (chunkIds: number[], progressStart: number, progressEnd: number): Promise<boolean> => {
@@ -1405,8 +1405,8 @@ export default function Studio() {
           await fetchAtlasChunk(chunkIds.slice(0, half), pStart, Math.round((pStart + pEnd) / 2));
           await fetchAtlasChunk(chunkIds.slice(half), Math.round((pStart + pEnd) / 2), pEnd);
         }
-        // Small delay between chunks to avoid Railway rate-limiting
-        if (ci < totalChunks - 1) await new Promise(r => setTimeout(r, 200));
+        // Small delay between chunks (reduced for Pro plan)
+        if (ci < totalChunks - 1) await new Promise(r => setTimeout(r, 50));
       }
       console.log(`[Studio] Targeted atlas: ${tileImgMap.size}/${neededTileIds.size} tiles loaded`);
       setProgress(42);
