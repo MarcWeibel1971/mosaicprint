@@ -113,7 +113,9 @@ app.get("/api/tile-lab-index", async (req, res) => {
               COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly,
               COALESCE(tile_type, 'medium') as tile_type
        FROM mosaic_images
-       WHERE avg_l IS NOT NULL ${themeFilter} ORDER BY id ASC`,
+       WHERE avg_l IS NOT NULL
+         AND (r2_url IS NOT NULL OR COALESCE(source_provider, '') != 'pixabay')
+         ${themeFilter} ORDER BY id ASC`,
       queryParams
     );
     const rows = result.rows;
@@ -651,7 +653,7 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const pool = db.getPool();
     const placeholders = ids.map((_,i) => `$${i+1}`).join(',');
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id IN (${placeholders}) ORDER BY id ASC`,
+      `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id IN (${placeholders}) ORDER BY id ASC`,
       ids
     );
     const rows = result.rows;
@@ -669,7 +671,15 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (row: any) => {
-        const url = row.tile128_url || row.source_url || '';
+        // Prefer R2 URL (permanent), skip Pixabay tiles without R2 URL (hotlink-protected)
+        let url: string;
+        if (row.r2_url) {
+          url = row.r2_url;
+        } else if (row.source_provider === 'pixabay') {
+          return; // Pixabay URLs are hotlink-protected, skip until migrated to R2
+        } else {
+          url = row.tile128_url || row.source_url || '';
+        }
         if (!url) return;
         // Check in-memory tile cache first (avoids upstream fetch)
         const cacheKeyTile = `${row.id}-${tileSize}`;
@@ -819,12 +829,13 @@ app.get('/api/tile-atlas', async (req, res) => {
 
     const pool = db.getPool();
     const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
-    const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `WHERE subject = $1` : ``;
+    const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `AND subject = $1` : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
 
-    // Fetch tile IDs and URLs
+    // Fetch tile IDs and URLs - prefer R2 URLs, exclude Pixabay tiles without R2
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url FROM mosaic_images
+      `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images
+       WHERE (r2_url IS NOT NULL OR COALESCE(source_provider, '') != 'pixabay')
        ${themeFilter} ORDER BY id ASC LIMIT $${queryParams.length + 1}`,
       [...queryParams, maxTiles]
     );
@@ -847,7 +858,15 @@ app.get('/api/tile-atlas', async (req, res) => {
     for (let i = 0; i < n; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (row: any) => {
-        const url = row.tile128_url || row.source_url || '';
+        // Prefer R2 URL (permanent), skip Pixabay tiles without R2 URL (hotlink-protected)
+        let url: string;
+        if (row.r2_url) {
+          url = row.r2_url;
+        } else if (row.source_provider === 'pixabay') {
+          return; // Skip Pixabay tiles without R2 URL
+        } else {
+          url = row.tile128_url || row.source_url || '';
+        }
         if (!url) return;
         try {
           let imgBuf: Buffer | null = null;
@@ -926,18 +945,25 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     console.log(`[print-render] Request: cols=${cols} rows=${rows} tilePx=${tilePx} → clamped=${TILE_PX} output=${outW}×${outH}px`);
     const pool = db.getPool();
 
-    // Fetch unique tile IDs needed – prefer source_url for hi-res, fallback to tile128_url
+    // Fetch unique tile IDs needed – prefer r2_url (permanent), then source_url for hi-res
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url FROM mosaic_images WHERE id = ANY($1)`,
+      `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
       [uniqueIds]
     );
     const urlMap: Record<number, { hiRes: string; fallback: string }> = {};
     for (const row of result.rows) {
-      urlMap[row.id] = {
-        hiRes: row.source_url || '',
-        fallback: row.tile128_url || row.source_url || ''
-      };
+      if (row.r2_url) {
+        urlMap[row.id] = { hiRes: row.r2_url, fallback: row.r2_url };
+      } else if (row.source_provider === 'pixabay') {
+        // Skip Pixabay tiles without R2 URL (hotlink-protected)
+        continue;
+      } else {
+        urlMap[row.id] = {
+          hiRes: row.source_url || '',
+          fallback: row.tile128_url || row.source_url || ''
+        };
+      }
     }
 
     // Load tile images in parallel batches with disk cache

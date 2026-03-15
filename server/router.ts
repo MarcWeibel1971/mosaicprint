@@ -1087,7 +1087,7 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    const inserted = await db.insertMosaicImage({ ...photo,
+                    const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
@@ -1097,7 +1097,7 @@ export const appRouter = router({
                       importQuery: keyword,
                       tileType: lab?.tileType,
                     });
-                    if (inserted) { imported++; batchNew++; status.imported = imported; }
+                    if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
                 }));
               }
@@ -1246,11 +1246,8 @@ export const appRouter = router({
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
                     // Upload to R2 for permanent storage (avoids expiring CDN URLs)
-                    let r2Url: string | null = null;
-                    if (isR2Configured()) {
-                      r2Url = await downloadAndUploadToR2(0, photo.tile128Url ?? photo.sourceUrl);
-                    }
-                    const inserted = await db.insertMosaicImage({ ...photo,
+                    // R2 upload is handled automatically by insertMosaicImage (fire-and-forget)
+                    const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
                       trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
@@ -1261,9 +1258,8 @@ export const appRouter = router({
                       sourceProvider: input.sourceId,
                       importQuery: task.query,
                       tileType: lab?.tileType,
-                      r2Url,
                     });
-                    if (inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
+                    if (result.inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
                 }));
               }
@@ -1389,12 +1385,12 @@ export const appRouter = router({
                   await Promise.all(batch.map(async (photo) => {
                     try {
                       const lab = await computeLabForUrl(photo.tile128Url ?? photo.sourceUrl);
-                      const inserted = await db.insertMosaicImage({ ...photo,
+                      const result = await db.insertMosaicImage({ ...photo,
                         avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                         sourceProvider: src,
                         importQuery: keyword,
                       });
-                      if (inserted) { imported++; batchNew++; status.imported = imported; }
+                      if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                     } catch { /* duplicate – skip */ }
                   }));
                 }
@@ -2153,7 +2149,7 @@ export const appRouter = router({
                             importQuery: task.query,
                             tileType: lab?.tileType,
                           });
-                          if (ins) { alImported++; alBatchImported++; smartImportJobs[jobKey].imported = alImported; totalImported++; }
+                          if (ins.inserted) { alImported++; alBatchImported++; smartImportJobs[jobKey].imported = alImported; totalImported++; }
                         } catch { /* skip */ }
                       }));
                     }

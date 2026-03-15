@@ -1,6 +1,7 @@
 import pg from "pg";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 
 let _pool: pg.Pool | null = null;
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -403,7 +404,7 @@ export async function insertMosaicImage(data: {
   sourceProvider?: string; // 'pexels' | 'unsplash' | 'pixabay' | 'picsum' | 'upload'
   importQuery?: string;    // keyword used to find this tile
   tileType?: string;       // 'calm' | 'medium' | 'busy' – texture complexity
-}): Promise<boolean> {
+}): Promise<{ inserted: boolean; id: number | null }> {
   const pool = getPool();
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
   const tlL = data.tlL ?? data.avgL, tlA = data.tlA ?? data.avgA, tlB = data.tlB ?? data.avgB;
@@ -446,7 +447,27 @@ export async function insertMosaicImage(data: {
       data.r2Url ?? null
     ]
   );
-  return (res.rowCount ?? 0) > 0;
+  const insertedId: number | null = res.rows[0]?.id ?? null;
+  const wasInserted = (res.rowCount ?? 0) > 0;
+
+  // Auto-upload to R2 after insert (if no r2Url provided and R2 is configured)
+  if (wasInserted && insertedId && !data.r2Url && isR2Configured()) {
+    const urlForR2 = data.tile128Url ?? data.sourceUrl;
+    // Skip data URLs and Pixabay hotlink-protected URLs
+    const isPixabay = urlForR2.includes('pixabay.com/get/');
+    if (!urlForR2.startsWith('data:') && !isPixabay) {
+      // Fire-and-forget: upload to R2 and update DB (don't block insert response)
+      downloadAndUploadToR2(insertedId, urlForR2).then(async (r2Url) => {
+        if (r2Url) {
+          try {
+            await getPool().query('UPDATE mosaic_images SET r2_url = $1 WHERE id = $2', [r2Url, insertedId]);
+          } catch { /* ignore update errors */ }
+        }
+      }).catch(() => { /* ignore R2 errors */ });
+    }
+  }
+
+  return { inserted: wasInserted, id: insertedId };
 }
 
 // ── Quality Check DB functions ────────────────────────────────────────────────
