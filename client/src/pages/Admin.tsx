@@ -3509,10 +3509,13 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       }
 
       // Step 3: Server pool gap analysis
+      // Pass detected category for context-aware keyword suggestions
+      const detectedCat = falResult?.sceneType ?? (featureVector.sceneType !== 'unknown' ? featureVector.sceneType : undefined);
       const body = {
         imageUrl: testImageFile ? undefined : testImageUrl.trim(),
         labZones,
         imageError: imageError || undefined,
+        category: detectedCat,
       }
       const res = await fetch('/api/trpc/analyzeTestImage', {
         method: 'POST',

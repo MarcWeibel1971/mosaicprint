@@ -1103,9 +1103,12 @@ export const appRouter = router({
       sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
       count: z.number().min(1).max(5000).default(500),
       targetPerBucket: z.number().min(100).max(2000).default(400),
+      // Optional: specific keywords from image analysis (bypasses DB gap analysis)
+      keywords: z.array(z.string()).optional(),
+      jobLabel: z.string().optional(), // custom label for the job (e.g. "Analyse-Import: Portrait")
     }))
     .mutation(async ({ input }) => {
-      const jobKey = `smart_${input.sourceId}`;
+      const jobKey = input.keywords?.length ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       if (smartImportJobs[jobKey]?.running) return { started: false };
       smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count };
       const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
@@ -1116,8 +1119,16 @@ export const appRouter = router({
             : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
 
-          // Analyse DB gaps: get prioritized list of (query, deficit, label)
-          const tasks = await analyzeDbGaps(input.targetPerBucket);
+          // If specific keywords provided (from image analysis), use them directly
+          // Otherwise fall back to DB gap analysis
+          let tasks: Array<{query: string; priority: number; deficit: number; label: string; subject: string}>;
+          if (input.keywords && input.keywords.length > 0) {
+            log(`🔬 Analyse-Import: ${input.keywords.length} Keywords aus Bildanalyse${input.jobLabel ? ` (${input.jobLabel})` : ''}`);
+            tasks = input.keywords.map((kw, i) => ({ query: kw, priority: 10 - i, deficit: 500, label: `🔬 ${kw}`, subject: 'analysis' }));
+          } else {
+            // Analyse DB gaps: get prioritized list of (query, deficit, label)
+            tasks = await analyzeDbGaps(input.targetPerBucket);
+          }
           log(`🔍 DB-Analyse: ${tasks.length} Import-Tasks gefunden (Ziel: ${input.targetPerBucket} pro Bucket)`);
           log(`Top-Prioritäten: ${tasks.slice(0, 5).map(t => `${t.label}(${t.deficit})`).join(", ")}`);
 
@@ -1213,9 +1224,9 @@ export const appRouter = router({
 
   // Admin: Smart Import status
   getSmartImportStatus: publicProcedure
-    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels") }))
+    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
-      const jobKey = `smart_${input.sourceId}`;
+      const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       return smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
     }),
 
@@ -1818,6 +1829,7 @@ export const appRouter = router({
         L: z.number(), a: z.number(), b: z.number(), count: z.number()
       })).optional(),
       imageError: z.string().optional(),
+      category: z.string().optional(), // detected category (portrait, landscape, etc.) for context-aware keywords
     }))
     .mutation(async ({ input }) => {
       const imageLABZones: Array<{L: number; a: number; b: number; count: number}> = input.labZones ?? [];
@@ -1825,6 +1837,88 @@ export const appRouter = router({
 
       // Get pool LAB distribution
       const poolStats = await db.getPoolLABStats();
+
+      // Category-aware keyword lookup tables
+      const category = input.category ?? 'general';
+      const isPortrait = category === 'portrait' || category === 'people' || category === 'face';
+      const isLandscape = category === 'landscape' || category === 'nature' || category === 'outdoor';
+      const isNightScene = category === 'night' || category === 'dark';
+
+      // Keyword tables: [generic, portrait-specific, landscape-specific]
+      // Each entry: { condition, keyword, reason }
+      type KwEntry = { keyword: string; reason: string };
+      const kwTable: { test: (z: {L: number; a: number; b: number; brightness: string; warmth: string; saturation: string}) => boolean; generic: KwEntry; portrait: KwEntry; landscape: KwEntry }[] = [
+        // Bright neutral (white/light backgrounds)
+        {
+          test: z => z.L > 70 && Math.abs(z.a) < 5 && Math.abs(z.b) < 5,
+          generic:   { keyword: 'white paper texture minimal',           reason: 'helle neutrale Zone fehlt' },
+          portrait:  { keyword: 'soft white studio background bokeh',    reason: 'heller neutraler Hintergrund fehlt (Portrait)' },
+          landscape: { keyword: 'bright overcast sky clouds white',      reason: 'heller Himmel fehlt' },
+        },
+        // Bright cool
+        {
+          test: z => z.L > 70 && z.b < -3,
+          generic:   { keyword: 'overcast sky muted cool',               reason: 'helle kühle Zone fehlt' },
+          portrait:  { keyword: 'soft blue gray background portrait',    reason: 'kühler Hintergrund fehlt (Portrait)' },
+          landscape: { keyword: 'blue sky clouds bright',                reason: 'blauer Himmel fehlt' },
+        },
+        // Bright warm
+        {
+          test: z => z.L > 70 && z.b > 8,
+          generic:   { keyword: 'warm light golden bright',              reason: 'helle warme Zone fehlt' },
+          portrait:  { keyword: 'golden hour skin warm light portrait',  reason: 'warmes Licht auf Haut fehlt' },
+          landscape: { keyword: 'golden hour sunlight warm bright',      reason: 'Goldstunde-Licht fehlt' },
+        },
+        // Skin tones (mid bright warm reddish)
+        {
+          test: z => z.a > 6 && z.L > 45 && z.L < 80,
+          generic:   { keyword: 'skin tone portrait warm light',         reason: 'Hautton-Zone fehlt' },
+          portrait:  { keyword: 'close-up skin texture face portrait',   reason: 'Hauttöne für Gesicht fehlen' },
+          landscape: { keyword: 'warm earth sand desert texture',        reason: 'warme Erdtöne fehlen' },
+        },
+        // Dark cool
+        {
+          test: z => z.L < 35 && z.b < 0,
+          generic:   { keyword: 'dark ocean water night',                reason: 'dunkle kühle Zone fehlt' },
+          portrait:  { keyword: 'dark shadow portrait moody black',      reason: 'dunkle Schatten fehlen (Portrait)' },
+          landscape: { keyword: 'dark water night reflection',           reason: 'dunkles Wasser fehlt' },
+        },
+        // Dark warm
+        {
+          test: z => z.L < 35 && z.b > 5,
+          generic:   { keyword: 'dark wood texture warm',                reason: 'dunkle warme Zone fehlt' },
+          portrait:  { keyword: 'dark hair brown black closeup',         reason: 'dunkle Haare/Schatten fehlen' },
+          landscape: { keyword: 'dark forest shadow warm',               reason: 'dunkler Wald fehlt' },
+        },
+        // Mid cool
+        {
+          test: z => z.b < -5 && z.L >= 35 && z.L <= 70,
+          generic:   { keyword: 'blue gray fog misty',                   reason: 'mittlere kühle Zone fehlt' },
+          portrait:  { keyword: 'gray fabric texture soft neutral',      reason: 'neutrale Kleidung/Hintergrund fehlt' },
+          landscape: { keyword: 'misty fog blue mountain',               reason: 'Nebel/Dunst fehlt' },
+        },
+        // Mid warm saturated
+        {
+          test: z => z.b > 10 && z.a > 5,
+          generic:   { keyword: 'autumn leaves warm golden',             reason: 'warme Sättigungs-Zone fehlt' },
+          portrait:  { keyword: 'warm fabric texture orange brown',      reason: 'warme Kleidungsfarben fehlen' },
+          landscape: { keyword: 'autumn foliage warm orange',            reason: 'Herbstfarben fehlen' },
+        },
+        // Mid neutral muted
+        {
+          test: z => z.saturation === 'muted' && z.brightness === 'mid',
+          generic:   { keyword: 'neutral gray texture stone',            reason: 'mittlere neutrale Zone fehlt' },
+          portrait:  { keyword: 'soft bokeh neutral background gray',    reason: 'neutraler Hintergrund fehlt (Portrait)' },
+          landscape: { keyword: 'stone rock texture gray neutral',       reason: 'Stein/Fels fehlt' },
+        },
+        // Dark neutral
+        {
+          test: z => z.brightness === 'dark' && z.saturation === 'muted' && Math.abs(z.b) < 5,
+          generic:   { keyword: 'dark neutral texture shadow',           reason: 'dunkle neutrale Zone fehlt' },
+          portrait:  { keyword: 'dark clothing fabric texture black',    reason: 'dunkle Kleidung fehlt (Portrait)' },
+          landscape: { keyword: 'dark shadow rock neutral',              reason: 'dunkle Schatten fehlen' },
+        },
+      ];
 
       // Find gaps: image zones with insufficient pool coverage
       const gapZones: Array<{zone: string; needed: number; available: number; deficit: number}> = [];
@@ -1848,17 +1942,25 @@ export const appRouter = router({
             const desc = `${brightness} ${warmth} ${saturation} (L=${zone.L} a=${zone.a} b=${zone.b})`;
             gapZones.push({ zone: desc, needed, available, deficit });
 
-            // Generate keyword suggestions
+            // Generate category-aware keyword suggestions
             const priority = deficit > 200 ? 'high' : deficit > 80 ? 'medium' : 'low';
-            if (zone.L > 70 && zone.b < 0) keywordSuggestions.push({ keyword: 'overcast sky muted', reason: 'helle kühle Zone fehlt', priority });
-            else if (zone.L > 70 && Math.abs(zone.a) < 5 && Math.abs(zone.b) < 5) keywordSuggestions.push({ keyword: 'white paper texture minimal', reason: 'helle neutrale Zone fehlt', priority });
-            else if (zone.L < 35 && zone.b < 0) keywordSuggestions.push({ keyword: 'dark ocean water night', reason: 'dunkle kühle Zone fehlt', priority });
-            else if (zone.L < 35 && zone.b > 5) keywordSuggestions.push({ keyword: 'dark wood texture warm', reason: 'dunkle warme Zone fehlt', priority });
-            else if (zone.b < -5 && zone.L > 40 && zone.L < 70) keywordSuggestions.push({ keyword: 'blue gray fog misty', reason: 'mittlere kühle Zone fehlt', priority });
-            else if (zone.b > 10 && zone.a > 5) keywordSuggestions.push({ keyword: 'autumn leaves warm golden', reason: 'warme Sättigungs-Zone fehlt', priority });
-            else if (zone.a > 8 && zone.L > 50) keywordSuggestions.push({ keyword: 'skin tone portrait warm light', reason: 'Hautton-Zone fehlt', priority });
-            else if (saturation === 'muted' && brightness === 'mid') keywordSuggestions.push({ keyword: 'neutral gray texture stone', reason: 'mittlere neutrale Zone fehlt', priority });
-            else keywordSuggestions.push({ keyword: `${brightness} ${warmth} ${saturation} texture`, reason: `Lücke bei L=${zone.L}`, priority });
+            const zCtx = { ...zone, brightness, warmth, saturation };
+            let matched = false;
+            for (const entry of kwTable) {
+              if (entry.test(zCtx)) {
+                const kw = isPortrait ? entry.portrait : isLandscape ? entry.landscape : entry.generic;
+                keywordSuggestions.push({ keyword: kw.keyword, reason: kw.reason, priority });
+                matched = true;
+                break;
+              }
+            }
+            if (!matched) {
+              // Fallback: generic description but with category context
+              const fallback = isPortrait
+                ? `${brightness} ${warmth} portrait ${saturation === 'muted' ? 'soft' : 'vivid'}`
+                : `${brightness} ${warmth} ${saturation} texture`;
+              keywordSuggestions.push({ keyword: fallback, reason: `Lücke bei L=${zone.L}`, priority });
+            }
           }
         }
       }
