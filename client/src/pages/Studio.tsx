@@ -635,12 +635,26 @@ export default function Studio() {
           // This prevents stale localStorage (e.g. portraitMode:false from last session) from
           // overriding the freshly detected preset.
           const adminOverrides = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}'); } catch { return {}; } })();
-          const mergeWithAdmin = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides });
+          // Portrait-critical parameters must NOT be overridden by Admin settings:
+          // tilePx, maxReuse, rotation are essential for portrait quality
+          const PORTRAIT_LOCKED_KEYS = ['tilePx', 'baseTiles', 'maxReuse', 'rotation', 'neighborPenalty', 'neighborRadius'];
+          const mergeWithAdmin = (preset: Record<string, unknown>) => {
+            const merged = { ...preset, ...adminOverrides };
+            // If this is a portrait preset, restore locked keys from preset
+            if (preset.portraitMode === true) {
+              for (const key of PORTRAIT_LOCKED_KEYS) {
+                if (key in preset) merged[key] = preset[key];
+              }
+            }
+            return merged;
+          };
 
           if (imageType === 'portrait') {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
               tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
+              maxReuse: 6,            // allow reuse: prevents forced bad matches
+              rotation: false,        // no rotation: keeps tile orientation consistent
               neighborRadius: 5,
               neighborPenalty: 280,   // higher penalty: less tile repetition = more detail
               contrastBoost: 1.35,    // stronger contrast for crisp edges
@@ -723,10 +737,19 @@ export default function Studio() {
                 const falHasFace: boolean = falResult.hasFace ?? false;
                 const falSceneType: string = falResult.sceneType ?? '';
                 const adminOverrides2 = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}'); } catch { return {}; } })();
-                const mergeWithAdmin2 = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides2 });
+                const PORTRAIT_LOCKED_KEYS2 = ['tilePx', 'baseTiles', 'maxReuse', 'rotation', 'neighborPenalty', 'neighborRadius'];
+                const mergeWithAdmin2 = (preset: Record<string, unknown>) => {
+                  const merged = { ...preset, ...adminOverrides2 };
+                  if (preset.portraitMode === true) {
+                    for (const key of PORTRAIT_LOCKED_KEYS2) {
+                      if (key in preset) merged[key] = preset[key];
+                    }
+                  }
+                  return merged;
+                };
                 if (falHasFace && imageType !== 'portrait') {
                   // fal.ai found a face but heuristic missed it
-                  const portraitPreset = { baseTiles: 120, tilePx: 7, neighborRadius: 5, neighborPenalty: 280, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
+                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 6, rotation: false, neighborRadius: 5, neighborPenalty: 280, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
                   localStorage.removeItem('mosaicprint_selected_theme');
                   setAutoPresetApplied('Portrait');
