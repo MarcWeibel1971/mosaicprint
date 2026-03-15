@@ -401,6 +401,8 @@ export default function Studio() {
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
+  // Viewport-culling offset: where the hi-res canvas starts relative to preview canvas origin
+  const [hiResOffset, setHiResOffset] = useState({ x: 0, y: 0, cssW: 0, cssH: 0 });
 
   // HI-RES: threshold for activating hi-res canvas
     // 3-tier resolution system for crisp detail at all zoom levels:
@@ -450,88 +452,153 @@ export default function Studio() {
 
   // Track the last rendered hi-res tile size to re-render when zoom tier changes
   const lastHiResTileSizeRef = useRef<number>(0);
+  // Track viewport position for viewport-culling hi-res
+  const lastViewportKeyRef = useRef<string>('');
+  const hiResTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Render hi-res canvas when zoom crosses threshold or tier changes
+  // VIEWPORT-CULLING HI-RES: Same-size canvas as preview, only draw visible tiles at 128px
+  // The hi-res canvas has the same pixel dimensions as the preview canvas but uses 128px
+  // per tile instead of 7px. To stay within memory limits, we only draw the tiles that
+  // are currently visible in the viewport. On pan/zoom, we clear and redraw.
+  // This gives sharp tiles at any zoom level without memory issues.
+  const hiResImgCacheRef = useRef<Map<number, HTMLImageElement>>(new Map());
+
   useEffect(() => {
-    if (!showHiRes || hiResLoading) return;
+    if (!showHiRes) return;
     if (!assignmentRef.current.length || !validImgsRef.current.length || !mosaicParamsRef.current) return;
-    // Only re-render if tile size tier changed (avoid redundant renders)
-    if (hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
-    const renderHiRes = async () => {
-      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-      setHiResLoading(true);
-      const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
-      const HIREZ_PX = hiResTileSize; // capped by canvas memory limit (42px mobile, 68px desktop for 90x120 grid)
-      const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
+
+    // Debounce: wait 80ms after pan/zoom stops before re-rendering
+    if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current);
+    hiResTimerRef.current = setTimeout(() => {
+      renderViewportHiRes();
+    }, hiResReady ? 80 : 0); // instant on first render, debounced on pan/zoom
+
+    return () => { if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current); };
+
+    async function renderViewportHiRes() {
+      const { cols, rows, tilePx, canvasW, canvasH } = mosaicParamsRef.current!;
+      const displayScale = (mosaicParamsRef.current as any)._displayScale ?? 0.5;
       const hc = hiResCanvasRef.current;
-      if (!hc) { setHiResLoading(false); return; }
-      hc.width = hiW; hc.height = hiH;
-      hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
-      hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
-      const hCtx = hc.getContext('2d')!;
+      const container = containerRef.current;
+      if (!hc || !container) return;
+
+      // Container (viewport) dimensions
+      const containerW = container.clientWidth;
+      const containerH = container.clientHeight;
+
+      // Preview canvas CSS size
+      const cssW = canvasW * displayScale;
+      const cssH = canvasH * displayScale;
+      const tileCSS = tilePx * displayScale; // CSS size of one preview tile
+
+      // Calculate visible tile range from pan/zoom
+      // The canvas transform is: translate(pan.x, pan.y) scale(zoom) with origin at center
+      // A point (cx, cy) in canvas-CSS space maps to screen:
+      //   sx = containerW/2 + (cx - cssW/2) * zoom + pan.x
+      // Inverse:
+      //   cx = (sx - containerW/2 - pan.x) / zoom + cssW/2
+      const screenToCanvasX = (sx: number) => (sx - containerW / 2 - pan.x) / zoom + cssW / 2;
+      const screenToCanvasY = (sy: number) => (sy - containerH / 2 - pan.y) / zoom + cssH / 2;
+
+      const viewLeft = screenToCanvasX(0);
+      const viewTop = screenToCanvasY(0);
+      const viewRight = screenToCanvasX(containerW);
+      const viewBottom = screenToCanvasY(containerH);
+
+      // Convert to tile grid coords (with 2-tile margin for smooth panning)
+      const col0 = Math.max(0, Math.floor(viewLeft / tileCSS) - 2);
+      const row0 = Math.max(0, Math.floor(viewTop / tileCSS) - 2);
+      const col1 = Math.min(cols - 1, Math.ceil(viewRight / tileCSS) + 2);
+      const row1 = Math.min(rows - 1, Math.ceil(viewBottom / tileCSS) + 2);
+
+      const visCols = col1 - col0 + 1;
+      const visRows = row1 - row0 + 1;
+      if (visCols <= 0 || visRows <= 0) return;
+
+      // Viewport key to avoid redundant renders
+      const vKey = `${col0},${row0},${col1},${row1}`;
+      if (vKey === lastViewportKeyRef.current && hiResReady) return;
+      lastViewportKeyRef.current = vKey;
+
+      // Hi-res tile resolution: 128px (matches R2 thumbnails)
+      const TILE_RES = 128;
+      const canvasPixW = visCols * TILE_RES;
+      const canvasPixH = visRows * TILE_RES;
+
+      // Safety: max ~16M pixels (64MB RGBA)
+      if (canvasPixW * canvasPixH > 16_000_000) return;
+
+      // Collect unique tile indices for visible area
       const assignment = assignmentRef.current;
-      const TOTAL = cols * rows;
-
-      // FIX A: Load only UNIQUE tile indices (deduplicate) - massive speedup
-      // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
-      const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
-      // Mobile: limit unique tiles to avoid loading too many images at once
-      const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000; // Mobile: 800 tiles (was 300)
-      const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
-
-      // PERF: Use /api/tile/:id?size=N proxy for all tiles
-      // This ensures CORS-safe loading for all sources (Unsplash, Pexels, Pixabay)
-      // The server proxy handles all external URLs without CORS issues
-      let allUrls: string[];
-      if (tileIdsRef.current.length > 0) {
-        // Use server proxy for all tiles - avoids CORS issues with external URLs
-        // Always request size=128 to get the R2 thumbnail (fast CDN, 128px is plenty for 42-68px tiles)
-        allUrls = tileIdsRef.current.map(id => {
-          if (id <= 0) return '';
-          return `/api/tile/${id}?size=128`;
-        });
-      } else {
-        allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
-      }
-
-      // Map: tile index -> loaded hi-res image
-      const hiResImgMap = new Map<number, HTMLImageElement>();
-      const BATCH = isMobileDevice ? 20 : 60; // smaller batch on mobile to avoid memory pressure
-      for (let i = 0; i < uniqueIndices.length; i += (BATCH)) {
-        const batchIndices = uniqueIndices.slice(i, i + BATCH);
-        const batchImgs = await Promise.all(
-          batchIndices.map(idx => {
-            const u = allUrls[idx];
-            return u ? loadImageCached(u, 10000) : Promise.resolve(null);
-          })
-        );
-        for (let j = 0; j < batchIndices.length; j++) {
-          if (batchImgs[j]) hiResImgMap.set(batchIndices[j], batchImgs[j]!);
+      const neededIndices = new Set<number>();
+      for (let r = row0; r <= row1; r++) {
+        for (let c = col0; c <= col1; c++) {
+          const idx = assignment[r * cols + c];
+          if (idx >= 0) neededIndices.add(idx);
         }
-        await new Promise(r => setTimeout(r, 0));
       }
 
-      // Draw hi-res tiles using the deduplicated map
-      for (let ci = 0; ci < (TOTAL); ci++) {
-        const col = ci % cols, row = Math.floor(ci / cols);
-        const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
-        if (img && img.complete && img.naturalWidth > 0) {
-          try {
-            hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
-          } catch (e) {
-            // Broken image - fill with neutral grey placeholder
-            hCtx.fillStyle = '#888888';
-            hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+      // Load only tiles not yet in cache (typically 0-20 new tiles per pan)
+      const cache = hiResImgCacheRef.current;
+      const toLoad = Array.from(neededIndices).filter(idx => !cache.has(idx));
+      if (toLoad.length > 0) {
+        setHiResLoading(true);
+        const BATCH = 30;
+        for (let i = 0; i < toLoad.length; i += BATCH) {
+          const batch = toLoad.slice(i, i + BATCH);
+          const imgs = await Promise.all(
+            batch.map(idx => {
+              const tileId = tileIdsRef.current[idx];
+              if (!tileId || tileId <= 0) return Promise.resolve(null);
+              return loadImageCached(`/api/tile/${tileId}?size=128`, 8000);
+            })
+          );
+          for (let j = 0; j < batch.length; j++) {
+            if (imgs[j]) cache.set(batch[j], imgs[j]!);
           }
         }
       }
-      lastHiResTileSizeRef.current = HIREZ_PX;
-      setHiResReady(true);
+
+      // Setup canvas: sized to cover only the visible tile region
+      hc.width = canvasPixW;
+      hc.height = canvasPixH;
+      // CSS size matches the visible region in preview-canvas coordinates
+      hc.style.width = `${visCols * tileCSS}px`;
+      hc.style.height = `${visRows * tileCSS}px`;
+      // Position offset: shift canvas so visible tiles align with preview
+      // The preview canvas starts at (0,0) in its own coordinate space
+      // Our hi-res canvas covers [col0..col1] x [row0..row1]
+      // Offset in CSS coords from preview canvas origin:
+      const offsetX = col0 * tileCSS;
+      const offsetY = row0 * tileCSS;
+      // Store offset for JSX positioning (triggers re-render of canvas style)
+      setHiResOffset({ x: offsetX, y: offsetY, cssW, cssH });
+
+      const hCtx = hc.getContext('2d')!;
+      hCtx.clearRect(0, 0, canvasPixW, canvasPixH);
+
+      // Draw visible tiles at 128px resolution
+      for (let r = row0; r <= row1; r++) {
+        for (let c = col0; c <= col1; c++) {
+          const idx = assignment[r * cols + c];
+          const img = cache.get(idx) || validImgsRef.current[idx];
+          if (img && img.complete && img.naturalWidth > 0) {
+            try {
+              hCtx.drawImage(img, (c - col0) * TILE_RES, (r - row0) * TILE_RES, TILE_RES, TILE_RES);
+            } catch {
+              hCtx.fillStyle = '#888';
+              hCtx.fillRect((c - col0) * TILE_RES, (r - row0) * TILE_RES, TILE_RES, TILE_RES);
+            }
+          }
+        }
+      }
+
+      lastHiResTileSizeRef.current = hiResTileSize;
+      if (!hiResReady) setHiResReady(true);
       setHiResLoading(false);
-    };
-    renderHiRes().catch(() => setHiResLoading(false));
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showHiRes, hiResTileSize]);
+  }, [showHiRes, hiResTileSize, zoom, pan.x, pan.y]);
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => { setHiResReady(false); setHiResLoading(false); };
@@ -3140,20 +3207,32 @@ export default function Studio() {
                     maxWidth: "none",
                   }}
                 />
-                {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
-                {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
+                {/* Hi-Res viewport canvas: covers only visible tiles at 128px resolution */}
+                {/* Positioned relative to preview canvas using offset from viewport culling */}
                 <canvas
                   ref={hiResCanvasRef}
                   style={{
                     display: showHiRes ? "block" : "none",
                     position: "absolute",
+                    // The hi-res canvas covers a sub-region of the full mosaic.
+                    // We need to position it so it aligns with the preview canvas.
+                    // The preview canvas is centered in the flex container.
+                    // Preview canvas CSS origin is at its top-left corner.
+                    // Our hi-res canvas starts at (hiResOffset.x, hiResOffset.y) in preview-CSS coords.
+                    // Both canvases share the same transform (pan + zoom).
+                    // We use the same transform as preview but add the tile offset.
+                    // Since transformOrigin is "center center" of each canvas, we need to account
+                    // for the size difference. The simplest approach: use left/top for the offset
+                    // within the transformed coordinate space.
+                    left: `calc(50% - ${hiResOffset.cssW / 2}px + ${hiResOffset.x}px)`,
+                    top: `calc(50% - ${hiResOffset.cssH / 2}px + ${hiResOffset.y}px)`,
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
                     maxWidth: "none",
                     opacity: hiResOpacity,
                     pointerEvents: "none",
-                    imageRendering: "auto",  // smooth interpolation for hi-res tiles
+                    imageRendering: "auto",
                   }}
                 />
                 {hiResLoading && showHiRes && (
