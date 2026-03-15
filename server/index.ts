@@ -518,6 +518,43 @@ app.post("/api/admin/remove-shutterstock", async (_req, res) => {
   }
 });
 
+// POST /api/admin/delete-broken-pixabay  →  removes Pixabay tiles without R2 URL (hotlink-protected)
+app.post("/api/admin/delete-broken-pixabay", async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const beforeRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
+    const before = parseInt(beforeRes.rows[0].total);
+    // Count broken Pixabay tiles first
+    const countRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE COALESCE(source_provider, '') = 'pixabay'
+        AND r2_url IS NULL
+    `);
+    const toDelete = parseInt(countRes.rows[0].cnt);
+    // Delete all Pixabay tiles without R2 URL (expired hotlink-protected URLs)
+    const result = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE COALESCE(source_provider, '') = 'pixabay'
+        AND r2_url IS NULL
+    `);
+    const deleted = result.rowCount ?? 0;
+    const afterRes = await pool.query(`SELECT COUNT(*) as total FROM mosaic_images`);
+    const after = parseInt(afterRes.rows[0].total);
+    // Invalidate index cache since DB changed
+    invalidateIndexCache();
+    res.json({
+      ok: true,
+      before,
+      toDelete,
+      deleted,
+      after,
+      message: `${deleted} kaputte Pixabay-Tiles gelöscht. DB hat jetzt ${after} Bilder.`,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ── fal.ai Image Analysis ────────────────────────────────────────────────────
 // POST /api/analyze-image-fal
 // Body: { imageBase64: string, mimeType?: string }
