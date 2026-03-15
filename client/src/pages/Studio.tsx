@@ -1059,9 +1059,11 @@ export default function Studio() {
       // Non-portrait: 60 tiles x 10px = 600x800px canvas, ~3600 cells -> ~14 MB RAM
       const isPortraitMode = savedSettings.portraitMode === true;
       const mobileMaxTiles = isPortraitMode ? 90 : 60;  // portrait: more tiles for face detail
-      const mobileTilePx = isPortraitMode ? 8 : 10;     // portrait: smaller tiles for sharpness
+      const mobileTilePxMax = isPortraitMode ? 8 : 10;  // cap tile size DOWN for sharpness
       if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
-      if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
+      // FIX: cap tilePx from ABOVE (large tiles → small), not from below
+      // Old localStorage may have tilePx=16 (landscape preset) → must be capped to 8 for portrait
+      if (savedSettings.tilePx > mobileTilePxMax) savedSettings.tilePx = mobileTilePxMax;
       console.log('[Studio] Mobile (' + (isPortraitMode ? 'portrait' : 'default') + '): capped to', savedSettings.baseTiles, 'tiles x', savedSettings.tilePx, 'px');
     }
 
