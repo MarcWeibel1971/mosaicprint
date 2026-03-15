@@ -295,6 +295,72 @@ const QA_CHECKS = [
   { id: 'tile-quality-score', label: 'Tile-Quality-Score', icon: '⭐', desc: 'Bewertet 200 zufällige Tiles nach Farbvielfalt, Textur und Helligkeit.' },
 ]
 
+// ── R2 Migration Panel ──────────────────────────────────────────────────────────
+function R2MigrationPanel() {
+  const [status, setStatus] = React.useState<{ running: boolean; done: number; total: number; errors: number; startedAt: string | null; finishedAt: string | null } | null>(null);
+  const [loading, setLoading] = React.useState(false);
+
+  const fetchStatus = async () => {
+    try {
+      const r = await fetch('/api/admin/migrate-to-r2/status');
+      const d = await r.json();
+      setStatus(d);
+    } catch { /* ignore */ }
+  };
+
+  React.useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startMigration = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/admin/migrate-to-r2', { method: 'POST' });
+      const d = await r.json();
+      if (d.error) alert('Fehler: ' + d.error);
+      else fetchStatus();
+    } catch (e) { alert('Fehler: ' + e); }
+    setLoading(false);
+  };
+
+  const progress = status && status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
+  const isDone = status && !status.running && status.finishedAt;
+
+  return (
+    <div className="bg-white rounded-2xl p-6 border border-orange-200">
+      <h2 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
+        <span className="text-orange-500">☁️</span>
+        Cloudflare R2 – Permanente Bildspeicherung
+      </h2>
+      <p className="text-sm text-gray-500 mb-4">
+        Lädt alle Tile-Bilder zu Cloudflare R2 hoch damit sie dauerhaft verfügbar sind (Pixabay/Unsplash CDN-URLs können ablaufen).
+      </p>
+      {status && status.total > 0 && (
+        <div className="mb-4">
+          <div className="flex justify-between text-xs text-gray-500 mb-1">
+            <span>{status.done.toLocaleString()} / {status.total.toLocaleString()} Tiles migriert</span>
+            <span>{progress}%{status.errors > 0 ? ` · ${status.errors} Fehler` : ''}</span>
+          </div>
+          <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all ${isDone ? 'bg-green-400' : 'bg-orange-400'}`} style={{ width: `${progress}%` }} />
+          </div>
+          {isDone && <p className="text-xs text-green-600 mt-1">✅ Migration abgeschlossen – alle Tiles permanent gespeichert</p>}
+          {status.running && <p className="text-xs text-orange-600 mt-1">⏳ Migration läuft... (läuft im Hintergrund, Seite kann geschlossen werden)</p>}
+        </div>
+      )}
+      <button
+        onClick={startMigration}
+        disabled={loading || (status?.running ?? false)}
+        className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-medium hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {status?.running ? '⏳ Migration läuft...' : isDone ? '✅ Erneut migrieren (neue Tiles)' : '🚀 Migration starten (alle Tiles zu R2)'}
+      </button>
+    </div>
+  );
+}
+
 // ── Main Component ──────────────────────────────────────────────────────────────
 export default function Admin() {
   // Mark admin as visited in localStorage so Studio shows admin-only buttons
@@ -843,6 +909,9 @@ export default function Admin() {
                 ))}
               </div>
             </div>
+
+            {/* R2 Migration Panel */}
+            <R2MigrationPanel />
 
             {/* Cron Job Status */}
             {cronStatus && (

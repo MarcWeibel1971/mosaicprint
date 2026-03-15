@@ -4,6 +4,7 @@ import * as db from "./db.js";
 import { renderMosaicOnServer, type TileData } from "./mosaicExport.js";
 import Stripe from "stripe";
 import { cronState } from "./cron-state.js";
+import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 
 // ---- Constants ----
 const TILE_TARGET = 100_000;
@@ -1244,6 +1245,11 @@ export const appRouter = router({
                       return; // discard – too vivid / noisy / watermarked
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                    // Upload to R2 for permanent storage (avoids expiring CDN URLs)
+                    let r2Url: string | null = null;
+                    if (isR2Configured()) {
+                      r2Url = await downloadAndUploadToR2(0, photo.tile128Url ?? photo.sourceUrl);
+                    }
                     const inserted = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -1255,6 +1261,7 @@ export const appRouter = router({
                       sourceProvider: input.sourceId,
                       importQuery: task.query,
                       tileType: lab?.tileType,
+                      r2Url,
                     });
                     if (inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }

@@ -16,6 +16,7 @@
     "build:server": "esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist/server"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1009.0",
     "@mediapipe/tasks-vision": "^0.10.32",
     "@trpc/client": "11.7.2",
     "@trpc/server": "11.7.2",

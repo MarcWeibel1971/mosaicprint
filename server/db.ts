@@ -72,6 +72,7 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_url_hash ON mosaic_images (url_hash)`);
   await pool.query(`UPDATE mosaic_images SET url_hash = MD5(source_url) WHERE url_hash IS NULL`).catch(() => {});
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS is_skin_friendly BOOLEAN DEFAULT false`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS r2_url TEXT`);
   await pool.query(`
     UPDATE mosaic_images
     SET is_skin_friendly = (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)
@@ -391,7 +392,7 @@ export async function deleteMosaicImage(id: number): Promise<boolean> {
 }
 
 export async function insertMosaicImage(data: {
-  sourceUrl: string; tile128Url: string | null;
+  sourceUrl: string; tile128Url: string | null; r2Url?: string | null;
   avgL: number; avgA: number; avgB: number;
   tlL?: number; tlA?: number; tlB?: number;
   trL?: number; trA?: number; trB?: number;
@@ -428,11 +429,11 @@ export async function insertMosaicImage(data: {
   });
   const res = await pool.query(
     `INSERT INTO mosaic_images
-       (source_url, tile128_url, avg_l, avg_a, avg_b,
+       (source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
         subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -441,7 +442,8 @@ export async function insertMosaicImage(data: {
       tlL, tlA, tlB, trL, trA, trB,
       blL, blA, blB, brL, brA, brB,
       theme, theme, sourceProvider, data.importQuery ?? null,
-      data.tileType ?? 'medium', semanticTheme
+      data.tileType ?? 'medium', semanticTheme,
+      data.r2Url ?? null
     ]
   );
   return (res.rowCount ?? 0) > 0;

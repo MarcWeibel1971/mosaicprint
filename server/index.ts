@@ -29,6 +29,7 @@ import * as db from "./db.js";
 import { cronState } from "./cron-state.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
+import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -221,12 +222,15 @@ app.get("/api/tile/:id", async (req, res) => {
     if (!tileUrls || (Date.now() - tileUrls.ts) > TILE_URL_CACHE_TTL_MS) {
       const pool = db.getPool();
       const result = await pool.query(
-        "SELECT source_url, tile128_url FROM mosaic_images WHERE id = $1",
+        "SELECT source_url, tile128_url, r2_url FROM mosaic_images WHERE id = $1",
         [id]
       );
       if (!result.rows[0]) return res.status(404).json({ error: "Not found" });
       const row = result.rows[0];
-      tileUrls = { tile128Url: row.tile128_url || '', sourceUrl: row.source_url || '', ts: Date.now() };
+      // Prefer R2 URL (permanent) over CDN URLs (may expire)
+      const effectiveTile128 = row.r2_url || row.tile128_url || '';
+      const effectiveSource = row.r2_url || row.source_url || '';
+      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
       // Evict if too large
       if (tileUrlCache.size > TILE_URL_CACHE_MAX) {
@@ -1090,6 +1094,64 @@ app.get('/api/print-download/:token', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const stream = fs.createReadStream(tmpFile);
   stream.pipe(res);
+});
+
+// POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage
+// Runs in background, returns job status via GET /api/admin/migrate-to-r2/status
+const r2MigrationStatus = { running: false, done: 0, total: 0, errors: 0, startedAt: null as string | null, finishedAt: null as string | null };
+app.post('/api/admin/migrate-to-r2', async (_req, res) => {
+  if (!isR2Configured()) return res.status(400).json({ error: 'R2 not configured' });
+  if (r2MigrationStatus.running) return res.json({ started: false, message: 'Already running', status: r2MigrationStatus });
+  r2MigrationStatus.running = true;
+  r2MigrationStatus.done = 0;
+  r2MigrationStatus.errors = 0;
+  r2MigrationStatus.startedAt = new Date().toISOString();
+  r2MigrationStatus.finishedAt = null;
+  res.json({ started: true, message: 'Migration started in background' });
+  // Run migration in background
+  (async () => {
+    try {
+      const pool = db.getPool();
+      // Get all tiles without R2 URL (or with expired CDN URLs)
+      const result = await pool.query(
+        `SELECT id, source_url, tile128_url FROM mosaic_images WHERE r2_url IS NULL ORDER BY id ASC`
+      );
+      r2MigrationStatus.total = result.rows.length;
+      console.log(`[R2 Migration] Starting migration of ${result.rows.length} tiles`);
+      const CONCURRENCY = 20;
+      for (let i = 0; i < result.rows.length; i += CONCURRENCY) {
+        const batch = result.rows.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map(async (row: { id: number; source_url: string; tile128_url: string }) => {
+          try {
+            const url = row.tile128_url || row.source_url;
+            if (!url || url.startsWith('data:')) { r2MigrationStatus.done++; return; }
+            const r2Url = await downloadAndUploadToR2(row.id, url);
+            if (r2Url) {
+              await pool.query('UPDATE mosaic_images SET r2_url = $1 WHERE id = $2', [r2Url, row.id]);
+              // Invalidate tile URL cache
+              tileUrlCache.delete(row.id);
+            } else {
+              r2MigrationStatus.errors++;
+            }
+            r2MigrationStatus.done++;
+          } catch {
+            r2MigrationStatus.errors++;
+            r2MigrationStatus.done++;
+          }
+        }));
+        if (i % 500 === 0) console.log(`[R2 Migration] Progress: ${r2MigrationStatus.done}/${r2MigrationStatus.total}`);
+      }
+    } catch (e) {
+      console.error('[R2 Migration] Error:', e);
+    } finally {
+      r2MigrationStatus.running = false;
+      r2MigrationStatus.finishedAt = new Date().toISOString();
+      console.log(`[R2 Migration] Done: ${r2MigrationStatus.done} tiles, ${r2MigrationStatus.errors} errors`);
+    }
+  })();
+});
+app.get('/api/admin/migrate-to-r2/status', (_req, res) => {
+  res.json(r2MigrationStatus);
 });
 
 // tRPC API (for Admin panel)
