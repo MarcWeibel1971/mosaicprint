@@ -709,7 +709,58 @@ export default function Studio() {
             return merged;
           };
 
-          if (imageType === 'portrait') {
+          // Quick hair-zone analysis BEFORE preset selection
+          // Check if top 25% of image is very bright (white/gray hair)
+          let _earlyHairBrightRatio = 0;
+          let _earlyBrightRatio = 0;
+          try {
+            const hzCanvas = document.createElement('canvas');
+            hzCanvas.width = 64; hzCanvas.height = 64;
+            const hzCtx = hzCanvas.getContext('2d')!;
+            hzCtx.drawImage(img, 0, 0, 64, 64);
+            const hzData = hzCtx.getImageData(0, 0, 64, 64).data;
+            let hBright = 0, hTotal = 0, allBright = 0, allTotal = 0;
+            for (let pi = 0; pi < hzData.length; pi += 4) {
+              const row = Math.floor((pi / 4) / 64);
+              const l = 0.299*hzData[pi] + 0.587*hzData[pi+1] + 0.114*hzData[pi+2];
+              allTotal++;
+              if (l > 180) allBright++;
+              if (row < 16) { hTotal++; if (l > 180) hBright++; }
+            }
+            _earlyHairBrightRatio = hTotal > 0 ? hBright / hTotal : 0;
+            _earlyBrightRatio = allTotal > 0 ? allBright / allTotal : 0;
+          } catch { /* ignore */ }
+
+          const isWhiteHairPortrait = imageType === 'portrait' && _earlyHairBrightRatio > 0.35 && _earlyBrightRatio > 0.50;
+
+          if (isWhiteHairPortrait) {
+            // White hair / light skin: special profile to prevent over-correction
+            // Synced with PROFILE_SCORES white_hair profileSettings
+            const whiteHairPreset = {
+              baseTiles: 100,           // fewer cols: larger tiles = less noise on bright skin
+              tilePx: 9,               // larger tiles: smoother appearance for light areas
+              maxReuse: 6,
+              rotation: false,
+              neighborRadius: 5,
+              neighborPenalty: 160,     // lower: less aggressive anti-repetition
+              contrastBoost: 1.45,      // higher: compensate for low-contrast bright areas
+              histogramBlend: 0.07,     // low: prevent histogram from darkening whites
+              baseOverlay: 0.28,        // higher: strengthen mosaic structure
+              edgeBoost: 0.15,          // subtle edge enhancement
+              overlayMode: 'softlight',
+              labWeight: 0.30,          // color matching for subtle tones
+              brightnessWeight: 0.70,   // high: prioritize brightness matching for bright skin
+              textureWeight: 0.05,
+              edgeWeight: 0.05,
+              saturationWeight: 0.20,   // low: allow desaturated tiles for white/gray areas
+              lBlend: 0.35,             // lower: less luminance shifting
+              abBlend: 0.12,            // much lower: preserve original pastel/neutral tones
+              portraitMode: true,
+            };
+            localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(whiteHairPreset)));
+            localStorage.removeItem('mosaicprint_selected_theme');
+            setAutoPresetApplied('Weiße Haare');
+          } else if (imageType === 'portrait') {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
               tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
@@ -906,7 +957,19 @@ export default function Studio() {
                 // hairBrightRatio > 0.35: top of image is mostly bright = white/gray hair
                 // Also require overall brightRatio > 0.50 to avoid false positives from bright backgrounds
                 score: (imageType === 'portrait' && hairBrightRatio > 0.35 && brightRatio > 0.50) ? 2.0 : 0,
-                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.60, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, contrastBoost: 1.20, histogramBlend: 0.07, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 350 }
+                // OPTIMIZED for bright skin + white/silver hair (see Empfehlung_Analyse.md)
+                // Key changes: higher brightness weight (70%), lower saturation (20%),
+                // lower L-Blend (0.35) and AB-Blend (0.12) to avoid cool color shift,
+                // higher contrast boost (1.45), lower anti-repetition penalty (160),
+                // larger tiles (9px) for less noise, overlay with edge-boost for detail
+                profileSettings: {
+                  baseTiles: 100, tilePx: 9,
+                  brightnessWeight: 0.70, labWeight: 0.30, textureWeight: 0.05, edgeWeight: 0.05, saturationWeight: 0.20,
+                  contrastBoost: 1.45, histogramBlend: 0.07,
+                  lBlend: 0.35, abBlend: 0.12,  // direct override: less color transfer = warmer skin
+                  baseOverlay: 0.28, edgeBoost: 0.15, overlayMode: 'softlight',
+                  enableRotation: false, neighborRadius: 5, neighborPenalty: 160
+                }
               },
               {
                 key: 'landscape', label: 'Landschaft', emoji: '🏔️',
@@ -1870,6 +1933,20 @@ export default function Studio() {
     const sortedByL = Array.from({ length: filteredValidImgs.length }, (_, i) => i)
       .sort((a, b) => filteredImgFeatures[a].lab[0] - filteredImgFeatures[b].lab[0]);
 
+    // ── Dynamic Face Brightness Analysis (Empfehlung: mittelfristige Lösung) ──
+    // Compute average face luminance to dynamically adjust weights for light/dark faces
+    // If avgFaceL > 70 → boost brightness weight, reduce saturation weight, boost contrast
+    let avgFaceL = 0;
+    let facePixelCount = 0;
+    for (let i = 0; i < TOTAL_TILES; i++) {
+      if (faceMask[i]) { avgFaceL += cellFeatures[i].lab[0]; facePixelCount++; }
+    }
+    avgFaceL = facePixelCount > 0 ? avgFaceL / facePixelCount : 50;
+    const isLightFace = avgFaceL > 60;
+    // lightFaceBoost: 0 at avgL=60, 1.0 at avgL=90 (smooth ramp)
+    const lightFaceBoost = isLightFace ? Math.min(1.0, (avgFaceL - 60) / 30) : 0;
+    console.log(`[Studio] Face brightness analysis: avgL=${avgFaceL.toFixed(1)}, isLight=${isLightFace}, boost=${lightFaceBoost.toFixed(2)}, faceCells=${facePixelCount}`);
+
     for (let ti = 0; ti < (TOTAL_TILES); ti++) {
       const ci = tileOrder[ti];
       const tf = cellFeatures[ci];
@@ -1973,9 +2050,16 @@ export default function Studio() {
           // Higher SSD weight = tiles that look most like the target region (color + luminance)
           const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
           const wSsdBase = noOverlay ? 0.45 : 0.30; // 45% SSD when no overlay (pure tile rendering)
-          const wLabBase = savedSettings.labWeight ?? 0.15;
-          const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
-          const wTextureBase = savedSettings.textureWeight ?? 0.08;
+          let wLabBase = savedSettings.labWeight ?? 0.15;
+          let wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
+          let wTextureBase = savedSettings.textureWeight ?? 0.08;
+          // ── Dynamic weight adjustment for light faces (Empfehlung) ──
+          // Light face (avgFaceL > 60): boost brightness weight, reduce LAB weight
+          // This prevents the algorithm from forcing dark/cool tiles onto bright skin/hair
+          if (isLightFace && inFace) {
+            wBrightBase *= (1 + lightFaceBoost * 0.5); // up to 1.5× brightness weight
+            wLabBase *= (1 - lightFaceBoost * 0.4);    // up to 0.6× LAB weight (less color forcing)
+          }
           // 6. Saturation difference
           // Prevents gray tiles in colorful areas and vice versa
           // saturation = sqrt(a^2+b^2), range 0-100
@@ -1983,7 +2067,12 @@ export default function Studio() {
           const tileSatC = mf.saturation;
           const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0-1
           // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
-          const wSatBase = savedSettings.saturationWeight ?? 0.25;
+          let wSatBase = savedSettings.saturationWeight ?? 0.25;
+          // ── Dynamic saturation adjustment for light faces (Empfehlung) ──
+          // Light face: reduce saturation penalty so light/neutral tiles aren't penalized
+          if (isLightFace && inFace) {
+            wSatBase *= (1 - lightFaceBoost * 0.4); // up to 0.6× saturation weight
+          }
           // Repetition penalty: exponential growth to strongly discourage reuse
           // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
           const rc = useCount[j] || 0;
@@ -1991,23 +2080,40 @@ export default function Studio() {
           // Face region: per-subregion weights for sharper eye/nose/mouth/cheek/forehead
           if (inFace) {
             // Per-subregion weight multipliers (MediaPipe Face Mesh)
-            // eye: max edge sharpness, high SSD, moderate sat penalty (eyes have color)
-            // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
-            // nose: high brightness, moderate edge, strong sat penalty (skin area)
-            // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
+            // ── Empfehlung: Regionale Gewichte ──
+            // Wangen/Stirn: Sättigung 45%, LAB 40% (skin-tone matching priority)
+            // Augen/Mund/Bart: Helligkeit 65%, Kanten 30%, Kontrast 1.60× (detail priority)
             const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-            const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
+            // LAB weight: Wangen/Stirn get 40% LAB (skin-tone matching), eyes/mouth get higher for color accuracy
+            const wLabF      = subRegion === 'cheek' || subRegion === 'forehead'
+              ? Math.max(wLabBase * 1.2, 0.40 * (1 - lightFaceBoost * 0.3))  // Empfehlung: 40% LAB for skin, reduced for light faces
+              : subRegion === 'eye' ? wLabBase * 1.5
+              : subRegion === 'mouth' ? wLabBase * 1.4
+              : wLabBase * 1.2;
             // Dynamic brightness weight:
             // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
             //   so the algorithm picks light tiles, not dark/cool ones
             // - Moderately bright areas (L>65): slight reduction to prevent over-darkening warm faces
+            // - Empfehlung: Augen/Mund/Bart get 65% brightness weight for detail
             const isVeryBright = tf.brightness > 75; // white hair, beard, bright highlights
             const faceBrightBoost = isVeryBright ? 1.6 : (tf.brightness > 65 ? 0.85 : 1.0);
-            const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.5 : wBrightBase * 1.3) * faceBrightBoost;
-            const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
+            const wBrightF = (subRegion === 'eye' || subRegion === 'mouth'
+              ? Math.max(wBrightBase * 1.3, 0.65)  // Empfehlung: 65% brightness for eye/mouth detail
+              : subRegion === 'cheek' || subRegion === 'forehead'
+              ? wBrightBase * 1.5
+              : wBrightBase * 1.3) * faceBrightBoost;
+            // Edge weight: Empfehlung: Augen/Mund/Bart get 30% edge weight for sharp features
+            const faceEdgeWeight = subRegion === 'eye' ? Math.max(edgeWeight * 3.0, 0.30)
+              : subRegion === 'mouth' ? Math.max(edgeWeight * 2.5, 0.30)
+              : subRegion === 'nose' ? edgeWeight * 2.0
+              : edgeWeight * 1.5;
             const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
-            // Saturation weight: reduced to allow warmer tiles in face (was ×2.5/×2.0/×1.5 → too aggressive)
-            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.5 : subRegion === 'nose' ? wSatBase * 1.3 : wSatBase * 1.1;
+            // Saturation weight: Empfehlung: Wangen/Stirn get 45% saturation for skin-tone matching
+            // Reduced for light faces to allow neutral tiles
+            const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead'
+              ? Math.max(wSatBase * 1.5, 0.45 * (1 - lightFaceBoost * 0.3))  // Empfehlung: 45% sat for skin, reduced for light
+              : subRegion === 'nose' ? wSatBase * 1.3
+              : wSatBase * 1.1;
             let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
@@ -2285,9 +2391,9 @@ export default function Studio() {
         facesDetected: _debugFacesDetected,
         faceCellCount,
         faceCellPct: (faceCellCount / TOTAL_TILES) * 100,
-        // Color transfer
-        lBlend: 0.20 + 0.50 * blendFactor,
-        abBlend: 0.10 + 0.20 * blendFactor,
+        // Color transfer (show actual values used, including profile overrides)
+        lBlend: (savedSettings.lBlend != null && savedSettings.lBlend > 0) ? savedSettings.lBlend : (0.40 + 0.40 * blendFactor),
+        abBlend: (savedSettings.abBlend != null && savedSettings.abBlend > 0) ? savedSettings.abBlend : (0.20 + 0.20 * blendFactor),
         maxColorShift: 12,
         histogramBlend: savedSettings.histogramBlend ?? 0.0,
         contrastBoost: savedSettings.contrastBoost ?? 1.30,
@@ -2425,12 +2531,13 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
-        // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
-        // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
-        const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-        // AB_BLEND: minimum 0.20 always active (ensures color correction even without histogramBlend)
-        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.20+0.20*0.7=0.34
-        const AB_BLEND = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
+        // L_BLEND and AB_BLEND: can be directly overridden by profile settings
+        // If savedSettings.lBlend/abBlend are set (from profile), use them directly.
+        // Otherwise, compute from histogramBlend as before.
+        const _computedL = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
+        const _computedAB = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
+        const L_BLEND  = (savedSettings.lBlend != null && savedSettings.lBlend > 0) ? savedSettings.lBlend : _computedL;
+        const AB_BLEND = (savedSettings.abBlend != null && savedSettings.abBlend > 0) ? savedSettings.abBlend : _computedAB;
         const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
@@ -2537,8 +2644,12 @@ export default function Studio() {
           const tr = targetData[i], tg = targetData[i+1], tb = targetData[i+2];
           const edge = edgeMap[ci];
           // Adaptive strength: BASE_OVERLAY at flat areas, +EDGE_BOOST at edges
-          // In face regions: extra +0.25 boost for better portrait visibility (was +0.15)
-          const faceBoost = faceMask[ci] ? 0.25 : 0;
+          // In face regions: extra +0.25 boost for better portrait visibility
+          // Empfehlung: Augen/Mund/Bart get stronger overlay for Kontrast 1.60× effect
+          const subR = subRegionMask[ci];
+          const faceBoost = faceMask[ci]
+            ? (subR === 'eye' || subR === 'mouth' ? 0.35 : 0.25)  // Empfehlung: stronger overlay on detail regions
+            : 0;
           const strength = Math.min(0.85, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);
           for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < (CANVAS_H); py++) {
             for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < (CANVAS_W); px++) {
@@ -3071,11 +3182,15 @@ export default function Studio() {
                 <button
                   key={key}
                   onClick={() => {
-                    // Apply profile settings to mosaicSettings (same as Admin applyProfile)
+                    // Apply profile settings to BOTH storage keys:
+                    // - mosaicprint_algo_settings: used by the renderer (Studio)
+                    // - mosaicSettings: used by Admin panel sync
                     if (profileSettings) {
                       try {
-                        const existing = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
-                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existing, ...profileSettings }));
+                        const existingAlgo = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') ?? '{}');
+                        localStorage.setItem('mosaicprint_algo_settings', JSON.stringify({ ...existingAlgo, ...profileSettings }));
+                        const existingAdmin = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
+                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existingAdmin, ...profileSettings }));
                         window.dispatchEvent(new Event('mosaicSettingsChanged'));
                       } catch { /* ignore */ }
                     }
