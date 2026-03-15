@@ -1054,13 +1054,15 @@ export default function Studio() {
     // With baseTiles=40, tilePx=12: 40x50x12px = 480x600px canvas, ~2000 cells
     // TOP_K=15 -> ~1200 unique tiles needed (well within 400 LRU cache limit)
     if (isMobile) {
-      // Mobile: 60 tiles x 10px -> ~3600 cells, ~1200 unique tiles -> ~24 MB RAM (safe under iOS 150MB)
-      // Previously 40x12 was too coarse (2.25x fewer cells than desktop portrait 100x8)
-      const mobileMaxTiles = 60;  // was 40 - more tiles = better detail
-      const mobileTilePx = 10;    // was 12 - smaller tiles = more cells = more detail
+      // Mobile caps: portrait gets more tiles/smaller tiles for face sharpness
+      // Portrait: 90 tiles x 8px = 720x960px canvas, ~8100 cells -> ~26 MB RAM (safe)
+      // Non-portrait: 60 tiles x 10px = 600x800px canvas, ~3600 cells -> ~14 MB RAM
+      const isPortraitMode = savedSettings.portraitMode === true;
+      const mobileMaxTiles = isPortraitMode ? 90 : 60;  // portrait: more tiles for face detail
+      const mobileTilePx = isPortraitMode ? 8 : 10;     // portrait: smaller tiles for sharpness
       if (savedSettings.baseTiles > mobileMaxTiles) savedSettings.baseTiles = mobileMaxTiles;
       if (savedSettings.tilePx < mobileTilePx) savedSettings.tilePx = mobileTilePx;
-      console.log('[Studio] Mobile: capped to', savedSettings.baseTiles, 'tiles x', savedSettings.tilePx, 'px');
+      console.log('[Studio] Mobile (' + (isPortraitMode ? 'portrait' : 'default') + '): capped to', savedSettings.baseTiles, 'tiles x', savedSettings.tilePx, 'px');
     }
 
      // -- Stage A: Load LAB index (if not already loaded) ----------------------
