@@ -1124,6 +1124,8 @@ export const appRouter = router({
             : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
             : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
+          // Track if Unsplash is rate-limited → fall back to Pexels automatically
+          let unsplashRateLimited = false;
 
           // If specific keywords provided (from image analysis), use them directly
           // Otherwise fall back to DB gap analysis
@@ -1170,16 +1172,46 @@ export const appRouter = router({
                   tile128Url: p.webformatURL || p.previewURL || '',
                 })).filter((p: any) => p.tile128Url);
               } else {
-                const res = await fetch(
-                  `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
-                  { headers: { Authorization: `Client-ID ${apiKey}` } }
-                );
-                if (!res.ok) { log(`⚠️ Unsplash API error ${res.status} for "${task.query}"`); continue; }
-                const data = await res.json() as any;
-                photos = (data.results ?? []).map((p: any) => ({
-                  sourceUrl: p.urls.regular,
-                  tile128Url: p.urls.thumb,
-                }));
+                // Unsplash: if rate-limited, fall back to Pexels automatically
+                if (unsplashRateLimited && process.env.PEXELS_API_KEY) {
+                  log(`🔄 Unsplash rate-limited → Pexels fallback for "${task.query}"`);
+                  const res = await fetch(
+                    `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=30&orientation=square`,
+                    { headers: { Authorization: process.env.PEXELS_API_KEY } }
+                  );
+                  if (!res.ok) { log(`⚠️ Pexels fallback error ${res.status} for "${task.query}"`); continue; }
+                  const data = await res.json() as any;
+                  photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+                } else {
+                  const res = await fetch(
+                    `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
+                    { headers: { Authorization: `Client-ID ${apiKey}` } }
+                  );
+                  if (!res.ok) {
+                    log(`⚠️ Unsplash API error ${res.status} for "${task.query}"`);
+                    if (res.status === 403 || res.status === 429) {
+                      unsplashRateLimited = true;
+                      log(`⚠️ Unsplash rate limit reached – switching to Pexels fallback for remaining keywords`);
+                      // Retry this keyword with Pexels immediately
+                      if (process.env.PEXELS_API_KEY) {
+                        const r2 = await fetch(
+                          `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=30&orientation=square`,
+                          { headers: { Authorization: process.env.PEXELS_API_KEY } }
+                        );
+                        if (r2.ok) {
+                          const d2 = await r2.json() as any;
+                          photos = (d2.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+                        }
+                      }
+                    } else { continue; }
+                  } else {
+                    const data = await res.json() as any;
+                    photos = (data.results ?? []).map((p: any) => ({
+                      sourceUrl: p.urls.regular,
+                      tile128Url: p.urls.thumb,
+                    }));
+                  }
+                }
               }
 
               // Process in parallel batches for speed
