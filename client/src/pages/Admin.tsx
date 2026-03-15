@@ -84,6 +84,7 @@ interface LastAnalysisData {
   sceneType: string
   timestamp: string
 }
+interface ImportRecommendation { query: string; label: string; priority: number; deficit: number; subject: string }
 
 // ── Algorithm settings stored in localStorage ─────────────────────────────────
 const SETTINGS_KEY = 'mosaicprint_algo_settings'
@@ -279,6 +280,21 @@ const COLOR_LABELS: Record<string, { label: string; color: string; emoji: string
   schwarz: { label: 'Schwarz', color: '#1f2937', emoji: '⬛' },
 }
 
+// ── Quality Assurance Types & Constants (declared before all components to avoid TDZ) ──
+interface QaRun {
+  id: number; checkType: string; status: string; startedAt: string; finishedAt: string | null; summary: Record<string, unknown> | null
+}
+interface QaItem {
+  id: number; runId: number; entityType: string; entityId: string; status: string; message: string; details: Record<string, unknown> | null
+}
+const QA_CHECKS = [
+  { id: 'index-integrity', label: 'Index-Integrität', icon: '🔍', desc: 'Prüft ob alle Bilder LAB-Werte haben und Quadrant-Index vollständig ist.' },
+  { id: 'pool-balance', label: 'Pool-Balance', icon: '⚖️', desc: 'Analysiert Farbraum-Abdeckung: Dunkel/Hell/Sättigung/Warm/Kühl.' },
+  { id: 'import-health', label: 'Import-Health', icon: '📥', desc: 'Zeigt Import-Statistiken pro Quelle und prüft auf URL-Duplikate.' },
+  { id: 'duplicate-check', label: 'Duplikat-Check', icon: '🔁', desc: 'Sucht nach pHash- und URL-Duplikaten in der Datenbank.' },
+  { id: 'tile-quality-score', label: 'Tile-Quality-Score', icon: '⭐', desc: 'Bewertet 200 zufällige Tiles nach Farbvielfalt, Textur und Helligkeit.' },
+]
+
 // ── Main Component ──────────────────────────────────────────────────────────────
 export default function Admin() {
   // Mark admin as visited in localStorage so Studio shows admin-only buttons
@@ -300,7 +316,6 @@ export default function Admin() {
   const [importAllRunning, setImportAllRunning] = useState(false)
   const [importCategory, setImportCategory] = useState<string>('')  // selected category for targeted import
   // Gezielte Importe (Empfehlungen)
-  interface ImportRecommendation { query: string; label: string; priority: number; deficit: number; subject: string }
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
   const [recsLoading, setRecsLoading] = useState(false)
   const [recsJobs, setRecsJobs] = useState<Record<string, SmartImportJob>>({})
@@ -357,6 +372,22 @@ export default function Admin() {
     } catch { /* ignore */ } finally {
       setRecsLoading(false)
     }
+  }, [])
+
+  const fetchStats = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [statsRes, keysRes] = await Promise.all([
+        fetch('/api/trpc/getTileStats'),
+        fetch('/api/trpc/getApiKeyStatus'),
+      ])
+      const statsData = await statsRes.json()
+      const keysData = await keysRes.json()
+      setStats(statsData.result?.data?.json ?? statsData.result?.data ?? statsData)
+      setApiKeys(keysData.result?.data?.json ?? keysData.result?.data ?? keysData)
+    } catch {
+      setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
+    } finally { setLoading(false) }
   }, [])
 
   // Start analysis-based import from Import tab (uses lastAnalysis from localStorage)
@@ -422,22 +453,7 @@ export default function Admin() {
     ))
   }
 
-  const fetchStats = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [statsRes, keysRes] = await Promise.all([
-        fetch('/api/trpc/getTileStats'),
-        fetch('/api/trpc/getApiKeyStatus'),
-      ])
-      const statsData = await statsRes.json()
-      const keysData = await keysRes.json()
-      setStats(statsData.result?.data?.json ?? statsData.result?.data ?? statsData)
-      setApiKeys(keysData.result?.data?.json ?? keysData.result?.data ?? keysData)
-    } catch {
-      setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
-    } finally { setLoading(false) }
-  }, [])
-
+  // fetchStats is declared above (before startAnalysisImportMain) to avoid TDZ
   useEffect(() => { fetchStats() }, [fetchStats])
   useEffect(() => { fetchCronStatus() }, [fetchCronStatus])
   useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
@@ -2879,21 +2895,7 @@ function LastMosaicQualityPanel() {
 }
 
 // ── Quality Assurance Tab ─────────────────────────────────────────────────────
-interface QaRun {
-  id: number; checkType: string; status: string; startedAt: string; finishedAt: string | null; summary: Record<string, unknown> | null
-}
-interface QaItem {
-  id: number; runId: number; entityType: string; entityId: string; status: string; message: string; details: Record<string, unknown> | null
-}
-
-const QA_CHECKS = [
-  { id: 'index-integrity', label: 'Index-Integrität', icon: '🔍', desc: 'Prüft ob alle Bilder LAB-Werte haben und Quadrant-Index vollständig ist.' },
-  { id: 'pool-balance', label: 'Pool-Balance', icon: '⚖️', desc: 'Analysiert Farbraum-Abdeckung: Dunkel/Hell/Sättigung/Warm/Kühl.' },
-  { id: 'import-health', label: 'Import-Health', icon: '📥', desc: 'Zeigt Import-Statistiken pro Quelle und prüft auf URL-Duplikate.' },
-  { id: 'duplicate-check', label: 'Duplikat-Check', icon: '🔁', desc: 'Sucht nach pHash- und URL-Duplikaten in der Datenbank.' },
-  { id: 'tile-quality-score', label: 'Tile-Quality-Score', icon: '⭐', desc: 'Bewertet 200 zufällige Tiles nach Farbvielfalt, Textur und Helligkeit.' },
-]
-
+// (QaRun, QaItem interfaces and QA_CHECKS const are declared above Admin component to avoid TDZ)
 function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
   const [runs, setRuns] = useState<QaRun[]>([])
   const [runningChecks, setRunningChecks] = useState<Set<string>>(new Set())
