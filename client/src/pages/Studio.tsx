@@ -609,8 +609,8 @@ export default function Studio() {
               if (r > 95 && g > 40 && b > 20 && b < 200 && r > g && r > b && Math.abs(r - g) > 15) skinPixels++;
               totalPixels++;
             }
-            // STRICT: raised from 15% to 28% - warm landscapes often have 15-25% skin-like pixels
-            hasFace = skinPixels / totalPixels > 0.28;
+            // STRICT: raised from 15% to 22% - group photos have multiple faces but background dilutes ratio
+            hasFace = skinPixels / totalPixels > 0.22;
           }
 
           // Portrait mode requires BOTH face detection AND vertical orientation
@@ -620,8 +620,9 @@ export default function Studio() {
           if (strongFaceSignal && isVertical) {
             imageType = 'portrait';  // both signals required
           } else if (strongFaceSignal && !isVertical) {
-            // Horizontal photo with face: could be group photo - use landscape preset
-            imageType = 'landscape';
+            // Horizontal photo with face: could be group photo - use portrait preset
+            // (fal.ai will confirm or override below)
+            imageType = 'portrait';
           } else if (aspectRatio > 1.3) {
             imageType = 'landscape';
           }
@@ -700,6 +701,49 @@ export default function Studio() {
             localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin(abstractPreset)));
             setAutoPresetApplied(null);
           }
+
+          // -- fal.ai (Florence-2) async background analysis --
+          // Runs after heuristic preset is applied; overrides if fal.ai disagrees
+          (() => {
+            try {
+              const falCanvas = document.createElement('canvas');
+              const falScale = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight));
+              falCanvas.width = Math.round(img.naturalWidth * falScale);
+              falCanvas.height = Math.round(img.naturalHeight * falScale);
+              const falCtx = falCanvas.getContext('2d')!;
+              falCtx.drawImage(img, 0, 0, falCanvas.width, falCanvas.height);
+              const falBase64 = falCanvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+              fetch('/api/analyze-image-fal', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageBase64: falBase64, mimeType: 'image/jpeg' }),
+                signal: AbortSignal.timeout(20000),
+              }).then(r => r.json()).then((falResult: any) => {
+                if (!falResult?.ok) return;
+                const falHasFace: boolean = falResult.hasFace ?? false;
+                const falSceneType: string = falResult.sceneType ?? '';
+                const adminOverrides2 = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}'); } catch { return {}; } })();
+                const mergeWithAdmin2 = (preset: Record<string, unknown>) => ({ ...preset, ...adminOverrides2 });
+                if (falHasFace && imageType !== 'portrait') {
+                  // fal.ai found a face but heuristic missed it
+                  const portraitPreset = { baseTiles: 100, tilePx: 8, neighborRadius: 4, neighborPenalty: 160, contrastBoost: 1.20, histogramBlend: 0.07, baseOverlay: 0.18, edgeBoost: 0.22, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
+                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
+                  localStorage.removeItem('mosaicprint_selected_theme');
+                  setAutoPresetApplied('Portrait');
+                  setDetectedImageType('portrait');
+                  console.log('[Studio] fal.ai override → portrait (heuristic was:', imageType, ')');
+                } else if (!falHasFace && imageType === 'portrait') {
+                  // fal.ai says no face, heuristic was wrong
+                  const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius: 4, neighborPenalty: 160, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
+                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(abstractPreset)));
+                  setAutoPresetApplied(null);
+                  setDetectedImageType('abstract');
+                  console.log('[Studio] fal.ai override → no face (heuristic was portrait)');
+                }
+                console.log('[Studio] fal.ai result: sceneType=' + falSceneType + ' hasFace=' + falHasFace);
+              }).catch(e => console.warn('[Studio] fal.ai async failed:', e));
+            } catch (e) { console.warn('[Studio] fal.ai setup failed:', e); }
+          })();
 
           // -- KI-Themen-Analyse: Farbpalette des Fotos analysieren --
           // Analysiert die dominanten Farbtoene und schlaegt passende Tile-Themen vor
@@ -1252,8 +1296,8 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
       const neededArray = Array.from(neededTileIds);
-      const ATLAS_CHUNK = isMobileOrSlow ? 400 : 1000; // Sharp is fast: 1000 tiles in ~5-8s
-      const ATLAS_TIMEOUT = isMobileOrSlow ? 35000 : 45000; // well under Railway's 60s limit
+      const ATLAS_CHUNK = isMobileOrSlow ? 150 : 1000; // Mobile: smaller chunks to avoid timeout
+      const ATLAS_TIMEOUT = isMobileOrSlow ? 15000 : 45000; // Mobile: 15s timeout for faster fallback
 
       // Helper: fetch one atlas chunk and extract tiles into tileImgMap
       const fetchAtlasChunk = async (chunkIds: number[], progressStart: number, progressEnd: number): Promise<boolean> => {
