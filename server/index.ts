@@ -627,6 +627,47 @@ app.post("/api/admin/delete-broken-pixabay", async (_req, res) => {
   }
 });
 
+// POST /api/admin/migrate-r2-urls  →  updates all r2_url from old pub-*.r2.dev to new custom domain
+// Run once after setting R2_PUBLIC_URL to tiles.mosaicprint.ch
+app.post("/api/admin/migrate-r2-urls", async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const newBase = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
+    if (!newBase || newBase.includes('r2.dev')) {
+      return res.status(400).json({ ok: false, error: 'R2_PUBLIC_URL must be set to custom domain (not r2.dev)' });
+    }
+    // Count tiles with old r2.dev URL
+    const countRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE r2_url LIKE '%r2.dev%'
+    `);
+    const toUpdate = parseInt(countRes.rows[0].cnt);
+    // Update: replace the r2.dev base URL with the new custom domain
+    // Old format: https://pub-XXXX.r2.dev/tiles/123.jpg
+    // New format: https://tiles.mosaicprint.ch/tiles/123.jpg
+    const result = await pool.query(`
+      UPDATE mosaic_images
+      SET r2_url = REGEXP_REPLACE(r2_url, 'https://[^/]+\.r2\.dev', $1)
+      WHERE r2_url LIKE '%r2.dev%'
+    `, [newBase]);
+    const updated = result.rowCount ?? 0;
+    // Invalidate caches
+    invalidateIndexCache();
+    tileUrlIndexCache.clear();
+    tileUrlCache.clear();
+    console.log(`[migrate-r2-urls] Updated ${updated} URLs to ${newBase}`);
+    res.json({
+      ok: true,
+      toUpdate,
+      updated,
+      newBase,
+      message: `${updated} R2-URLs auf ${newBase} migriert.`,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ── fal.ai Image Analysis ────────────────────────────────────────────────────
 // POST /api/analyze-image-fal
 // Body: { imageBase64: string, mimeType?: string }
