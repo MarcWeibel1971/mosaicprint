@@ -696,7 +696,7 @@ app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, 
     if (!imageBase64 && !directUrl) return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
 
     // Build Gemini request parts
-    const prompt = `Analyze this image for photo mosaic tile import. Return ONLY valid JSON with exactly these fields:
+    const prompt = `Analyze this image for photo mosaic creation. Return ONLY valid JSON with exactly these fields:
 {
   "sceneType": "portrait|landscape|abstract|architecture|nature|food|animal|night_skyline|colorful",
   "description": "one sentence description",
@@ -713,13 +713,29 @@ app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, 
     "skinTone": "light|medium|dark|none",
     "hairColor": "blonde|brown|black|gray|white|red|none"
   },
+  "regions": {
+    "face": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.20, "preferCalm": true, "notes": "" },
+    "hair": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.50, "preferCalm": false, "notes": "" },
+    "clothing": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.35, "preferCalm": false, "notes": "" },
+    "background": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.15, "preferCalm": true, "notes": "" },
+    "other": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.30, "preferCalm": false, "notes": "" }
+  },
+  "algoRecommendations": {
+    "neighborPenalty": 400,
+    "neighborRadius": 6,
+    "tileComplexityThreshold": 0.25,
+    "preferCalmGlobally": true,
+    "recommendedProfile": "portrait|landscape|abstract|colorful|night_skyline",
+    "reasoning": "one sentence why"
+  },
   "importKeywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
   "keywordSuggestions": [
     {"keyword": "search term", "reason": "why needed for mosaic", "priority": "high|medium|low"}
   ]
 }
-For portraits: importKeywords must include skin tone keywords, hair color, and specific facial features.
-For landscapes: include dominant colors, scene type, mood.
+For portraits: set face.pct to actual face area percentage, face.tileComplexityMax=0.18 (very smooth tiles for skin), hair.tileComplexityMax=0.55 (texture ok), background.tileComplexityMax=0.12 (very calm).
+For landscapes: face.pct=0, background.pct=60-80, set algoRecommendations.preferCalmGlobally=false.
+All region pct values must sum to 100. dominantColor must be a hex color like #f5c5a3.
 No explanation, only JSON.`;
 
     let imagePart: any;
@@ -786,9 +802,29 @@ No explanation, only JSON.`;
 
     const importKeywords: string[] = parsed.importKeywords ?? keywordSuggestions.slice(0, 5).map((k: any) => k.keyword);
 
+    // Extract region analysis (new)
+    const regions = parsed.regions ?? {
+      face: { pct: hasFace ? 30 : 0, dominantColor: '#f5c5a3', tileComplexityMax: 0.18, preferCalm: true, notes: '' },
+      hair: { pct: hasFace ? 15 : 0, dominantColor: '#4a3728', tileComplexityMax: 0.50, preferCalm: false, notes: '' },
+      clothing: { pct: hasFace ? 20 : 0, dominantColor: '#888888', tileComplexityMax: 0.35, preferCalm: false, notes: '' },
+      background: { pct: hasFace ? 35 : 80, dominantColor: '#cccccc', tileComplexityMax: 0.15, preferCalm: true, notes: '' },
+      other: { pct: 0, dominantColor: '#aaaaaa', tileComplexityMax: 0.30, preferCalm: false, notes: '' },
+    };
+
+    // Extract algo recommendations (new)
+    const algoRecommendations = parsed.algoRecommendations ?? {
+      neighborPenalty: hasFace ? 420 : 280,
+      neighborRadius: hasFace ? 6 : 4,
+      tileComplexityThreshold: hasFace ? 0.22 : 0.35,
+      preferCalmGlobally: hasFace,
+      recommendedProfile: sceneType === 'portrait' ? 'portrait' : sceneType === 'night_skyline' ? 'night_skyline' : sceneType === 'colorful' ? 'colorful' : 'landscape',
+      reasoning: `Automatisch generiert für sceneType=${sceneType}`,
+    };
+
     console.log(`[Gemini] Analysis: sceneType=${sceneType} hasFace=${hasFace} skinTone=${attributes.skinTone} hairColor=${attributes.hairColor}`);
     console.log(`[Gemini] Description: ${description}`);
     console.log(`[Gemini] Keywords: ${importKeywords.join(', ')}`);
+    console.log(`[Gemini] Regions: face=${regions.face?.pct}% bg=${regions.background?.pct}% profile=${algoRecommendations.recommendedProfile}`);
 
     return res.json({
       ok: true,
@@ -797,6 +833,8 @@ No explanation, only JSON.`;
       hasFace,
       faceCount,
       attributes,
+      regions,
+      algoRecommendations,
       keywordSuggestions,
       importKeywords,
       imageUrl: directUrl ?? '(uploaded file)',

@@ -819,23 +819,46 @@ export default function Studio() {
                   }
                   return merged;
                 };
+                // Extract Gemini region analysis and algo recommendations
+                const geminiRegions = falResult.regions ?? null;
+                const geminiAlgo = falResult.algoRecommendations ?? null;
+
+                // Store Gemini region data for use in matching algorithm
+                if (geminiRegions) {
+                  localStorage.setItem('mosaicprint_gemini_regions', JSON.stringify(geminiRegions));
+                  console.log('[Studio] Gemini regions: face=' + (geminiRegions.face?.pct ?? 0) + '% bg=' + (geminiRegions.background?.pct ?? 0) + '%');
+                }
+
                 if (falHasFace && imageType !== 'portrait') {
                   // fal.ai found a face but heuristic missed it
-                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 4, rotation: false, neighborRadius: 6, neighborPenalty: 400, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
+                  // Use Gemini algo recommendations if available
+                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 420;
+                  const neighborRadius = geminiAlgo?.neighborRadius ?? 6;
+                  const tileComplexityThreshold = geminiAlgo?.tileComplexityThreshold ?? 0.22;
+                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 4, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
                   localStorage.removeItem('mosaicprint_selected_theme');
                   setAutoPresetApplied('Portrait');
                   setDetectedImageType('portrait');
-                  console.log('[Studio] fal.ai override → portrait (heuristic was:', imageType, ')');
+                  console.log('[Studio] Gemini override → portrait penalty=' + neighborPenalty + ' radius=' + neighborRadius + ' complexityMax=' + tileComplexityThreshold);
                 } else if (!falHasFace && imageType === 'portrait') {
                   // fal.ai says no face, heuristic was wrong
-                  const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius: 4, neighborPenalty: 160, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
+                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 280;
+                  const neighborRadius = geminiAlgo?.neighborRadius ?? 4;
+                  const recommendedProfile = geminiAlgo?.recommendedProfile ?? 'landscape';
+                  const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius, neighborPenalty, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(abstractPreset)));
                   setAutoPresetApplied(null);
-                  setDetectedImageType('abstract');
-                  console.log('[Studio] fal.ai override → no face (heuristic was portrait)');
+                  setDetectedImageType(recommendedProfile as any);
+                  console.log('[Studio] Gemini override → no face, profile=' + recommendedProfile);
+                } else if (falHasFace && imageType === 'portrait' && geminiAlgo) {
+                  // Face confirmed, refine existing portrait preset with Gemini recommendations
+                  const currentSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+                  const refined = { ...currentSettings, neighborPenalty: geminiAlgo.neighborPenalty, neighborRadius: geminiAlgo.neighborRadius, tileComplexityThreshold: geminiAlgo.tileComplexityThreshold };
+                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(refined));
+                  console.log('[Studio] Gemini refined portrait: penalty=' + geminiAlgo.neighborPenalty + ' complexityMax=' + geminiAlgo.tileComplexityThreshold);
                 }
-                console.log('[Studio] fal.ai result: sceneType=' + falSceneType + ' hasFace=' + falHasFace);
+                console.log('[Studio] Gemini result: sceneType=' + falSceneType + ' hasFace=' + falHasFace + ' profile=' + (geminiAlgo?.recommendedProfile ?? 'n/a'));
               }).catch(e => console.warn('[Studio] fal.ai async failed:', e));
             } catch (e) { console.warn('[Studio] fal.ai setup failed:', e); }
           })();
@@ -1002,6 +1025,11 @@ export default function Studio() {
     const _debugStartMs = performance.now();
 
     const savedSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+    // Load Gemini region analysis (set async after image upload)
+    const geminiRegions: Record<string, { pct: number; dominantColor: string; tileComplexityMax: number; preferCalm: boolean; notes: string }> | null =
+      (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_gemini_regions') || 'null'); } catch { return null; } })();
+    // Global tileComplexity threshold from Gemini (overrides hardcoded values if available)
+    const geminiComplexityThreshold: number | null = savedSettings.tileComplexityThreshold ?? null;
     const BASE_TILES = savedSettings.baseTiles ?? 60;  // Mosaicer-style: fewer, larger tiles
     const imgAspect = targetImg.naturalWidth / targetImg.naturalHeight;
     const COLS = imgAspect >= 1 ? BASE_TILES : Math.round(BASE_TILES * imgAspect);
@@ -1312,18 +1340,23 @@ export default function Studio() {
            if (IS_16D) {
              const tileComplexity = labIndex[i + 15]; // 0=calm, 0.5=medium, 1=busy
              const cellEdge = targetEdge; // 0-1 target edge energy (passed as parameter)
+             // Gemini-based global threshold: if Gemini says max complexity=0.22, apply globally
+             const globalMaxComplexity = geminiComplexityThreshold ?? 1.0;
+             if (globalMaxComplexity < 1.0 && tileComplexity > globalMaxComplexity) {
+               dist += (tileComplexity - globalMaxComplexity) * 600; // Gemini-guided global penalty
+             }
              if (cellEdge < 0.15) {
                // Very smooth target (sky, fog, skin highlight): AGGRESSIVELY penalize busy tiles
-               if (tileComplexity > 0.30) dist += (tileComplexity - 0.30) * 900; // up to +630 (was +360)
+               if (tileComplexity > 0.30) dist += (tileComplexity - 0.30) * 900; // up to +630
              } else if (cellEdge < 0.30) {
                // Smooth target (skin, calm water, background): strongly penalize busy tiles
-               if (tileComplexity > 0.40) dist += (tileComplexity - 0.40) * 700; // up to +420 (was +200)
+               if (tileComplexity > 0.40) dist += (tileComplexity - 0.40) * 700; // up to +420
              } else if (cellEdge < 0.50) {
                // Moderate target (face skin, gradients): penalize busy tiles
-               if (tileComplexity > 0.55) dist += (tileComplexity - 0.55) * 500; // up to +225 (was +87)
+               if (tileComplexity > 0.55) dist += (tileComplexity - 0.55) * 500; // up to +225
              } else if (cellEdge < 0.70) {
                // Higher-edge target: still penalize very busy tiles
-               if (tileComplexity > 0.75) dist += (tileComplexity - 0.75) * 300; // up to +75 (new)
+               if (tileComplexity > 0.75) dist += (tileComplexity - 0.75) * 300; // up to +75
              } else if (cellEdge > 0.70 && tileComplexity < 0.2) {
                // Very detailed target + calm tile = mild penalty (calm tiles lack detail for edges)
                dist += (0.2 - tileComplexity) * 80; // up to +16
@@ -3326,6 +3359,34 @@ export default function Studio() {
                 {detectedImageType === 'landscape' && 'Groessere Kacheln . Mehr Farb-Genauigkeit . Weite Komposition'}
                 {detectedImageType === 'abstract' && 'Ausgewogene Gewichtung fuer allgemeine Motive'}
               </p>
+              {/* Gemini Region Analysis */}
+              {(() => {
+                try {
+                  const gr = JSON.parse(localStorage.getItem('mosaicprint_gemini_regions') || 'null');
+                  if (!gr) return null;
+                  const regions = [
+                    { key: 'face', label: 'Gesicht', icon: '👤', color: '#f5c5a3' },
+                    { key: 'hair', label: 'Haare', icon: '💇', color: '#4a3728' },
+                    { key: 'clothing', label: 'Kleidung', icon: '👕', color: '#888' },
+                    { key: 'background', label: 'Hintergrund', icon: '🌅', color: '#ccc' },
+                    { key: 'other', label: 'Sonstiges', icon: '✨', color: '#aaa' },
+                  ].filter(r => (gr[r.key]?.pct ?? 0) > 3);
+                  if (regions.length === 0) return null;
+                  return (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {regions.map(r => (
+                        <div key={r.key} className="flex items-center gap-1 bg-white rounded-full px-2 py-0.5 border border-gray-200 text-xs">
+                          <span>{r.icon}</span>
+                          <span className="text-gray-600">{r.label}</span>
+                          <span className="font-semibold text-gray-800">{gr[r.key].pct}%</span>
+                          <span className="text-gray-400">max {Math.round(gr[r.key].tileComplexityMax * 100)}% Kompl.</span>
+                          <div className="w-2.5 h-2.5 rounded-full border border-gray-300" style={{ backgroundColor: gr[r.key].dominantColor }} />
+                        </div>
+                      ))}
+                    </div>
+                  );
+                } catch { return null; }
+              })()}
             </div>
             {/* Badge */}
             <div className={`flex-shrink-0 text-xs font-bold px-2.5 py-1 rounded-full ${
