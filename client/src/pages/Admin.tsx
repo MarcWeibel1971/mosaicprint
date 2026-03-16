@@ -57,6 +57,8 @@ interface TileImage {
   colorCategory: string | null; brightnessCategory: string | null
   subject: string | null
   semanticTheme: string | null
+  qualityStatus?: string | null
+  tileType?: string | null
 }
 interface DbStatsDetail {
   total: number; labIndexed: number
@@ -68,6 +70,7 @@ interface DbStatsDetail {
   bySaturation?: Record<string, number>
   grayCount?: number
   bySubject?: Record<string, number>
+  byTileType?: Record<string, number>
 }
 interface CronStatus {
   enabled: boolean; current: number; target: number; remaining: number; intervalHours: number
@@ -1589,6 +1592,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [sourceDeleting, setSourceDeleting] = useState(false)
   const [semanticThemeFilter, setSemanticThemeFilter] = useState('alle')
+  const [tileTypeFilter, setTileTypeFilter] = useState('alle')
   const [batchTagging, setBatchTagging] = useState(false)
   const [batchTagResult, setBatchTagResult] = useState<string | null>(null)
   const LIMIT = 60
@@ -1611,6 +1615,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (importedSince !== 'alle') params.importedSince = importedSince
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
       if (semanticThemeFilter !== 'alle') params.semanticTheme = semanticThemeFilter
+      if (tileTypeFilter !== 'alle') params.tileType = tileTypeFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
       const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`)
       const data = await res.json()
@@ -1620,7 +1625,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, semanticThemeFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, semanticThemeFilter, tileTypeFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -1713,7 +1718,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     const interval = setInterval(() => { fetchDbStats() }, 30000)
     return () => clearInterval(interval)
   }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter, qualityStatusFilter, importedSince])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter, qualityStatusFilter, importedSince, tileTypeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
@@ -2208,6 +2213,53 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               )
             })()}
 
+            {/* Tile-Type Distribution */}
+            {dbStats.byTileType && (() => {
+              const calm = dbStats.byTileType!['calm'] ?? 0
+              const medium = dbStats.byTileType!['medium'] ?? 0
+              const busy = dbStats.byTileType!['busy'] ?? 0
+              const totalTT = calm + medium + busy || 1
+              const calmPct = Math.round(calm / totalTT * 100)
+              const mediumPct = Math.round(medium / totalTT * 100)
+              const busyPct = Math.round(busy / totalTT * 100)
+              const tooFewCalm = calmPct < 30
+              return (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Tile-Typ – Ruhig / Normal / Komplex</h3>
+                  <div className="flex gap-2 mb-2">
+                    {[
+                      { label: '🌫️ Ruhig (calm)', pct: calmPct, cnt: calm, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', tip: 'Ideal für Haut & Hintergrund', target: 40, type: 'calm' },
+                      { label: '🎨 Normal', pct: mediumPct, cnt: medium, color: 'bg-blue-50 border-blue-200', text: 'text-blue-700', tip: 'Allround-Tiles', target: 40, type: 'medium' },
+                      { label: '🌀 Komplex (busy)', pct: busyPct, cnt: busy, color: 'bg-orange-50 border-orange-200', text: 'text-orange-700', tip: 'Zu viele → Haut wirkt unruhig', target: 20, type: 'busy' },
+                    ].map(({ label, pct, cnt, color, text, tip, type }) => (
+                      <div key={label}
+                        className={`flex-1 rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
+                        onClick={() => setTileTypeFilter(type)}>
+                        <div className="text-xs font-semibold text-gray-700">{label}</div>
+                        <div className={`text-lg font-bold ${text}`}>{pct}%</div>
+                        <div className="text-xs text-gray-400">{cnt.toLocaleString()}</div>
+                        <div className="text-xs text-gray-500 mt-1 leading-tight">{tip}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="h-3 rounded-full overflow-hidden flex">
+                    <div className="bg-emerald-400" style={{ width: `${calmPct}%` }} />
+                    <div className="bg-blue-400" style={{ width: `${mediumPct}%` }} />
+                    <div className="bg-orange-400" style={{ width: `${busyPct}%` }} />
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <span>Ziel: 40% ruhig · 40% normal · 20% komplex</span>
+                    <span className={tooFewCalm ? 'text-amber-600 font-medium' : 'text-gray-400'}>{tooFewCalm ? `⚠️ Zu wenig ruhige Tiles (${calmPct}%)` : '✅ Gute Verteilung'}</span>
+                  </div>
+                  {tooFewCalm && (
+                    <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                      ⚠️ <strong>Zu wenig ruhige Tiles ({calmPct}%):</strong> Ideal wären 40–50%. Import von Himmel, Nebel, Wasser, Bokeh, Texturen empfohlen. Ziel: {Math.round(totalTT * 0.40 - calm).toLocaleString()} weitere ruhige Tiles.
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
             {/* Portrait Quality Score */}
             {dbStats.byWarmCool && dbStats.byBrightness5 && dbStats.bySaturation && (() => {
               const total5 = Object.values(dbStats.byBrightness5!).reduce((a, b) => a + b, 0) || 1
@@ -2383,6 +2435,22 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Tile-Typ:</span>
+          {['alle', 'calm', 'medium', 'busy'].map(v => (
+            <button key={v} onClick={() => { setTileTypeFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                tileTypeFilter === v
+                  ? v === 'calm' ? 'bg-emerald-600 text-white'
+                  : v === 'medium' ? 'bg-blue-600 text-white'
+                  : v === 'busy' ? 'bg-orange-600 text-white'
+                  : 'bg-gray-700 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>
+              {v === 'alle' ? 'Alle' : v === 'calm' ? '🌫️ Ruhig' : v === 'medium' ? '🎨 Normal' : '🌀 Komplex'}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Filter Bar */}
@@ -2423,8 +2491,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setSemanticThemeFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle') }}
+        {tileTypeFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded-full">
+            {tileTypeFilter === 'calm' ? '🌫️ Ruhig' : tileTypeFilter === 'medium' ? '🎨 Normal' : '🌀 Komplex'}
+            <button onClick={() => setTileTypeFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle' || tileTypeFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>

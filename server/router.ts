@@ -1242,11 +1242,20 @@ export const appRouter = router({
       `);
       const grayCount = Number(grayRes.rows[0]?.cnt ?? 0);
 
+      // Tile-Type distribution: calm / medium / busy
+      const tileTypeRes = await pool.query(`
+        SELECT COALESCE(tile_type, 'medium') as tile_type, COUNT(*) as cnt
+        FROM mosaic_images
+        GROUP BY tile_type
+      `);
+      const byTileType: Record<string, number> = {};
+      for (const row of tileTypeRes.rows) byTileType[row.tile_type] = Number(row.cnt);
+
       // 3D matrix gaps analysis
       const gapTasks = await analyzeDbGaps(200);
       const topGaps = gapTasks.slice(0, 20).map(t => ({ label: t.label, deficit: t.deficit, query: t.query }));
       return { total, labIndexed, bySource, byColor, byBrightness, bySubject, topGaps, count: total, target: TILE_TARGET,
-        byWarmCool, byBrightness5, bySaturation, grayCount };
+        byWarmCool, byBrightness5, bySaturation, grayCount, byTileType };
     } catch (e) {
       console.error('[getDbStats error]', e);
       return { total: 0, labIndexed: 0, bySource: {}, byColor: {}, byBrightness: {}, bySubject: {}, topGaps: [], count: 0, target: TILE_TARGET };
@@ -2247,6 +2256,7 @@ export const appRouter = router({
       importedSince: z.string().optional(), // ISO date string, or 'last-import' for last session
       qualityStatus: z.string().optional(),
       semanticTheme: z.string().optional(),
+      tileType: z.string().optional(),
     }))
     .query(async ({ input }) => {
       let importedSince = input.importedSince;
@@ -2276,6 +2286,7 @@ export const appRouter = router({
         importedSince,
         qualityStatus: input.qualityStatus,
         semanticTheme: input.semanticTheme,
+        tileType: input.tileType,
       });
     }),
 

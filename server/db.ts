@@ -285,6 +285,7 @@ export async function getAdminImages(opts: {
   importedSince?: string; // ISO date string for 'recently imported' filter
   qualityStatus?: string;
   semanticTheme?: string; // filter by auto-tagged semantic category
+  tileType?: string; // 'calm' | 'medium' | 'busy'
 }) {
   const pool = getPool();
   const pageSize = opts.pageSize ?? opts.limit ?? 50;
@@ -314,6 +315,11 @@ export async function getAdminImages(opts: {
   // Semantic theme filter
   if (opts.semanticTheme && opts.semanticTheme !== 'alle') {
     conditions.push(`semantic_theme = '${opts.semanticTheme.replace(/'/g, "''")}' `);
+  }
+
+  // Tile type filter: calm / medium / busy
+  if (opts.tileType && opts.tileType !== 'alle') {
+    conditions.push(`COALESCE(tile_type, 'medium') = '${opts.tileType.replace(/'/g, "''")}' `);
   }
   // Brightness filter
   if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
@@ -348,6 +354,7 @@ export async function getAdminImages(opts: {
       COALESCE(theme, subject, 'general') as "theme",
       COALESCE(theme, subject, 'general') as "subject",
       semantic_theme as "semanticTheme",
+      COALESCE(tile_type, 'medium') as "tileType",
       COALESCE(quality_status, 'pending') as "qualityStatus",
       quality_score as "qualityScore",
       quality_reason as "qualityReason",
