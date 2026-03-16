@@ -872,6 +872,7 @@ async function computeLabFull(url: string): Promise<{
   blL: number; blA: number; blB: number;
   brL: number; brA: number; brB: number;
   tileType: 'calm' | 'medium' | 'busy';
+  edgeDensity: number; // 0-1 echter Sobel-basierter Kantenwert
 } | null> {
   try {
     const { Jimp } = await import("jimp");
@@ -1005,6 +1006,7 @@ async function computeLabFull(url: string): Promise<{
       blL: bl.L, blA: bl.a, blB: bl.b,
       brL: br.L, brA: br.a, brB: br.b,
       tileType,
+      edgeDensity, // echter Sobel-basierter Kantenwert (0-1)
     };
   } catch {
     return null;
@@ -1423,6 +1425,7 @@ export const appRouter = router({
                       sourceProvider: input.source,
                       importQuery: keyword,
                       tileType: lab?.tileType,
+                      edgeEnergy: lab?.edgeDensity,
                     });
                     if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
@@ -1617,6 +1620,7 @@ export const appRouter = router({
                       sourceProvider: input.sourceId,
                       importQuery: task.query,
                       tileType: lab?.tileType,
+                      edgeEnergy: lab?.edgeDensity,
                     });
                     if (result.inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
@@ -1833,21 +1837,22 @@ export const appRouter = router({
                   tl_l=$4, tl_a=$5, tl_b=$6,
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
-                  br_l=$13, br_a=$14, br_b=$15
+                  br_l=$13, br_a=$14, br_b=$15,
+                  tile_type=$17, edge_energy=$18
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id]
+                 row.id, lab.tileType, lab.edgeDensity]
               );
               indexed++;
             }
           }));
           if (i % 200 === 0) log(`${indexed}/${res.rows.length} indexiert...`);
         }
-        log(`✅ Fertig: ${indexed} Bilder reindexiert (inkl. Quadrant-LAB)`);
+        log(`✅ Fertig: ${indexed} Bilder reindexiert (inkl. Quadrant-LAB + edge_energy)`);
         rebuildJobStatus.finishedAt = new Date().toISOString();
       } catch (e: unknown) {
         rebuildJobStatus.error = e instanceof Error ? e.message : String(e);
@@ -1892,21 +1897,22 @@ export const appRouter = router({
                   tl_l=$4, tl_a=$5, tl_b=$6,
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
-                  br_l=$13, br_a=$14, br_b=$15
+                  br_l=$13, br_a=$14, br_b=$15,
+                  tile_type=$17, edge_energy=$18
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id]
+                 row.id, lab.tileType, lab.edgeDensity]
               );
               totalIndexed++;
             }
           }));
           if (i % 500 === 0) log(`${totalIndexed}/${res.rows.length} Quadrant-LAB berechnet...`);
         }
-        log(`✅ Backfill fertig: ${totalIndexed} Tiles mit Quadrant-LAB aktualisiert`);
+        log(`✅ Backfill fertig: ${totalIndexed} Tiles mit Quadrant-LAB + edge_energy aktualisiert`);
         rebuildJobStatus.finishedAt = new Date().toISOString();
       } catch (e: unknown) {
         rebuildJobStatus.error = e instanceof Error ? e.message : String(e);
@@ -1941,8 +1947,8 @@ export const appRouter = router({
               const lab = await computeLabFull(row.tile128_url);
               if (lab) {
                 await pool.query(
-                  `UPDATE mosaic_images SET tile_type=$1 WHERE id=$2`,
-                  [lab.tileType, row.id]
+                  `UPDATE mosaic_images SET tile_type=$1, edge_energy=$3 WHERE id=$2`,
+                  [lab.tileType, row.id, lab.edgeDensity]
                 );
                 if (lab.tileType === 'calm') calm++;
                 else if (lab.tileType === 'busy') busy++;
@@ -2191,6 +2197,7 @@ export const appRouter = router({
                   blL: lab?.blL, blA: lab?.blA, blB: lab?.blB,
                   brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                   tileType: lab?.tileType,
+                  edgeEnergy: lab?.edgeDensity,
                 });
                 if (result?.inserted) { imported++; } else { rejected++; }
               } catch { rejected++; }
@@ -2288,6 +2295,7 @@ export const appRouter = router({
         brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
         sourceProvider: 'upload',
         tileType: lab?.tileType,
+        edgeEnergy: lab?.edgeDensity,
       });
       return { ok: true };
     }),
@@ -2692,6 +2700,7 @@ export const appRouter = router({
                             sourceProvider: alSource,
                             importQuery: task.query,
                             tileType: lab?.tileType,
+                            edgeEnergy: lab?.edgeDensity,
                           });
                           if (ins.inserted) { alImported++; alBatchImported++; smartImportJobs[jobKey].imported = alImported; totalImported++; }
                         } catch { /* skip */ }
@@ -2724,8 +2733,8 @@ export const appRouter = router({
                 const lab = await computeLabFull(row.tile128_url);
                 if (lab) {
                   await alPool.query(
-                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,indexed_at=NOW() WHERE id=$17',
-                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id]
+                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,edge_energy=$18,indexed_at=NOW() WHERE id=$17',
+                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id,lab.edgeDensity]
                   );
                   alIndexed++;
                 }
@@ -2973,13 +2982,24 @@ async function runQualityCheckAsync(checkType: string, runId: number): Promise<v
       const lMean = lVals.reduce((a: number, b: number) => a + b, 0) / 4;
       const lVariance = lVals.reduce((a: number, b: number) => a + (b - lMean) ** 2, 0) / 4;
       // Score components (0-1 each)
-      const chromaScore = Math.min(chroma / 40, 1); // higher chroma = more colorful
-      const brightnessScore = 1 - Math.abs(row.avg_l - 50) / 50; // prefer mid-brightness
-      const textureScore = Math.min(Math.sqrt(lVariance) / 20, 1); // quadrant variance = texture
-      const qualityScore = Math.round((chromaScore * 0.3 + brightnessScore * 0.3 + textureScore * 0.4) * 100) / 100;
-      // Reject criteria: too uniform (lVariance < 5) AND too dark/bright
-      const isRejected = lVariance < 2 && (row.avg_l < 15 || row.avg_l > 90);
-      const status: 'pass' | 'warn' | 'fail' = isRejected ? 'fail' : qualityScore < 0.3 ? 'warn' : 'pass';
+      // chromaScore: Farbigkeit (hohe Chroma = gut)
+      const chromaScore = Math.min(chroma / 40, 1);
+      // brightnessScore: KEIN Mitteltöne-Bias mehr.
+      // Extreme Helligkeiten (sehr hell oder sehr dunkel) sind für Mosaike wertvoll
+      // (weisse Wolken, schwarze Haare, helle Haut, dunkle Kleidung).
+      // Stattdessen: Score = 1.0 für alle L-Werte ausser dem "toten" Bereich (L<5 oder L>97)
+      const brightnessScore = (row.avg_l < 5 || row.avg_l > 97) ? 0.5 : 1.0;
+      // textureScore: Quadrant-Varianz = Textur/Struktur
+      const textureScore = Math.min(Math.sqrt(lVariance) / 20, 1);
+      // Qualitäts-Score: Chroma 40%, Helligkeit 20%, Textur 40%
+      // (Helligkeit weniger gewichtet, da extreme Werte jetzt nicht mehr bestraft werden)
+      const qualityScore = Math.round((chromaScore * 0.4 + brightnessScore * 0.2 + textureScore * 0.4) * 100) / 100;
+      // Reject-Kriterien überarbeitet:
+      // Nur ablehnen wenn: (a) komplett einfarbig (lVariance < 1) UND (b) komplett farblos (chroma < 3)
+      // UND (c) im "toten" Bereich (L < 5 = fast schwarz, L > 97 = fast weiss ohne Struktur)
+      // Früher: lVariance < 2 && (avg_l < 15 || avg_l > 90) – zu aggressiv, bestraft gute Tiles
+      const isRejected = lVariance < 1 && chroma < 3 && (row.avg_l < 5 || row.avg_l > 97);
+      const status: 'pass' | 'warn' | 'fail' = isRejected ? 'fail' : qualityScore < 0.2 ? 'warn' : 'pass';
       if (status === 'pass') pass++;
       else if (status === 'warn') warn++;
       else fail++;

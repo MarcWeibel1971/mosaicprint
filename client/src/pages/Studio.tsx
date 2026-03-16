@@ -1229,28 +1229,37 @@ export default function Studio() {
             const darkPenalty = (0.15 - brightness) * (targetBrightness - 0.65) * 300;
             dist += darkPenalty; // up to +45 for very dark tile in very bright area
           }
-          // Gray-penalty: penalize gray tiles when target is colorful
-          const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60);
-          if (GRAY_PENALTY > 0 && sat < 0.08) dist += (GRAY_PENALTY);
-          // Extra: penalize low-sat tiles in warm/skin-toned target areas (fixes gray patches in faces)
-          // targetSat > 0.10 = target has some color (not pure gray); sat < 0.15 = tile is nearly gray
-          if (targetSat > 0.10 && sat < 0.15 && targetA > 2) {
-            dist += (0.15 - sat) * 300; // up to +45 penalty for very gray tiles in colored areas
+          // ── Color-Mismatch-Penalty (konsolidiert aus: Gray-, Skin-, Green-, Blue-Penalty) ──
+          // Alle Farb-Mismatch-Penalties sind hier zusammengefasst, um Überlappungen zu vermeiden.
+          const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60); // Tile-Sättigung 0-1
+          const isTargetSkinArea = targetL >= 35 && targetL <= 85 && targetA >= 2 && targetA <= 30;
+
+          // (A) Gray-Penalty: graue Tiles in farbigen Bereichen bestrafen
+          // Nur aktiv wenn Zielbereich Farbe hat (targetSat > 0.12)
+          if (GRAY_PENALTY > 0 && sat < 0.08) dist += GRAY_PENALTY;
+
+          // (B) Color-Mismatch-Penalty: Tile-Farbe weicht stark von Ziel-Farbe ab
+          // Ersetzt: "Extra low-sat penalty" + "Skin-Penalty" (beide waren überlappend)
+          // Aktiv wenn: Ziel hat Farbe (targetSat > 0.10) UND Tile ist fast grau (sat < 0.15)
+          if (targetSat > 0.10 && sat < 0.15) {
+            // Skaliert mit Ziel-Sättigung: je farbiger das Ziel, desto höher die Strafe
+            dist += (0.15 - sat) * targetSat * 600; // max +90 bei sat=0 und targetSat=1
           }
-          // Stage A: direct green/blue tile penalty for skin areas (uses raw LAB a/b values)
-           // This is the most effective pre-filter: green tiles (a<-3) almost never belong in faces
-           const isTargetSkinArea = targetL >= 35 && targetL <= 85 && targetA >= 2 && targetA <= 30;
-           if (isTargetSkinArea) {
-             // Green tile penalty: scale from a=-3 (0) to a=-15 (+600) to a=-25 (+1000)
-             if (a < -3) dist += Math.min(1000, (-a - 3) * 50);
-             // Blue tile penalty: scale from b=-5 (0) to b=-15 (+300)
-             if (b < -5) dist += Math.min(500, (-b - 5) * 30);
-           }
-           // isSkinFriendly (15D): in portrait mode, boost skin-friendly tiles for face regions
-           if (IS_15D && savedSettings.portraitMode) {
-             const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
-             if (isTargetSkinArea && !isSkinFriendlyTile) dist += 200; // stronger: was +50
-           }
+
+          // (C) Hue-Mismatch-Penalty für Hautton-Bereiche: grüne/blaue Tiles bestrafen
+          // Nur aktiv in Hautton-Bereichen (L 35-85, a 2-30 = warm)
+          if (isTargetSkinArea) {
+            // Grüne Tiles (a < -3): fast nie passend für Gesichter
+            if (a < -3) dist += Math.min(800, (-a - 3) * 40);
+            // Blaue Tiles (b < -5): kühle Tiles in warmen Bereichen
+            if (b < -5) dist += Math.min(400, (-b - 5) * 25);
+          }
+
+          // (D) isSkinFriendly (15D): Nicht-Hautton-Tiles in Gesichtsbereichen bestrafen
+          if (IS_15D && savedSettings.portraitMode) {
+            const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
+            if (isTargetSkinArea && !isSkinFriendlyTile) dist += 150;
+          }
            // tileComplexity (16D): calm=0.0, medium=0.5, busy=1.0
            // Smooth target areas (sky, water, skin) should use calm tiles
            // Detailed target areas (hair, texture, edges) can use busy tiles

@@ -105,13 +105,14 @@ app.get("/api/tile-lab-index", async (req, res) => {
       ? `AND subject = $1`
       : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
-    // Also fetch quadrant data + is_skin_friendly for richer feature vector
+    // Also fetch quadrant data + is_skin_friendly + edge_energy for richer feature vector
     const result = await pool.query(
       `SELECT id, avg_l, avg_a, avg_b,
               tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
               bl_l, bl_a, bl_b, br_l, br_a, br_b,
               COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly,
-              COALESCE(tile_type, 'medium') as tile_type
+              COALESCE(tile_type, 'medium') as tile_type,
+              edge_energy
        FROM mosaic_images
        WHERE avg_l IS NOT NULL
          AND COALESCE(quality_status, 'pending') != 'rejected'
@@ -122,7 +123,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
     const rows = result.rows;
     // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity] = 16 floats
     // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
-    // edge: variance of L across quadrants (high variance = high edge energy)
+    // edge: echter Sobel-Kantenwert aus DB (edge_energy), Fallback: L-Varianz-Proxy für ältere Tiles
     // brightness: avg_l / 100
     // isSkinFriendly: 1.0 = skin-friendly tile, 0.0 = not skin-friendly
     // tileComplexity: 0.0=calm, 0.5=medium, 1.0=busy (from tile_type column)
@@ -138,10 +139,17 @@ app.get("/api/tile-lab-index", async (req, res) => {
       const trL = Number(row.tr_l ?? L), trA = Number(row.tr_a ?? a), trB = Number(row.tr_b ?? b);
       const blL = Number(row.bl_l ?? L), blA = Number(row.bl_a ?? a), blB = Number(row.bl_b ?? b);
       const brL = Number(row.br_l ?? L), brA = Number(row.br_a ?? a), brB = Number(row.br_b ?? b);
-      // Compute edge proxy: variance of L across quadrants
-      const quadMeanL = (tlL + trL + blL + brL) / 4;
-      const quadVarL = ((tlL-quadMeanL)**2 + (trL-quadMeanL)**2 + (blL-quadMeanL)**2 + (brL-quadMeanL)**2) / 4;
-      const edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30);
+      // Edge-Energie: echter Sobel-Wert aus DB (berechnet in computeLabFull beim Import)
+      // Fallback: L-Varianz-Proxy für ältere Tiles ohne edge_energy-Wert
+      let edgeProxy: number;
+      if (row.edge_energy != null) {
+        edgeProxy = Math.min(1, Number(row.edge_energy)); // echter Sobel-Wert
+      } else {
+        // Legacy-Fallback: L-Varianz-Proxy (für Tiles vor dem edge_energy-Backfill)
+        const quadMeanL = (tlL + trL + blL + brL) / 4;
+        const quadVarL = ((tlL-quadMeanL)**2 + (trL-quadMeanL)**2 + (blL-quadMeanL)**2 + (brL-quadMeanL)**2) / 4;
+        edgeProxy = Math.min(1, Math.sqrt(quadVarL) / 30);
+      }
       const brightness = L / 100;
       const isSkinFriendly = row.is_skin_friendly ? 1.0 : 0.0;
       buf.writeFloatLE(Number(row.id), offset);   offset += 4;  // [0]  id

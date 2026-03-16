@@ -137,6 +137,10 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tile_type TEXT DEFAULT 'medium'`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_tile_type ON mosaic_images (tile_type)`);
 
+  // edge_energy: 0.0-1.0 echter Sobel-basierter Kantenwert (aus computeLabFull)
+  // Ersetzt den groben L-Varianz-Proxy im Lab-Index-Endpunkt
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS edge_energy REAL DEFAULT NULL`);
+
   // Indexes for new columns
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_source_provider ON mosaic_images (source_provider)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_quality_status ON mosaic_images (quality_status)`);
@@ -411,6 +415,7 @@ export async function insertMosaicImage(data: {
   sourceProvider?: string; // 'pexels' | 'unsplash' | 'pixabay' | 'picsum' | 'upload'
   importQuery?: string;    // keyword used to find this tile
   tileType?: string;       // 'calm' | 'medium' | 'busy' – texture complexity
+  edgeEnergy?: number;     // 0.0-1.0 Sobel-basierter Kantenwert aus computeLabFull
 }): Promise<{ inserted: boolean; id: number | null }> {
   const pool = getPool();
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
@@ -440,8 +445,8 @@ export async function insertMosaicImage(data: {
        (source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
-        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme)
-     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23)
+        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -451,7 +456,8 @@ export async function insertMosaicImage(data: {
       blL, blA, blB, brL, brA, brB,
       theme, theme, sourceProvider, data.importQuery ?? null,
       data.tileType ?? 'medium', semanticTheme,
-      data.r2Url ?? null
+      data.r2Url ?? null,
+      data.edgeEnergy ?? null  // $25
     ]
   );
   const insertedId: number | null = res.rows[0]?.id ?? null;
