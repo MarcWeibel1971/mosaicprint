@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { rgbToLab as rgbToLabUtil } from '../lib/colorUtils'
 // jsPDF loaded dynamically to avoid chunk initialization errors at module load time
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
@@ -4109,14 +4110,10 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         ctx.drawImage(img, 0, 0, SIZE, SIZE)
         const { data } = ctx.getImageData(0, 0, SIZE, SIZE)
 
-        const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92 }
+        // rgbToLab aus colorUtils (keine lokale Duplikation mehr)
         const rgbToLab = (r: number, g: number, b: number) => {
-          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b)
-          const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047
-          const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000
-          const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883
-          const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116
-          return { L: 116*f(y) - 16, a: 500*(f(x)-f(y)), b: 200*(f(y)-f(z)) }
+          const [L, a, b_] = rgbToLabUtil(r, g, b)
+          return { L, a, b: b_ }
         }
 
         // ── 1. LAB zones (for pool comparison) ──

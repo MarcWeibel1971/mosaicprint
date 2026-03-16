@@ -5,6 +5,7 @@ import { renderMosaicOnServer, type TileData } from "./mosaicExport.js";
 import Stripe from "stripe";
 import { cronState } from "./cron-state.js";
 import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
+import { rgbToLab as _rgbToLab } from "./colorUtils.js";
 
 // ---- Constants ----
 const TILE_TARGET = 100_000;
@@ -853,20 +854,12 @@ function getImportStatus(sourceId: string): JobStatus {
 }
 
 // Compute LAB from raw RGB pixels (3 bytes per pixel)
+// Verwendet _rgbToLab aus colorUtils.ts (keine lokale Duplikation)
 function rgbPixelsToLab(px: Buffer, pixelCount: number): { L: number; a: number; b: number } {
   let rSum = 0, gSum = 0, bSum = 0;
   for (let j = 0; j < px.length; j += 3) { rSum += px[j]; gSum += px[j + 1]; bSum += px[j + 2]; }
-  const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
-  const rl = toLinear(rSum / pixelCount), gl = toLinear(gSum / pixelCount), bl2 = toLinear(bSum / pixelCount);
-  const X = rl * 0.4124564 + gl * 0.3575761 + bl2 * 0.1804375;
-  const Y = rl * 0.2126729 + gl * 0.7151522 + bl2 * 0.0721750;
-  const Z = rl * 0.0193339 + gl * 0.1191920 + bl2 * 0.9503041;
-  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
-  return {
-    L: 116 * f(Y / 1.0) - 16,
-    a: 500 * (f(X / 0.95047) - f(Y / 1.0)),
-    b: 200 * (f(Y / 1.0) - f(Z / 1.08883)),
-  };
+  const [L, a, b] = _rgbToLab(Math.round(rSum / pixelCount), Math.round(gSum / pixelCount), Math.round(bSum / pixelCount));
+  return { L, a, b };
 }
 
 // Compute global LAB + 4-quadrant LAB from a URL (fetches image once, resizes to 8x8)
@@ -1059,8 +1052,7 @@ async function checkTileQuality(url: string, subject?: string): Promise<QualityR
       buf = Buffer.from(await resp.arrayBuffer());
     }
 
-    const toLinear = (c: number) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
-
+    // toLinear und rgbToLab aus colorUtils.ts (keine lokale Duplikation)
     // ── 1. Saturation check (16×16 pixels, LAB chroma) ──
     const SIZE = 16;
     const img16 = await Jimp.fromBuffer(buf);
@@ -1069,15 +1061,7 @@ async function checkTileQuality(url: string, subject?: string): Promise<QualityR
     for (let y = 0; y < SIZE; y++) {
       for (let x = 0; x < SIZE; x++) {
         const rgba = img16.getPixelColor(x, y);
-        const rl = toLinear((rgba >> 24) & 0xff);
-        const gl = toLinear((rgba >> 16) & 0xff);
-        const bl = toLinear((rgba >> 8) & 0xff);
-        const X = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
-        const Y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750;
-        const Z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041;
-        const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
-        const labA = 500 * (f(X / 0.95047) - f(Y));
-        const labB = 200 * (f(Y) - f(Z / 1.08883));
+        const [, labA, labB] = _rgbToLab((rgba >> 24) & 0xff, (rgba >> 16) & 0xff, (rgba >> 8) & 0xff);
         chromaSum += Math.sqrt(labA * labA + labB * labB);
       }
     }

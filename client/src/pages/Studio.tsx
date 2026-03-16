@@ -6,6 +6,7 @@ import {
   Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check
 } from "lucide-react";
 import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
+import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
 import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
 import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
 
@@ -20,23 +21,15 @@ function detectFaceRegionsCanvas(img: HTMLImageElement): Array<{x: number; y: nu
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(img, 0, 0, SIZE, SIZE);
     const { data } = ctx.getImageData(0, 0, SIZE, SIZE);
-    const toLinear = (v: number) => { const c = v/255; return c > 0.04045 ? Math.pow((c+0.055)/1.055, 2.4) : c/12.92; };
-    const rgbToLab = (r: number, g: number, b: number) => {
-      const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
-      const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
-      const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
-      const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
-      const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787*t + 16/116;
-      return { L: 116*f(y) - 16, a: 500*(f(x)-f(y)), b: 200*(f(y)-f(z)) };
-    };
+    // rgbToLab und toLinear aus colorUtils (keine lokale Duplikation mehr)
     // Build skin-pixel mask: warm (a>3, b>5), medium brightness (L 30-85), low-medium chroma
     const skinMask = new Uint8Array(SIZE * SIZE);
     let skinCount = 0;
     for (let i = 0; i < SIZE * SIZE; i++) {
       const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
-      const lab = rgbToLab(r, g, b);
-      const chroma = Math.sqrt(lab.a*lab.a + lab.b*lab.b);
-      if (lab.a > 2 && lab.b > 4 && lab.L > 28 && lab.L < 88 && chroma < 50) {
+      const [labL, labA, labB] = rgbToLab(r, g, b);
+      const chroma = Math.sqrt(labA*labA + labB*labB);
+      if (labA > 2 && labB > 4 && labL > 28 && labL < 88 && chroma < 50) {
         skinMask[i] = 1; skinCount++;
       }
     }
@@ -138,88 +131,7 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
   return [toSrgb(rLin), toSrgb(gLin), toSrgb(bLin)];
 }
 
-// RGB -> (LAB)
-function rgbToLab(r: number, g: number, b: number): [number, number, number] {
-  let R = r / 255, G = g / 255, B = b / 255;
-  R = R > 0.04045 ? Math.pow((R + 0.055) / 1.055, 2.4) : R / 12.92;
-  G = G > 0.04045 ? Math.pow((G + 0.055) / 1.055, 2.4) : G / 12.92;
-  B = B > 0.04045 ? Math.pow((B + 0.055) / 1.055, 2.4) : B / 12.92;
-  let X = (R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047;
-  let Y = (R * 0.2126 + G * 0.7152 + B * 0.0722) / 1.00000;
-  let Z = (R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883;
-  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
-  return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
-}
-
-/**
- * CIEDE2000 color difference formula (perceptually uniform, better than Euclidean DeltaE)
- * Significantly more accurate for skin tones: reduces over-emphasis on blue/yellow differences.
- * Reference: Sharma et al. 2005, validated against Rochester test data.
- * Returns DeltaE?? in range 0..~100 (< 2 = barely distinguishable, < 5 = small, > 10 = clearly different)
- */
-function deltaE2000(L1: number, a1: number, b1: number, L2: number, a2: number, b2: number): number {
-  const deg2rad = Math.PI / 180;
-  const rad2deg = 180 / Math.PI;
-  // Step 1: C*ab and h*ab
-  const C1 = Math.sqrt(a1*a1 + b1*b1);
-  const C2 = Math.sqrt(a2*a2 + b2*b2);
-  const Cbar = (C1 + C2) / 2;
-  const Cbar7 = Math.pow(Cbar, 7);
-  const G = 0.5 * (1 - Math.sqrt(Cbar7 / (Cbar7 + 6103515625))); // 25^7 = 6103515625
-  const a1p = a1 * (1 + G);
-  const a2p = a2 * (1 + G);
-  const C1p = Math.sqrt(a1p*a1p + b1*b1);
-  const C2p = Math.sqrt(a2p*a2p + b2*b2);
-  let h1p = (a1p === 0 && b1 === 0) ? 0 : Math.atan2(b1, a1p) * rad2deg;
-  if (h1p < 0) h1p += 360;
-  let h2p = (a2p === 0 && b2 === 0) ? 0 : Math.atan2(b2, a2p) * rad2deg;
-  if (h2p < 0) h2p += 360;
-  // Step 2: DeltaL', DeltaC', DeltaH'
-  const dLp = L2 - L1;
-  const dCp = C2p - C1p;
-  let dhp: number;
-  if (C1p * C2p === 0) {
-    dhp = 0;
-  } else if (Math.abs(h2p - h1p) <= 180) {
-    dhp = h2p - h1p;
-  } else if (h2p - h1p > 180) {
-    dhp = h2p - h1p - 360;
-  } else {
-    dhp = h2p - h1p + 360;
-  }
-  const dHp = 2 * Math.sqrt(C1p * C2p) * Math.sin(dhp * deg2rad / 2);
-  // Step 3: CIEDE2000
-  const Lbar = (L1 + L2) / 2;
-  const Cbarp = (C1p + C2p) / 2;
-  let hbarp: number;
-  if (C1p * C2p === 0) {
-    hbarp = h1p + h2p;
-  } else if (Math.abs(h1p - h2p) <= 180) {
-    hbarp = (h1p + h2p) / 2;
-  } else if (h1p + h2p < 360) {
-    hbarp = (h1p + h2p + 360) / 2;
-  } else {
-    hbarp = (h1p + h2p - 360) / 2;
-  }
-  const T = 1
-    - 0.17 * Math.cos((hbarp - 30) * deg2rad)
-    + 0.24 * Math.cos(2 * hbarp * deg2rad)
-    + 0.32 * Math.cos((3 * hbarp + 6) * deg2rad)
-    - 0.20 * Math.cos((4 * hbarp - 63) * deg2rad);
-  const SL = 1 + 0.015 * Math.pow(Lbar - 50, 2) / Math.sqrt(20 + Math.pow(Lbar - 50, 2));
-  const SC = 1 + 0.045 * Cbarp;
-  const SH = 1 + 0.015 * Cbarp * T;
-  const Cbarp7 = Math.pow(Cbarp, 7);
-  const RC = 2 * Math.sqrt(Cbarp7 / (Cbarp7 + 6103515625));
-  const dTheta = 30 * Math.exp(-Math.pow((hbarp - 275) / 25, 2));
-  const RT = -Math.sin(2 * dTheta * deg2rad) * RC;
-  return Math.sqrt(
-    Math.pow(dLp / SL, 2) +
-    Math.pow(dCp / SC, 2) +
-    Math.pow(dHp / SH, 2) +
-    RT * (dCp / SC) * (dHp / SH)
-  );
-}
+// rgbToLab, toLinear, deltaE2000: importiert aus ../lib/colorUtils.ts (keine lokalen Duplikate)
 
 // Printolino-konforme Druckformate
 // Pixelgroesse bei 300 dpi: px = cm x (300 / 2.54) = cm x 118.11
@@ -1276,11 +1188,16 @@ export default function Studio() {
       // targetSat 0-1: at sat=0.3 (moderately colorful), W_A/W_B = 3.2; at sat=0.6+, W_A/W_B = 5.0
       const satBoost = Math.min(3.0, targetSat * 5.0); // 0 at gray, up to +3.0 at fully saturated
       const W_L = 1.2, W_A = 2.0 + satBoost, W_B = 2.0 + satBoost; // Dynamic: 2.0 (gray) to 5.0 (saturated)
-      const W_QUAD = IS_14D ? 0.6 : 0;        // Increased quadrant weight: spatial color gradients matter more
+      // W_QUAD = 0: Quadrant-Matching in Stage A deaktiviert.
+      // Begründung: Ziel-Zellen in Stage A sind 1px groß und haben keine echten Quadrant-Daten.
+      // targetQuadA/B = [targetA, targetA, targetA, targetA] (alle Quadranten identisch) –
+      // der Vergleich mit Tile-Quadranten wäre daher bedeutungslos und würde nur Rauschen einführen.
+      // Stage C (SSD) verwendet echte Pixel-Quadranten und ist der korrekte Ort für Quadrant-Matching.
+      const W_QUAD = 0; // Deaktiviert: Ziel-Zellen haben keine Quadrant-Info (1px Auflösung)
       // W_EDGE: active for all index types - edge energy drives contour sharpness
-      const W_EDGE = IS_7D ? 25.0 : 22.0;     // Slightly increased for 14D/15D for sharper edges
+      const W_EDGE = IS_7D ? 25.0 : 22.0;
       // W_BRIGHT: brightness matching - prevents dark tiles in bright areas
-      const W_BRIGHT = IS_7D ? 15.0 : 10.0;   // Increased from 8.0: brightness drives face structure
+      const W_BRIGHT = IS_7D ? 15.0 : 10.0;
       // Gray-penalty: when target cell is colorful (sat > 0.12), penalize gray tiles (sat < 0.08)
       // Stronger penalty for very saturated areas (red, blue, green objects)
       const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 400); // Increased from 250 for better color accuracy
