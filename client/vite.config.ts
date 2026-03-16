@@ -24,8 +24,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          react: ["react", "react-dom"],
-          router: ["react-router-dom"],
+          // Keep react/react-dom together with the app to avoid "React is not defined"
+          // when JSX chunks load before the react chunk
           icons: ["lucide-react"],
         },
       },
