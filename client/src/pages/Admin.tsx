@@ -1713,7 +1713,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     const interval = setInterval(() => { fetchDbStats() }, 30000)
     return () => clearInterval(interval)
   }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter, qualityStatusFilter, importedSince])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
