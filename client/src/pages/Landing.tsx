@@ -5,7 +5,7 @@
  *  - Preise korrigiert: echte Formate (20×20 CHF 29 bis 100×100 CHF 199)
  *  - Materialien-Sektion hinzugefügt
  */
-import { useRef } from "react";
+import React, { useRef } from "react";
 import { Link } from "react-router-dom";
 import { motion, useInView } from "framer-motion";
 import {
