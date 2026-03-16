@@ -1793,6 +1793,26 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch { /* ignore */ }
   }, [])
 
+  const handleBatchReclassify = async () => {
+    if (!window.confirm('Alle Tiles mit dem neuen mehrdimensionalen Score reklassifizieren? Das dauert 30-90 Min für 45k Tiles.')) return
+    onMessage({ text: '🔄 Reklassifizierung gestartet – Sobel-Edge + Chroma-Varianz + Pixel-Diversität...', type: 'info' })
+    try {
+      const res = await fetch('/api/trpc/batchReclassifyTileTypes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+      })
+      const data = await res.json()
+      const parsed = data.result?.data?.json ?? data.result?.data ?? data
+      if (parsed?.started) {
+        onMessage({ text: '⏳ Reklassifizierung läuft im Hintergrund. Seite nach 30-90 Min neu laden für aktualisierte Statistik.', type: 'info' })
+      } else {
+        onMessage({ text: parsed?.message ?? 'Reklassifizierung gestartet', type: 'info' })
+      }
+      fetchDbStats()
+    } catch {
+      onMessage({ text: 'Fehler bei der Reklassifizierung', type: 'error' })
+    }
+  }
+
   const fetchImages = useCallback(async (p: number) => {
     setLoading(true)
     try {
@@ -2447,8 +2467,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       onClick={handleBatchReclassify}
-                      disabled={!!activeJob}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium rounded-lg transition-colors"
                     >
                       🔄 Alle Tiles neu klassifizieren
                     </button>
