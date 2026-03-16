@@ -1708,6 +1708,11 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   }, [fetchDbStats, fetchImages])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
+  // Auto-refresh stats every 30s (score updates after imports)
+  useEffect(() => {
+    const interval = setInterval(() => { fetchDbStats() }, 30000)
+    return () => clearInterval(interval)
+  }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
@@ -2213,17 +2218,28 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               const extremeLight = Math.round((dbStats.byBrightness5!['extrem_hell'] ?? 0) / total5 * 100)
               const lowSat = Math.round((dbStats.bySaturation!['niedrig'] ?? 0) / totalSat * 100)
               const grayPct = dbStats.grayCount ? Math.round(dbStats.grayCount / totalSat * 100) : 0
-              // Score: 0-100
+              // Score: 0-100 (Portrait-optimiert)
+              // Ziele realistisch für Portrait-Mosaics:
+              // - Niedrig-Sättigung: 50%+ ideal (glatte Hauttöne, Hintergründe)
+              // - Grau/Neutral: 20%+ gut
+              // - Kühl: 15%+ (Hintergrund, Schatten)
+              // - Extrem Dunkel: 8%+ (Haare, Pupillen)
+              // - Extrem Hell: 8%+ (Highlights, Stirn, Schultern)
               let score = 0
-              score += Math.min(kuehlPct / 20 * 25, 25)       // kühl: max 25 pts bei ≥20%
-              score += Math.min(extremeDark / 10 * 15, 15)    // extrem dunkel: max 15 pts
-              score += Math.min(extremeLight / 10 * 15, 15)   // extrem hell: max 15 pts
-              score += Math.min(lowSat / 30 * 25, 25)         // niedrig sättigung: max 25 pts
-              score += Math.min(grayPct / 15 * 20, 20)        // grau: max 20 pts
+              // Niedrig-Sättigung: max 30 pts bei ≥50% (Portrait-Hauptmerkmal)
+              score += Math.min(lowSat / 50 * 30, 30)
+              // Grau/Neutral: max 20 pts bei ≥20%
+              score += Math.min(grayPct / 20 * 20, 20)
+              // Kühl: max 20 pts bei ≥15%
+              score += Math.min(kuehlPct / 15 * 20, 20)
+              // Extrem Dunkel: max 15 pts bei ≥8%
+              score += Math.min(extremeDark / 8 * 15, 15)
+              // Extrem Hell: max 15 pts bei ≥8%
+              score += Math.min(extremeLight / 8 * 15, 15)
               const scoreInt = Math.round(score)
-              const scoreColor = scoreInt >= 75 ? 'text-green-600' : scoreInt >= 50 ? 'text-yellow-600' : 'text-red-600'
-              const scoreBg = scoreInt >= 75 ? 'bg-green-50 border-green-200' : scoreInt >= 50 ? 'bg-yellow-50 border-yellow-200' : 'bg-red-50 border-red-200'
-              const scoreLabel = scoreInt >= 75 ? 'Gut – Pool eignet sich gut für Portraits' : scoreInt >= 50 ? 'Mittel – Verbesserungen empfohlen' : 'Schwach – Pool für Portraits nicht optimal'
+              const scoreColor = scoreInt >= 70 ? 'text-green-600' : scoreInt >= 50 ? 'text-yellow-600' : 'text-red-600'
+              const scoreBg = scoreInt >= 70 ? 'bg-green-50 border-green-200' : scoreInt >= 50 ? 'bg-yellow-50 border-yellow-200' : 'bg-red-50 border-red-200'
+              const scoreLabel = scoreInt >= 70 ? 'Gut – Pool eignet sich gut für Portraits' : scoreInt >= 50 ? 'Mittel – Verbesserungen empfohlen' : 'Schwach – Pool für Portraits nicht optimal'
               return (
                 <div className={`rounded-xl border p-4 ${scoreBg}`}>
                   <div className="flex items-center justify-between mb-2">
@@ -2231,14 +2247,15 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                     <span className={`text-2xl font-bold ${scoreColor}`}>{scoreInt}/100</span>
                   </div>
                   <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden mb-2">
-                    <div className={`h-full rounded-full transition-all ${scoreInt >= 75 ? 'bg-green-500' : scoreInt >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${scoreInt}%` }} />
+                    <div className={`h-full rounded-full transition-all ${scoreInt >= 70 ? 'bg-green-500' : scoreInt >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${scoreInt}%` }} />
                   </div>
                   <p className={`text-xs ${scoreColor} font-medium`}>{scoreLabel}</p>
                   <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-500">
-                    <span>❄️ Kühl: {kuehlPct}% / 20% Ziel</span>
-                    <span>⚫ Extrem Dunkel: {extremeDark}% / 10% Ziel</span>
-                    <span>⚪ Extrem Hell: {extremeLight}% / 10% Ziel</span>
-                    <span>🌫️ Niedrig-Sättigung: {lowSat}% / 30% Ziel</span>
+                    <span className={lowSat >= 50 ? 'text-green-600 font-medium' : 'text-amber-600'}>🌫️ Niedrig-Sättigung: {lowSat}% / 50% Ziel {lowSat >= 50 ? '✅' : `(fehlt ${Math.max(0,50-lowSat)}%)`}</span>
+                    <span className={grayPct >= 20 ? 'text-green-600 font-medium' : 'text-amber-600'}>⬜ Grau/Neutral: {grayPct}% / 20% Ziel {grayPct >= 20 ? '✅' : `(fehlt ${Math.max(0,20-grayPct)}%)`}</span>
+                    <span className={kuehlPct >= 15 ? 'text-green-600 font-medium' : 'text-amber-600'}>❄️ Kühl: {kuehlPct}% / 15% Ziel {kuehlPct >= 15 ? '✅' : `(fehlt ${Math.max(0,15-kuehlPct)}%)`}</span>
+                    <span className={extremeDark >= 8 ? 'text-green-600 font-medium' : 'text-amber-600'}>⚫ Extrem Dunkel: {extremeDark}% / 8% Ziel {extremeDark >= 8 ? '✅' : `(fehlt ${Math.max(0,8-extremeDark)}%)`}</span>
+                    <span className={extremeLight >= 8 ? 'text-green-600 font-medium' : 'text-amber-600'}>⚪ Extrem Hell: {extremeLight}% / 8% Ziel {extremeLight >= 8 ? '✅' : `(fehlt ${Math.max(0,8-extremeLight)}%)`}</span>
                   </div>
                 </div>
               )
