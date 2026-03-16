@@ -1406,8 +1406,8 @@ export default function Studio() {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
       const neededArray = Array.from(neededTileIds);
-      const ATLAS_CHUNK = isMobileOrSlow ? 200 : 2500; // Pro plan: larger chunks (2500 tiles/chunk)
-      const ATLAS_TIMEOUT = isMobileOrSlow ? 20000 : 90000; // Pro plan: 90s timeout for large chunks
+      const ATLAS_CHUNK = isMobileOrSlow ? 200 : 500; // Smaller chunks = more reliable (no IncompleteRead)
+      const ATLAS_TIMEOUT = isMobileOrSlow ? 20000 : 30000; // 30s per chunk (500 tiles)
 
       // Helper: fetch one atlas chunk and extract tiles into tileImgMap
       const fetchAtlasChunk = async (chunkIds: number[], progressStart: number, progressEnd: number): Promise<boolean> => {
@@ -1506,23 +1506,30 @@ export default function Studio() {
       console.log(`[Studio] Targeted atlas: ${tileImgMap.size}/${neededTileIds.size} tiles loaded`);
       setProgress(42);
 
-      // Load any tiles not covered by the atlas individually (fallback)
-      // Throttle to avoid 429: max 30 concurrent requests, 150ms delay between batches
+      // Load any tiles not covered by the atlas via additional atlas chunks (avoids 429)
+      // Use atlas chunks instead of individual /api/tile/:id requests
       const allMissingIds = Array.from(neededTileIds).filter(id => !tileImgMap.has(id));
-      const MISSING_CAP = isMobileOrSlow ? 300 : 2000;
+      const MISSING_CAP = isMobileOrSlow ? 300 : 1000; // cap fallback to avoid long waits
       const missingIds = allMissingIds.slice(0, MISSING_CAP);
       if (missingIds.length > 0) {
-        setProgressMsg(`Lade ${missingIds.length} weitere Kacheln...`);
-        const BATCH = isMobileOrSlow ? 10 : 30; // reduced from 100 to avoid 429
-        const BATCH_DELAY = 150; // ms between batches
+        setProgressMsg(`Lade ${missingIds.length} weitere Kacheln (Fallback)...`);
+        console.log(`[Studio] Fallback: loading ${missingIds.length} missing tiles via atlas chunks`);
+        // Use atlas chunks for fallback too (avoids individual 429 errors)
+        const FALLBACK_CHUNK = isMobileOrSlow ? 100 : 300;
+        const BATCH_DELAY = 200;
         let loaded = 0;
-        for (let i = 0; i < missingIds.length; i += BATCH) {
-          const batchIds = missingIds.slice(i, i + BATCH);
-          const batchImgs = await Promise.all(
-            batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
-          );
-          for (let j = 0; j < batchIds.length; j++) {
-            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+        for (let i = 0; i < missingIds.length; i += FALLBACK_CHUNK) {
+          const batchIds = missingIds.slice(i, i + FALLBACK_CHUNK);
+          // Try atlas first, fall back to individual requests only if atlas fails
+          const atlasOk = await fetchAtlasChunk(batchIds, 42, 45);
+          if (!atlasOk) {
+            // Last resort: individual requests with strict throttling
+            const batchImgs = await Promise.all(
+              batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
+            );
+            for (let j = 0; j < batchIds.length; j++) {
+              if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+            }
           }
           loaded += batchIds.length;
           const pct = 42 + Math.round((loaded / missingIds.length) * 3);
