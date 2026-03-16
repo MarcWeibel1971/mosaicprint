@@ -1425,13 +1425,16 @@ export default function Studio() {
           let blob: Blob;
           if (format === 'multipart-v2') {
             const arrayBuf = await atlasResp.arrayBuffer();
-            const view = new DataView(arrayBuf);
-            const jsonLen = view.getUint32(0, true); // little-endian
-            const jsonBytes = new Uint8Array(arrayBuf, 4, jsonLen);
+            const allBytes = new Uint8Array(arrayBuf);
+            // Read 4-byte LE length prefix
+            const jsonLen = allBytes[0] | (allBytes[1] << 8) | (allBytes[2] << 16) | (allBytes[3] << 24);
+            // Use slice() to get a proper copy (avoids TypedArray alignment issues with offset views)
+            const jsonBytes = allBytes.slice(4, 4 + jsonLen);
             const meta = JSON.parse(new TextDecoder().decode(jsonBytes)) as { map: Record<number, [number, number]>; cols: number; rows: number; tileSize: number };
             map = meta.map;
             ts = meta.tileSize ?? 64;
-            blob = new Blob([new Uint8Array(arrayBuf, 4 + jsonLen)], { type: 'image/jpeg' });
+            const jpegBytes = allBytes.slice(4 + jsonLen);
+            blob = new Blob([jpegBytes], { type: 'image/jpeg' });
           } else {
             // Legacy format (fallback)
             ts = parseInt(atlasResp.headers.get('X-Atlas-TileSize') ?? '64');
