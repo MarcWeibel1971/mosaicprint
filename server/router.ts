@@ -846,8 +846,8 @@ async function checkTileQuality(url: string, subject?: string): Promise<QualityR
     // Use relaxed thresholds for portrait subjects to avoid over-filtering
     const isPortraitSubject = subject === 'portrait' || subject === 'portrait_nature' ||
       subject === 'analysis' || subject === 'face';
-    const satThreshold = isPortraitSubject ? 0.65 : 0.55;  // portraits can be more saturated
-    const edgeThreshold = isPortraitSubject ? 0.75 : 0.45;  // portraits have high edge energy
+    const satThreshold = isPortraitSubject ? 0.75 : 0.65;  // portraits can be more saturated
+    const edgeThreshold = isPortraitSubject ? 0.85 : 0.60;  // portraits have high edge energy
     const reasons: string[] = [];
     if (saturation > satThreshold) reasons.push(`sat=${saturation.toFixed(2)}>${satThreshold}`);
     if (edgeEnergy  > edgeThreshold) reasons.push(`edge=${edgeEnergy.toFixed(2)}>${edgeThreshold}`);
