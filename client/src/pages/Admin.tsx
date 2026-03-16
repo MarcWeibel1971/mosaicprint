@@ -60,6 +60,8 @@ interface TileImage {
   semanticTheme: string | null
   qualityStatus?: string | null
   tileType?: string | null
+  photographerName?: string | null
+  photographerUrl?: string | null
 }
 interface DbStatsDetail {
   total: number; labIndexed: number
@@ -2873,6 +2875,18 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             />
             <div className="space-y-1.5 text-sm text-gray-600">
               <div className="flex justify-between"><span>Quelle:</span><span className="font-medium">{selectedImage.sourceId}</span></div>
+              {selectedImage.photographerName && (
+                <div className="flex justify-between items-center">
+                  <span>Fotograf:</span>
+                  {selectedImage.photographerUrl ? (
+                    <a href={selectedImage.photographerUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline text-xs">
+                      {selectedImage.photographerName} (Unsplash)
+                    </a>
+                  ) : (
+                    <span className="font-medium text-xs">{selectedImage.photographerName}</span>
+                  )}
+                </div>
+              )}
               <div className="flex justify-between"><span>Farbe:</span>
                 <span className="font-medium flex items-center gap-1">
                   {selectedImage.colorCategory ? (

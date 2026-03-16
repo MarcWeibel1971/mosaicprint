@@ -141,6 +141,12 @@ export async function ensureSchema(): Promise<void> {
   // Ersetzt den groben L-Varianz-Proxy im Lab-Index-Endpunkt
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS edge_energy REAL DEFAULT NULL`);
 
+  // Unsplash Attribution (required for Production API access per Unsplash guidelines)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS photographer_name TEXT DEFAULT NULL`);
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS photographer_url TEXT DEFAULT NULL`);
+  // Unsplash download tracking endpoint (required by Unsplash API guidelines)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS download_location TEXT DEFAULT NULL`);
+
   // Indexes for new columns
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_source_provider ON mosaic_images (source_provider)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_quality_status ON mosaic_images (quality_status)`);
@@ -423,7 +429,9 @@ export async function getAdminImages(opts: {
         WHEN SQRT(avg_a * avg_a + avg_b * avg_b) < 20 THEN 'niedrig'
         WHEN SQRT(avg_a * avg_a + avg_b * avg_b) <= 42 THEN 'mittel'
         ELSE 'hoch'
-      END as "saturationCategory"
+      END as "saturationCategory",
+      photographer_name as "photographerName",
+      photographer_url as "photographerUrl"
     FROM mosaic_images ${where} ORDER BY id DESC LIMIT $1 OFFSET $2`,
     [pageSize, offset]
   );
@@ -449,6 +457,9 @@ export async function insertMosaicImage(data: {
   importQuery?: string;    // keyword used to find this tile
   tileType?: string;       // 'calm' | 'medium' | 'busy' – texture complexity
   edgeEnergy?: number;     // 0.0-1.0 Sobel-basierter Kantenwert aus computeLabFull
+  photographerName?: string;   // Unsplash: user.name (for attribution)
+  photographerUrl?: string;    // Unsplash: user.links.html (for attribution link)
+  downloadLocation?: string;   // Unsplash: links.download_location (for download tracking)
 }): Promise<{ inserted: boolean; id: number | null }> {
   const pool = getPool();
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
@@ -478,8 +489,9 @@ export async function insertMosaicImage(data: {
        (source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
-        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy)
-     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25)
+        subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy,
+        photographer_name, photographer_url, download_location)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -490,7 +502,10 @@ export async function insertMosaicImage(data: {
       theme, theme, sourceProvider, data.importQuery ?? null,
       data.tileType ?? 'medium', semanticTheme,
       data.r2Url ?? null,
-      data.edgeEnergy ?? null  // $25
+      data.edgeEnergy ?? null,     // $25
+      data.photographerName ?? null, // $26
+      data.photographerUrl ?? null,  // $27
+      data.downloadLocation ?? null  // $28
     ]
   );
   const insertedId: number | null = res.rows[0]?.id ?? null;

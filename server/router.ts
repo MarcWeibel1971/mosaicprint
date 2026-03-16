@@ -1407,7 +1407,13 @@ export const appRouter = router({
                 );
                 if (!res.ok) { log(`⚠️ Unsplash ${res.status} for "${keyword}"`); continue; }
                 const data = await res.json() as any;
-                photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+                photos = (data.results ?? []).map((p: any) => ({
+                  sourceUrl: p.urls.regular,
+                  tile128Url: p.urls.thumb,
+                  photographerName: p.user?.name ?? null,
+                  photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
+                  downloadLocation: p.links?.download_location ?? null,
+                }));
               }
               // Process in parallel for speed
               let batchNew = 0;
@@ -1427,6 +1433,10 @@ export const appRouter = router({
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
                     });
+                    // Unsplash: trigger download tracking as required by API guidelines
+                    if (result.inserted && photo.downloadLocation && apiKey) {
+                      fetch(photo.downloadLocation, { headers: { Authorization: `Client-ID ${apiKey}` } }).catch(() => {});
+                    }
                     if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
                 }));
@@ -1588,6 +1598,9 @@ export const appRouter = router({
                     photos = (data.results ?? []).map((p: any) => ({
                       sourceUrl: p.urls.regular,
                       tile128Url: p.urls.thumb,
+                      photographerName: p.user?.name ?? null,
+                      photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
+                      downloadLocation: p.links?.download_location ?? null,
                     }));
                   }
                 }
@@ -1596,6 +1609,7 @@ export const appRouter = router({
               // Process in parallel batches for speed
               let batchImported = 0;
               let batchRejected = 0;
+              const smartApiKey = process.env.UNSPLASH_ACCESS_KEY;
               for (let i = 0; i < photos.length; i += CONCURRENCY) {
                 const batch = photos.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (photo) => {
@@ -1622,6 +1636,10 @@ export const appRouter = router({
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
                     });
+                    // Unsplash: trigger download tracking as required by API guidelines
+                    if (result.inserted && (photo as any).downloadLocation && smartApiKey) {
+                      fetch((photo as any).downloadLocation, { headers: { Authorization: `Client-ID ${smartApiKey}` } }).catch(() => {});
+                    }
                     if (result.inserted) { imported++; batchImported++; smartImportJobs[jobKey].imported = imported; }
                   } catch { /* skip duplicates / errors */ }
                 }));
@@ -1782,7 +1800,13 @@ export const appRouter = router({
                   );
                   if (!res.ok) continue;
                   const data = await res.json() as any;
-                  photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+                  photos = (data.results ?? []).map((p: any) => ({
+                    sourceUrl: p.urls.regular,
+                    tile128Url: p.urls.thumb,
+                    photographerName: p.user?.name ?? null,
+                    photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
+                    downloadLocation: p.links?.download_location ?? null,
+                  }));
                 }
                 let batchNew = 0;
                 for (let i = 0; i < photos.length; i += CONCURRENCY) {
@@ -1795,6 +1819,10 @@ export const appRouter = router({
                         sourceProvider: src,
                         importQuery: keyword,
                       });
+                      // Unsplash: trigger download tracking
+                      if (result.inserted && (photo as any).downloadLocation && apiKey) {
+                        fetch((photo as any).downloadLocation, { headers: { Authorization: `Client-ID ${apiKey}` } }).catch(() => {});
+                      }
                       if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                     } catch { /* duplicate – skip */ }
                   }));
@@ -2179,12 +2207,19 @@ export const appRouter = router({
             );
             if (res.ok) {
               const data = await res.json() as any;
-              photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
+              photos = (data.results ?? []).map((p: any) => ({
+                sourceUrl: p.urls.regular,
+                tile128Url: p.urls.thumb,
+                photographerName: p.user?.name ?? null,
+                photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
+                downloadLocation: p.links?.download_location ?? null,
+              }));
             }
           }
           // Process photos and track actual imported count
           let imported = 0; let rejected = 0;
           const CONCURRENCY = 3;
+          const targetedApiKey = process.env.UNSPLASH_ACCESS_KEY;
           for (let i = 0; i < photos.length; i += CONCURRENCY) {
             const batch = photos.slice(i, i + CONCURRENCY);
             await Promise.all(batch.map(async (photo) => {
@@ -2199,6 +2234,10 @@ export const appRouter = router({
                   tileType: lab?.tileType,
                   edgeEnergy: lab?.edgeDensity,
                 });
+                // Unsplash: trigger download tracking
+                if (result?.inserted && (photo as any).downloadLocation && targetedApiKey) {
+                  fetch((photo as any).downloadLocation, { headers: { Authorization: `Client-ID ${targetedApiKey}` } }).catch(() => {});
+                }
                 if (result?.inserted) { imported++; } else { rejected++; }
               } catch { rejected++; }
             }));
