@@ -1361,12 +1361,15 @@ export default function Studio() {
         }
       }
       console.log(`[Studio] ${IS_14D ? '14D' : IS_7D ? '7D' : '4D'} k-NN done: ${neededTileIds.size} unique tiles needed for ${TOTAL_TILES} cells`);
-      // Mobile: cap unique tiles at 800 to prevent OOM (iOS Safari kills tab at ~150 MB)
+      // Cap unique tiles to prevent 429 rate-limit errors and OOM:
+      // - Mobile: 1500 tiles (iOS Safari memory limit)
+      // - Desktop: 5000 tiles (avoids Railway/Fastly 429 when loading 17k+ tiles individually)
       // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
       // This preserves quality (best matches kept) while reducing memory footprint
-      // Read mobileMaxTiles from Admin settings (default 1500 if not configured)
       const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 1500;
-      if (isMobileOrSlow && neededTileIds.size > (MOBILE_MAX_TILES)) {
+      const DESKTOP_MAX_TILES = 5000;
+      const MAX_TILES = isMobileOrSlow ? MOBILE_MAX_TILES : DESKTOP_MAX_TILES;
+      if (neededTileIds.size > MAX_TILES) {
         // Score each tile: sum of (1/(rank+1)) across all cells where it appears
         // Higher score = appears as top candidate for more cells = more important to keep
         const tileScore = new Map<number, number>();
@@ -1376,9 +1379,9 @@ export default function Studio() {
             tileScore.set(id, (tileScore.get(id) ?? 0) + 1 / (rank + 1));
           }
         }
-        // Keep top MOBILE_MAX_TILES tiles by score
+        // Keep top MAX_TILES tiles by score
         const sorted = [...tileScore.entries()].sort((a, b) => b[1] - a[1]);
-        const keepIds = new Set(sorted.slice(0, MOBILE_MAX_TILES).map(e => e[0]));
+        const keepIds = new Set(sorted.slice(0, MAX_TILES).map(e => e[0]));
         // Rebuild neededTileIds with only the kept tiles
         for (const id of [...neededTileIds]) {
           if (!keepIds.has(id)) neededTileIds.delete(id);
@@ -1387,7 +1390,7 @@ export default function Studio() {
         for (let ci = 0; ci < cellCandidates.length; ci++) {
           cellCandidates[ci] = cellCandidates[ci].filter(c => keepIds.has(c.tileId));
         }
-        console.log(`[Studio] Mobile: capped neededTileIds to ${neededTileIds.size} (score-based selection)`);
+        console.log(`[Studio] ${isMobileOrSlow ? 'Mobile' : 'Desktop'}: capped neededTileIds to ${neededTileIds.size}/${MAX_TILES} (score-based selection)`);
       }
     }
 
