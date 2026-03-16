@@ -2849,14 +2849,68 @@ async function runQualityCheckAsync(checkType: string, runId: number): Promise<v
       message: `${noSrc} Bilder ohne source_provider`,
       details: { noSrc },
     });
+    // Check: tile_type-Vollständigkeit (calm/medium/busy)
+    const tileTypeRes = await pool.query(`
+      SELECT COUNT(*) as total,
+        SUM(CASE WHEN tile_type IS NULL THEN 1 ELSE 0 END) as no_tile_type,
+        SUM(CASE WHEN tile_type = 'calm' THEN 1 ELSE 0 END) as calm,
+        SUM(CASE WHEN tile_type = 'medium' THEN 1 ELSE 0 END) as medium,
+        SUM(CASE WHEN tile_type = 'busy' THEN 1 ELSE 0 END) as busy
+      FROM mosaic_images
+    `);
+    const tt = tileTypeRes.rows[0];
+    const noTileType = Number(tt.no_tile_type);
+    const tileTypeTotal = Number(tt.total);
+    items.push({
+      runId, entityType: 'db', entityId: 'tile_type',
+      status: noTileType > tileTypeTotal * 0.10 ? 'warn' : 'pass',
+      message: `tile_type: ${tileTypeTotal - noTileType}/${tileTypeTotal} klassifiziert (calm: ${tt.calm}, medium: ${tt.medium}, busy: ${tt.busy})${noTileType > 0 ? ` → ${noTileType} ohne Typ (Reklassifizierung empfohlen)` : ''}`,
+      details: { noTileType, calm: Number(tt.calm), medium: Number(tt.medium), busy: Number(tt.busy) },
+    });
+    // Check: edge_energy-Vollständigkeit (Sobel-Backfill)
+    const edgeRes = await pool.query(`
+      SELECT COUNT(*) as total,
+        SUM(CASE WHEN edge_energy IS NULL THEN 1 ELSE 0 END) as no_edge
+      FROM mosaic_images
+    `);
+    const noEdge = Number(edgeRes.rows[0].no_edge);
+    const edgeTotal = Number(edgeRes.rows[0].total);
+    const edgeCovPct = edgeTotal > 0 ? ((edgeTotal - noEdge) / edgeTotal * 100).toFixed(1) : '0';
+    items.push({
+      runId, entityType: 'db', entityId: 'edge_energy',
+      status: noEdge > edgeTotal * 0.50 ? 'warn' : 'pass',
+      message: `edge_energy (Sobel): ${edgeCovPct}% der Tiles haben echten Kantenwert${noEdge > 0 ? ` → ${noEdge} ohne Wert (Tile-Typen reklassifizieren für Backfill)` : ''}`,
+      details: { noEdge, edgeTotal, coveragePct: edgeCovPct },
+    });
+    // Check: quality_status-Verteilung
+    const qualRes = await pool.query(`
+      SELECT
+        SUM(CASE WHEN quality_status = 'ok' THEN 1 ELSE 0 END) as ok_count,
+        SUM(CASE WHEN quality_status = 'warn' THEN 1 ELSE 0 END) as warn_count,
+        SUM(CASE WHEN quality_status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
+        SUM(CASE WHEN quality_status IS NULL OR quality_status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        COUNT(*) as total
+      FROM mosaic_images
+    `);
+    const qs = qualRes.rows[0];
+    items.push({
+      runId, entityType: 'db', entityId: 'quality_status',
+      status: 'pass',
+      message: `ℹ️ quality_status: ${qs.ok_count} ok / ${qs.warn_count} warn / ${qs.rejected_count} rejected / ${qs.pending_count} pending`,
+      details: { ok: Number(qs.ok_count), warn: Number(qs.warn_count), rejected: Number(qs.rejected_count), pending: Number(qs.pending_count) },
+    });
     await db.insertQualityItems(items);
     const hasWarn = items.some(i => i.status === 'warn' || i.status === 'fail');
     await db.finishQualityRun(runId, hasWarn ? 'warning' : 'success', {
-      total: Number(res.rows[0].total), unindexed: Number(res.rows[0].unindexed), noQuadrant, noSrc
+      total: Number(res.rows[0].total), unindexed: Number(res.rows[0].unindexed), noQuadrant, noSrc, noTileType, noEdge
     });
 
   } else if (checkType === 'pool-balance') {
     // Check LAB-Cube coverage: are all color regions represented?
+    // Zielwerte basieren auf der realen Portrait-Pool-Zusammensetzung:
+    // - Niedrig-Sättigung (Hauttöne, Grautöne) ist naturgemäss hoch (~70-85%)
+    // - Hoch-Sättigung (Natur, Abstrakt) ist selten (~5-15%)
+    // - Ziel: Mindest-Abdeckung für kritische Bereiche (dunkel, hell, bunt)
     const res = await pool.query(`
       SELECT
         COUNT(*) as total,
@@ -2867,31 +2921,66 @@ async function runQualityCheckAsync(checkType: string, runId: number): Promise<v
         SUM(CASE WHEN SQRT(avg_a*avg_a + avg_b*avg_b) BETWEEN 20 AND 42 THEN 1 ELSE 0 END) as mid_sat,
         SUM(CASE WHEN SQRT(avg_a*avg_a + avg_b*avg_b) > 42 THEN 1 ELSE 0 END) as high_sat,
         SUM(CASE WHEN avg_b < -5 THEN 1 ELSE 0 END) as cool,
-        SUM(CASE WHEN avg_a > 10 AND avg_b > 5 THEN 1 ELSE 0 END) as warm_skin
+        SUM(CASE WHEN avg_a > 10 AND avg_b > 5 THEN 1 ELSE 0 END) as warm_skin,
+        SUM(CASE WHEN tile_type IS NOT NULL THEN 1 ELSE 0 END) as has_tile_type,
+        SUM(CASE WHEN edge_energy IS NOT NULL THEN 1 ELSE 0 END) as has_edge_energy,
+        SUM(CASE WHEN quality_status = 'rejected' THEN 1 ELSE 0 END) as rejected_count
       FROM mosaic_images
     `);
     const r = res.rows[0];
     const total = Number(r.total);
-    const checks = [
-      { key: 'extreme_dark', label: 'Extrem-Dunkel (L<20)', target: 0.10 },
-      { key: 'extreme_bright', label: 'Extrem-Hell (L>85)', target: 0.10 },
-      { key: 'low_sat', label: 'Niedrig-Sättigung (<20)', target: 0.30 },
-      { key: 'mid_sat', label: 'Mittel-Sättigung (20-42)', target: 0.40 },
-      { key: 'high_sat', label: 'Hoch-Sättigung (>42)', target: 0.30 },
-      { key: 'cool', label: 'Kühl-Töne (b<-5)', target: 0.20 },
-      { key: 'warm_skin', label: 'Warm/Haut-Töne (a>10,b>5)', target: 0.15 },
+    // Farbraum-Checks: Zielwerte sind Mindest-Abdeckungen (nicht Obergrenzen)
+    // Status: fail = unter Minimum, warn = nahe am Minimum, pass = ausreichend
+    // Für Niedrig-Sättigung: Wert ist INFORMATIV (kein fail), da Hauttöne naturgemäss dominieren
+    const colorChecks = [
+      { key: 'extreme_dark',  label: 'Extrem-Dunkel (L<20)',        minTarget: 0.04, infoOnly: false },
+      { key: 'extreme_bright',label: 'Extrem-Hell (L>85)',          minTarget: 0.04, infoOnly: false },
+      { key: 'low_sat',       label: 'Niedrig-Sättigung / Hauttöne (<C20)', minTarget: 0.50, infoOnly: true  },
+      { key: 'mid_sat',       label: 'Mittel-Sättigung (C 20-42)',  minTarget: 0.08, infoOnly: false },
+      { key: 'high_sat',      label: 'Hoch-Sättigung / Bunt (>C42)',minTarget: 0.03, infoOnly: false },
+      { key: 'cool',          label: 'Kühl-Töne (b<-5)',            minTarget: 0.05, infoOnly: false },
+      { key: 'warm_skin',     label: 'Warm/Haut-Töne (a>10, b>5)', minTarget: 0.10, infoOnly: false },
     ];
-    for (const c of checks) {
+    for (const c of colorChecks) {
       const count = Number(r[c.key]);
       const pct = total > 0 ? count / total : 0;
-      const diff = pct - c.target;
+      const diff = pct - c.minTarget;
+      const status: 'pass' | 'warn' | 'fail' = c.infoOnly ? 'pass'
+        : diff < -0.02 ? 'fail'
+        : diff < 0 ? 'warn'
+        : 'pass';
+      const label = c.infoOnly ? `ℹ️ ${c.label}` : c.label;
       items.push({
         runId, entityType: 'pool', entityId: c.key,
-        status: diff < -0.05 ? 'fail' : diff < -0.02 ? 'warn' : 'pass',
-        message: `${c.label}: ${(pct*100).toFixed(1)}% (Ziel: ${(c.target*100).toFixed(0)}%, Δ${diff > 0 ? '+' : ''}${(diff*100).toFixed(1)}%)`,
-        details: { count, pct: Math.round(pct*1000)/10, target: c.target*100 },
+        status,
+        message: `${label}: ${(pct*100).toFixed(1)}% (Minimum: ${(c.minTarget*100).toFixed(0)}%, Δ${diff > 0 ? '+' : ''}${(diff*100).toFixed(1)}%)`,
+        details: { count, pct: Math.round(pct*1000)/10, minTarget: c.minTarget*100, infoOnly: c.infoOnly },
       });
     }
+    // tile_type-Vollständigkeit
+    const tileTypePct = total > 0 ? Number(r.has_tile_type) / total : 0;
+    items.push({
+      runId, entityType: 'pool', entityId: 'tile_type_coverage',
+      status: tileTypePct < 0.90 ? 'warn' : 'pass',
+      message: `tile_type (calm/medium/busy): ${(tileTypePct*100).toFixed(1)}% der Tiles klassifiziert${tileTypePct < 0.90 ? ' → Tile-Typen reklassifizieren empfohlen' : ''}`,
+      details: { hasTileType: Number(r.has_tile_type), total, pct: Math.round(tileTypePct*1000)/10 },
+    });
+    // edge_energy-Vollständigkeit (Sobel-Backfill)
+    const edgePct = total > 0 ? Number(r.has_edge_energy) / total : 0;
+    items.push({
+      runId, entityType: 'pool', entityId: 'edge_energy_coverage',
+      status: edgePct < 0.50 ? 'warn' : 'pass',
+      message: `edge_energy (Sobel): ${(edgePct*100).toFixed(1)}% der Tiles haben echten Kantenwert${edgePct < 0.90 ? ' → Tile-Typen reklassifizieren für vollständigen Backfill' : ''}`,
+      details: { hasEdgeEnergy: Number(r.has_edge_energy), total, pct: Math.round(edgePct*1000)/10 },
+    });
+    // rejected-Tiles Info
+    const rejectedPct = total > 0 ? Number(r.rejected_count) / total : 0;
+    items.push({
+      runId, entityType: 'pool', entityId: 'rejected_tiles',
+      status: 'pass',
+      message: `ℹ️ Abgelehnte Tiles: ${r.rejected_count} (${(rejectedPct*100).toFixed(1)}%) – werden aus Index ausgeschlossen`,
+      details: { rejectedCount: Number(r.rejected_count), total, pct: Math.round(rejectedPct*1000)/10 },
+    });
     await db.insertQualityItems(items);
     const hasWarn = items.some(i => i.status === 'warn' || i.status === 'fail');
     await db.finishQualityRun(runId, hasWarn ? 'warning' : 'success', { total, checks: items.map(i => ({ id: i.entityId, status: i.status })) });
