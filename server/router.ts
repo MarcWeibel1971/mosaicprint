@@ -894,7 +894,36 @@ async function computeLabFull(url: string): Promise<{
       const buf = Buffer.from(await resp.arrayBuffer());
       image = await Jimp.fromBuffer(buf);
     }
-    // Resize to 8x8 for global + quadrant extraction
+    // ── Step 1: Resize to 16x16 for edge detection + 8x8 for LAB quadrants ──
+    const img16 = image.clone();
+    img16.resize({ w: 16, h: 16 });
+    // Extract 16x16 grayscale pixels for Sobel edge detection
+    const gray16: number[] = [];
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        const rgba = img16.getPixelColor(x, y);
+        const r = (rgba >> 24) & 0xff;
+        const g = (rgba >> 16) & 0xff;
+        const b = (rgba >> 8)  & 0xff;
+        gray16.push(0.299 * r + 0.587 * g + 0.114 * b);
+      }
+    }
+    // Sobel edge energy on 16x16 (skip border pixels)
+    let sobelSum = 0;
+    let sobelCount = 0;
+    for (let y = 1; y < 15; y++) {
+      for (let x = 1; x < 15; x++) {
+        const idx = (r: number, c: number) => gray16[r * 16 + c];
+        const gx = -idx(y-1,x-1) + idx(y-1,x+1) - 2*idx(y,x-1) + 2*idx(y,x+1) - idx(y+1,x-1) + idx(y+1,x+1);
+        const gy = -idx(y-1,x-1) - 2*idx(y-1,x) - idx(y-1,x+1) + idx(y+1,x-1) + 2*idx(y+1,x) + idx(y+1,x+1);
+        sobelSum += Math.sqrt(gx*gx + gy*gy);
+        sobelCount++;
+      }
+    }
+    // Normalize: Sobel magnitude per pixel, max ~1440 (255*sqrt(32)), normalize to 0-1
+    const edgeDensity = sobelCount > 0 ? (sobelSum / sobelCount) / 1440 : 0;
+
+    // ── Step 2: Resize to 8x8 for global + quadrant LAB extraction ──
     image.resize({ w: 8, h: 8 });
     // Extract raw RGB pixels from 8x8 image
     const px = Buffer.allocUnsafe(8 * 8 * 3);
@@ -925,18 +954,57 @@ async function computeLabFull(url: string): Promise<{
     const tr = rgbPixelsToLab(extractQuadrant(4, 0), 16);
     const bl = rgbPixelsToLab(extractQuadrant(0, 4), 16);
     const br = rgbPixelsToLab(extractQuadrant(4, 4), 16);
-    // Compute tileType from quadrant LAB variance (texture complexity)
+
+    // ── Step 3: Sättigungs-Varianz (Chroma = sqrt(a²+b²) pro Quadrant) ──
+    const chromas = [
+      Math.sqrt(tl.a**2 + tl.b**2),
+      Math.sqrt(tr.a**2 + tr.b**2),
+      Math.sqrt(bl.a**2 + bl.b**2),
+      Math.sqrt(br.a**2 + br.b**2),
+    ];
+    const meanChroma = chromas.reduce((s, v) => s + v, 0) / 4;
+    const chromaVariance = chromas.reduce((s, v) => s + (v - meanChroma) ** 2, 0) / 4;
+    // Normalize chromaVariance: max ~2500 (50² per quadrant), normalize to 0-1
+    const chromaVarNorm = Math.min(chromaVariance / 2500, 1);
+
+    // ── Step 4: Pixel-Diversität (wie viele unterschiedliche Graustufen in 16x16) ──
+    // Quantize to 16 buckets (0-15), count unique buckets used
+    const buckets = new Set<number>();
+    for (const g of gray16) buckets.add(Math.floor(g / 16));
+    const pixelDiversity = buckets.size / 16; // 0-1, 1 = maximale Diversität
+
+    // ── Step 5: Quadrant-L-Varianz (Helligkeitskontrast zwischen Quadranten) ──
     const quadrantLs = [tl.L, tr.L, bl.L, br.L];
     const meanL = quadrantLs.reduce((s, v) => s + v, 0) / 4;
     const varianceL = quadrantLs.reduce((s, v) => s + (v - meanL) ** 2, 0) / 4;
+    // Normalize: max varianceL ~2500 (50²), normalize to 0-1
+    const varianceLNorm = Math.min(varianceL / 2500, 1);
+
+    // ── Step 6: Mehrdimensionaler Komplexitäts-Score ──
+    // Gewichtung: Edge-Density 50%, Chroma-Varianz 20%, Pixel-Diversität 20%, L-Varianz 10%
+    // Rationale:
+    //   - Edge-Density: wichtigster Indikator für visuelle Unruhe (Blumen, Tiere, Essen)
+    //   - Chroma-Varianz: erkennt bunte, unruhige Tiles (Chamäleon, Regenbogen)
+    //   - Pixel-Diversität: erkennt komplexe Strukturen (Steinmuster, Gitter)
+    //   - L-Varianz: erkennt starke Hell-Dunkel-Kontraste (Sonnenblume auf Dunkel)
+    const complexityScore = (
+      edgeDensity * 0.50 +
+      chromaVarNorm * 0.20 +
+      pixelDiversity * 0.20 +
+      varianceLNorm * 0.10
+    );
+    // Schwellen: calm < 0.18, busy > 0.38 (kalibriert auf Testbilder)
+    // Vorher: calm < 80/1240, busy > 400/1240 (LAB-Varianz-basiert, zu grob)
+    const tileType: 'calm' | 'medium' | 'busy' = complexityScore < 0.18 ? 'calm' : complexityScore > 0.38 ? 'busy' : 'medium';
+
+    // ── Step 7: Legacy quadrant LAB variance (kept for backward compatibility) ──
     const quadrantAs = [tl.a, tr.a, bl.a, br.a];
     const quadrantBs = [tl.b, tr.b, bl.b, br.b];
     const meanA = quadrantAs.reduce((s, v) => s + v, 0) / 4;
     const meanB = quadrantBs.reduce((s, v) => s + v, 0) / 4;
     const varianceA = quadrantAs.reduce((s, v) => s + (v - meanA) ** 2, 0) / 4;
     const varianceB = quadrantBs.reduce((s, v) => s + (v - meanB) ** 2, 0) / 4;
-    const totalVariance = varianceL + varianceA + varianceB;
-    const tileType: 'calm' | 'medium' | 'busy' = totalVariance < 80 ? 'calm' : totalVariance > 400 ? 'busy' : 'medium';
+    void varianceA; void varianceB; // used in legacy code paths only
     return {
       L: global.L, a: global.a, b: global.b,
       tlL: tl.L, tlA: tl.a, tlB: tl.b,
@@ -1864,6 +1932,55 @@ export const appRouter = router({
       }
     })();
     return { started: true, indexed: totalIndexed };
+  }),
+
+  // Admin: batchReclassifyTileTypes – reclassify ALL tiles using the new multi-dimensional score
+  // Uses Sobel edge density + chroma variance + pixel diversity + L-variance
+  // This replaces the old LAB-quadrant-variance-only classification
+  batchReclassifyTileTypes: publicProcedure.mutation(async () => {
+    if (rebuildJobStatus.running) return { started: false, message: 'Ein Job läuft bereits' };
+    rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
+    const log = (msg: string) => { rebuildJobStatus.log.push(msg); if (rebuildJobStatus.log.length > 300) rebuildJobStatus.log = rebuildJobStatus.log.slice(-300); };
+    (async () => {
+      try {
+        const pool = db.getPool();
+        const res = await pool.query(
+          `SELECT id, tile128_url FROM mosaic_images WHERE tile128_url IS NOT NULL ORDER BY id`
+        );
+        log(`🔄 Starte Reklassifizierung: ${res.rows.length} Tiles`);
+        let calm = 0, medium = 0, busy = 0, errors = 0;
+        const CONCURRENCY = 6;
+        for (let i = 0; i < res.rows.length; i += CONCURRENCY) {
+          const batch = res.rows.slice(i, i + CONCURRENCY);
+          await Promise.all(batch.map(async (row: any) => {
+            try {
+              const lab = await computeLabFull(row.tile128_url);
+              if (lab) {
+                await pool.query(
+                  `UPDATE mosaic_images SET tile_type=$1 WHERE id=$2`,
+                  [lab.tileType, row.id]
+                );
+                if (lab.tileType === 'calm') calm++;
+                else if (lab.tileType === 'busy') busy++;
+                else medium++;
+              } else { errors++; }
+            } catch { errors++; }
+          }));
+          if (i % 1000 === 0 && i > 0) {
+            const done = i + CONCURRENCY;
+            log(`${done}/${res.rows.length} – 🌫️ ${calm} ruhig / 🎨 ${medium} normal / 🌀 ${busy} komplex`);
+          }
+        }
+        log(`✅ Reklassifizierung abgeschlossen: 🌫️ ${calm} ruhig / 🎨 ${medium} normal / 🌀 ${busy} komplex / ❌ ${errors} Fehler`);
+        rebuildJobStatus.finishedAt = new Date().toISOString();
+      } catch (e: unknown) {
+        rebuildJobStatus.error = e instanceof Error ? e.message : String(e);
+        rebuildJobStatus.finishedAt = new Date().toISOString();
+      } finally {
+        rebuildJobStatus.running = false;
+      }
+    })();
+    return { started: true };
   }),
 
   // Admin: Get images with filters

@@ -894,6 +894,28 @@ export default function Admin() {
     } finally { setActiveJob(null) }
   }
 
+  const handleBatchReclassify = async () => {
+    if (activeJob) return
+    if (!window.confirm('Alle Tiles mit dem neuen mehrdimensionalen Score reklassifizieren? Das dauert 30-90 Min für 45k Tiles.')) return
+    setActiveJob('reclassify')
+    setMessage({ text: '🔄 Reklassifizierung gestartet – Sobel-Edge + Chroma-Varianz + Pixel-Diversität...', type: 'info' })
+    try {
+      const res = await fetch('/api/trpc/batchReclassifyTileTypes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+      })
+      const data = await res.json()
+      const parsed = data.result?.data?.json ?? data.result?.data ?? data
+      if (parsed?.started) {
+        setMessage({ text: '⏳ Reklassifizierung läuft im Hintergrund. Fortschritt unter "Rebuild-Status" sichtbar.', type: 'info' })
+      } else {
+        setMessage({ text: parsed?.message ?? 'Reklassifizierung gestartet', type: 'info' })
+      }
+      fetchStats()
+    } catch {
+      setMessage({ text: 'Fehler bei der Reklassifizierung', type: 'error' })
+    } finally { setActiveJob(null) }
+  }
+
   const handleExportSeed = async () => {
     if (activeJob) return
     setActiveJob('seed')
@@ -2422,6 +2444,16 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                       ⚠️ <strong>Zu wenig ruhige Tiles ({calmPct}%):</strong> Ideal wären 40–50%. Import von Himmel, Nebel, Wasser, Bokeh, Texturen empfohlen. Ziel: {Math.round(totalTT * 0.40 - calm).toLocaleString()} weitere ruhige Tiles.
                     </div>
                   )}
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      onClick={handleBatchReclassify}
+                      disabled={!!activeJob}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                    >
+                      🔄 Alle Tiles neu klassifizieren
+                    </button>
+                    <span className="text-xs text-gray-400">Neuer Score: Sobel-Kanten + Chroma-Varianz + Pixel-Diversität</span>
+                  </div>
                 </div>
               )
             })()}
