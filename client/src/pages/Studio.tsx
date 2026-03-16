@@ -1417,10 +1417,28 @@ export default function Studio() {
             signal: AbortSignal.timeout(ATLAS_TIMEOUT),
           });
           if (!atlasResp.ok) return false;
-          const ts = parseInt(atlasResp.headers.get('X-Atlas-TileSize') ?? '64');
-          const mapJson = atlasResp.headers.get('X-Atlas-Map');
-          const map: Record<number, [number, number]> = mapJson ? JSON.parse(mapJson) : {};
-          const blob = await atlasResp.blob();
+          // Support multipart-v2 format: [4-byte LE JSON length][JSON map][JPEG bytes]
+          // This avoids HTTP header size limits for large mosaics (270 KB+ map)
+          const format = atlasResp.headers.get('X-Atlas-Format');
+          let map: Record<number, [number, number]> = {};
+          let ts = 64;
+          let blob: Blob;
+          if (format === 'multipart-v2') {
+            const arrayBuf = await atlasResp.arrayBuffer();
+            const view = new DataView(arrayBuf);
+            const jsonLen = view.getUint32(0, true); // little-endian
+            const jsonBytes = new Uint8Array(arrayBuf, 4, jsonLen);
+            const meta = JSON.parse(new TextDecoder().decode(jsonBytes)) as { map: Record<number, [number, number]>; cols: number; rows: number; tileSize: number };
+            map = meta.map;
+            ts = meta.tileSize ?? 64;
+            blob = new Blob([new Uint8Array(arrayBuf, 4 + jsonLen)], { type: 'image/jpeg' });
+          } else {
+            // Legacy format (fallback)
+            ts = parseInt(atlasResp.headers.get('X-Atlas-TileSize') ?? '64');
+            const mapJson = atlasResp.headers.get('X-Atlas-Map');
+            map = mapJson ? JSON.parse(mapJson) : {};
+            blob = await atlasResp.blob();
+          }
           const atlasUrl = URL.createObjectURL(blob);
           const atlasImg = await new Promise<HTMLImageElement>((resolve, reject) => {
             const img = new Image();
@@ -1501,13 +1519,14 @@ export default function Studio() {
       }
 
       if (tileImgMap.size === 0) {
-        // Full fallback: no atlas available, load all individually
+        // Full fallback: no atlas available, load all individually with throttling
         console.log('[Studio] Atlas unavailable, falling back to individual tile requests');
         setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder...`);
         const tileIdArray = Array.from(neededTileIds);
-        const BATCH = isMobileOrSlow ? 40 : 100;
+        const BATCH = isMobileOrSlow ? 15 : 20; // Reduced to avoid 429 rate limits
+        const DELAY = isMobileOrSlow ? 200 : 100; // ms between batches
         let loaded = 0;
-        for (let i = 0; i < tileIdArray.length; i += (BATCH)) {
+        for (let i = 0; i < tileIdArray.length; i += BATCH) {
           const batchIds = tileIdArray.slice(i, i + BATCH);
           const batchImgs = await Promise.all(
             batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
@@ -1519,7 +1538,7 @@ export default function Studio() {
           const pct = 25 + Math.round((loaded / tileIdArray.length) * 20);
           setProgress(Math.min(pct, 45));
           setCacheSize(getMemoryCacheSize());
-          await new Promise(r => setTimeout(r, 0));
+          await new Promise(r => setTimeout(r, DELAY));
         }
         console.log(`[Studio] Loaded ${tileImgMap.size}/${neededTileIds.size} tile images`);
       }

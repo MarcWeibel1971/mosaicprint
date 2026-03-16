@@ -688,14 +688,14 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const cacheKey = `targeted|${ids.slice().sort((a,b)=>a-b).join(',')}|${tileSize}`;
     const cached = atlasCacheMap.get(cacheKey);
     if (cached && (Date.now() - cached.builtAt) < ATLAS_CACHE_TTL_MS) {
-      res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Content-Length', cached.jpeg.length);
+      // Use multipart response: JSON header + JPEG body to avoid HTTP header size limits
+      const mapJson = Buffer.from(JSON.stringify({ map: cached.map, cols: cached.cols, rows: cached.rows, tileSize: cached.tileSize }));
+      const mapLenBuf = Buffer.allocUnsafe(4);
+      mapLenBuf.writeUInt32LE(mapJson.length, 0);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('X-Atlas-Format', 'multipart-v2');
       res.setHeader('Cache-Control', 'public, max-age=1800');
-      res.setHeader('X-Atlas-Cols', cached.cols.toString());
-      res.setHeader('X-Atlas-Rows', cached.rows.toString());
-      res.setHeader('X-Atlas-TileSize', cached.tileSize.toString());
-      res.setHeader('X-Atlas-Map', JSON.stringify(cached.map));
-      return res.send(cached.jpeg);
+      return res.send(Buffer.concat([mapLenBuf, mapJson, cached.jpeg]));
     }
 
     const pool = db.getPool();
@@ -760,14 +760,15 @@ app.post('/api/tile-atlas-targeted', async (req, res) => {
     const atlasData: AtlasCache = { jpeg: atlasResult.jpeg, map: atlasResult.map, tileSize, cols: atlasResult.cols, rows: atlasResult.rows, builtAt: Date.now() };
     atlasCacheMap.set(cacheKey, atlasData);
     console.log(`[atlas-targeted] Built: ${orderedIds.length} tiles, ${atlasResult.cols}x${atlasResult.rows} grid, ${(atlasResult.jpeg.length/1024).toFixed(0)} KB`);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Length', atlasResult.jpeg.length);
+    // Use multipart response: 4-byte LE length prefix + JSON map + JPEG bytes
+    // This avoids HTTP header size limits (X-Atlas-Map was up to 270 KB for large mosaics)
+    const mapJson = Buffer.from(JSON.stringify({ map: atlasResult.map, cols: atlasResult.cols, rows: atlasResult.rows, tileSize }));
+    const mapLenBuf = Buffer.allocUnsafe(4);
+    mapLenBuf.writeUInt32LE(mapJson.length, 0);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Atlas-Format', 'multipart-v2');
     res.setHeader('Cache-Control', 'public, max-age=1800');
-    res.setHeader('X-Atlas-Cols', atlasResult.cols.toString());
-    res.setHeader('X-Atlas-Rows', atlasResult.rows.toString());
-    res.setHeader('X-Atlas-TileSize', tileSize.toString());
-    res.setHeader('X-Atlas-Map', JSON.stringify(atlasResult.map));
-    return res.send(atlasResult.jpeg);
+    return res.send(Buffer.concat([mapLenBuf, mapJson, atlasResult.jpeg]));
   } catch (err: any) {
     console.error('[atlas-targeted] Error:', err);
     return res.status(500).json({ error: err.message });
