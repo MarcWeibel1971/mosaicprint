@@ -2361,6 +2361,8 @@ export const appRouter = router({
       limit: z.number().default(50),
       brightnessFilter: z.string().optional(),
       colorFilter: z.string().optional(),
+      warmCoolFilter: z.string().optional(), // 'warm' | 'kuehl' | 'neutral'
+      saturationFilter: z.string().optional(), // 'niedrig' | 'mittel' | 'hoch'
       sourceId: z.string().optional(),
       importedSince: z.string().optional(), // ISO date string, or 'last-import' for last session
       qualityStatus: z.string().optional(),
@@ -2391,6 +2393,8 @@ export const appRouter = router({
         limit: input.limit,
         brightnessFilter: input.brightnessFilter,
         colorFilter: input.colorFilter,
+        warmCoolFilter: input.warmCoolFilter,
+        saturationFilter: input.saturationFilter,
         sourceId: input.sourceId,
         importedSince,
         qualityStatus: input.qualityStatus,

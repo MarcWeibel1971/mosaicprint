@@ -1782,6 +1782,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [sourceDeleting, setSourceDeleting] = useState(false)
   const [semanticThemeFilter, setSemanticThemeFilter] = useState('alle')
   const [tileTypeFilter, setTileTypeFilter] = useState('alle')
+  const [warmCoolFilter, setWarmCoolFilter] = useState('alle')
+  const [saturationFilter, setSaturationFilter] = useState('alle')
   const [batchTagging, setBatchTagging] = useState(false)
   const [batchTagResult, setBatchTagResult] = useState<string | null>(null)
   const LIMIT = 60
@@ -1821,6 +1823,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (sourceFilter !== 'alle') params.sourceId = sourceFilter
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
+      if (warmCoolFilter !== 'alle') params.warmCoolFilter = warmCoolFilter
+      if (saturationFilter !== 'alle') params.saturationFilter = saturationFilter
       if (importedSince !== 'alle') params.importedSince = importedSince
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
       if (semanticThemeFilter !== 'alle') params.semanticTheme = semanticThemeFilter
@@ -1834,7 +1838,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, importedSince, qualityStatusFilter, semanticThemeFilter, tileTypeFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, importedSince, qualityStatusFilter, semanticThemeFilter, tileTypeFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -1927,7 +1931,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     const interval = setInterval(() => { fetchDbStats() }, 30000)
     return () => clearInterval(interval)
   }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter, qualityStatusFilter, importedSince, tileTypeFilter])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, semanticThemeFilter, qualityStatusFilter, importedSince, tileTypeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
@@ -2301,19 +2305,22 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Warm vs. Kühl (Farbtemperatur)</h3>
                   <div className="flex gap-2 mb-2">
-                    <div className="flex-1 bg-orange-50 border border-orange-200 rounded-xl p-3 text-center">
+                    <div className="flex-1 bg-orange-50 border border-orange-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
+                      onClick={() => { setWarmCoolFilter('warm'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Warme Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">🔥</div>
                       <div className="text-xs text-gray-500">Warm</div>
                       <div className="text-lg font-bold text-orange-600">{warmPct}%</div>
                       <div className="text-xs text-gray-400">{warm.toLocaleString()}</div>
                     </div>
-                    <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                    <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
+                      onClick={() => { setWarmCoolFilter('neutral'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Neutrale Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">⚪</div>
                       <div className="text-xs text-gray-500">Neutral</div>
                       <div className="text-lg font-bold text-gray-600">{neutralPct}%</div>
                       <div className="text-xs text-gray-400">{neutral.toLocaleString()}</div>
                     </div>
-                    <div className={`flex-1 rounded-xl p-3 text-center border ${kuehlOk ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
+                    <div className={`flex-1 rounded-xl p-3 text-center border cursor-pointer hover:opacity-80 transition-opacity ${kuehlOk ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}
+                      onClick={() => { setWarmCoolFilter('kuehl'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Kühle Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">❄️</div>
                       <div className="text-xs text-gray-500">Kühl</div>
                       <div className={`text-lg font-bold ${kuehlOk ? 'text-blue-600' : 'text-red-600'}`}>{kuehlPct}%</div>
@@ -2391,11 +2398,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Sättigung – Qualität für Hauttöne & Übergänge</h3>
                   <div className="flex gap-2 mb-2">
                     {[
-                      { label: 'Niedrig (glatt)', pct: lowPct, cnt: low, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', icon: '🌫️', tip: 'Ideal für Hauttöne & Hintergründe', target: 30 },
-                      { label: 'Mittel', pct: midPct, cnt: mid, color: 'bg-yellow-50 border-yellow-200', text: 'text-yellow-700', icon: '🎨', tip: 'Gute Allround-Tiles', target: 40 },
-                      { label: 'Hoch (bunt)', pct: highPct, cnt: high, color: 'bg-pink-50 border-pink-200', text: 'text-pink-700', icon: '🌈', tip: 'Zu viele → Haut wirkt unruhig', target: 30 },
-                    ].map(({ label, pct, cnt, color, text, icon, tip }) => (
-                      <div key={label} className={`flex-1 rounded-xl p-3 border ${color}`}>
+                      { label: 'Niedrig (glatt)', pct: lowPct, cnt: low, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', icon: '🌫️', tip: 'Ideal für Hauttöne & Hintergründe', target: 30, satKey: 'niedrig' },
+                      { label: 'Mittel', pct: midPct, cnt: mid, color: 'bg-yellow-50 border-yellow-200', text: 'text-yellow-700', icon: '🎨', tip: 'Gute Allround-Tiles', target: 40, satKey: 'mittel' },
+                      { label: 'Hoch (bunt)', pct: highPct, cnt: high, color: 'bg-pink-50 border-pink-200', text: 'text-pink-700', icon: '🌈', tip: 'Zu viele → Haut wirkt unruhig', target: 30, satKey: 'hoch' },
+                    ].map(({ label, pct, cnt, color, text, icon, tip, satKey }) => (
+                      <div key={label}
+                        className={`flex-1 rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
+                        onClick={() => { setSaturationFilter(satKey); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                        title={`Klick: ${label}-Tiles in DB anzeigen`}>
                         <div className="text-xl mb-1">{icon}</div>
                         <div className="text-xs font-semibold text-gray-700">{label}</div>
                         <div className={`text-lg font-bold ${text}`}>{pct}%</div>
@@ -2669,6 +2679,34 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Warm/Kühl:</span>
+          {[{v:'alle',label:'Alle'},{v:'warm',label:'🔥 Warm'},{v:'neutral',label:'⚪ Neutral'},{v:'kuehl',label:'❄️ Kühl'}].map(({v,label}) => (
+            <button key={v} onClick={() => { setWarmCoolFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                warmCoolFilter === v
+                  ? v === 'warm' ? 'bg-orange-500 text-white'
+                  : v === 'kuehl' ? 'bg-blue-500 text-white'
+                  : v === 'neutral' ? 'bg-gray-500 text-white'
+                  : 'bg-gray-700 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>{label}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sättigung:</span>
+          {[{v:'alle',label:'Alle'},{v:'niedrig',label:'⬜ Niedrig (Hauttöne)'},{v:'mittel',label:'🎨 Mittel'},{v:'hoch',label:'🌈 Hoch (Bunt)'}].map(({v,label}) => (
+            <button key={v} onClick={() => { setSaturationFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                saturationFilter === v
+                  ? v === 'niedrig' ? 'bg-gray-400 text-white'
+                  : v === 'mittel' ? 'bg-purple-500 text-white'
+                  : v === 'hoch' ? 'bg-pink-500 text-white'
+                  : 'bg-gray-700 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>{label}</button>
+          ))}
+        </div>
       </div>
 
       {/* Filter Bar */}
@@ -2715,8 +2753,20 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setTileTypeFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle' || tileTypeFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
+        {warmCoolFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-orange-100 text-orange-700 text-xs px-2 py-1 rounded-full">
+            {warmCoolFilter === 'warm' ? '🔥 Warm' : warmCoolFilter === 'kuehl' ? '❄️ Kühl' : '⚪ Neutral'}
+            <button onClick={() => setWarmCoolFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {saturationFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-purple-100 text-purple-700 text-xs px-2 py-1 rounded-full">
+            {saturationFilter === 'niedrig' ? '⬜ Niedrig' : saturationFilter === 'mittel' ? '🎨 Mittel' : '🌈 Hoch'}
+            <button onClick={() => setSaturationFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle' || tileTypeFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>

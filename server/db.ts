@@ -285,6 +285,8 @@ export async function getMosaicImagesForMatching() {
 export async function getAdminImages(opts: {
   page: number; pageSize?: number; limit?: number;
   brightnessFilter?: string; colorFilter?: string;
+  warmCoolFilter?: string; // 'warm' | 'kuehl' | 'neutral'
+  saturationFilter?: string; // 'niedrig' | 'mittel' | 'hoch'
   sourceId?: string;
   importedSince?: string; // ISO date string for 'recently imported' filter
   qualityStatus?: string;
@@ -325,10 +327,29 @@ export async function getAdminImages(opts: {
   if (opts.tileType && opts.tileType !== 'alle') {
     conditions.push(`COALESCE(tile_type, 'medium') = '${opts.tileType.replace(/'/g, "''")}' `);
   }
-  // Brightness filter
-  if (opts.brightnessFilter === "dunkel") conditions.push("avg_l < 35");
+  // Brightness filter (3-stufig + 5-stufig konsistent mit Pool-Balance-Statistik)
+  if (opts.brightnessFilter === "extrem-dunkel") conditions.push("avg_l < 20");
+  else if (opts.brightnessFilter === "dunkel") conditions.push("avg_l >= 20 AND avg_l < 35");
   else if (opts.brightnessFilter === "mittel") conditions.push("avg_l >= 35 AND avg_l <= 65");
-  else if (opts.brightnessFilter === "hell") conditions.push("avg_l > 65");
+  else if (opts.brightnessFilter === "hell") conditions.push("avg_l > 65 AND avg_l <= 85");
+  else if (opts.brightnessFilter === "extrem-hell") conditions.push("avg_l > 85");
+
+  // Warm/Kühl filter (konsistent mit Pool-Balance byWarmCool)
+  // Warm: b* > 8 AND a* > -5 (orange/gelb/rot-Töne)
+  // Kühl: b* < -8 OR (a* < -8 AND b* < 5) (blau/cyan/grün-Töne)
+  // Neutral: alles andere
+  if (opts.warmCoolFilter === "warm") conditions.push("avg_b > 8 AND avg_a > -5");
+  else if (opts.warmCoolFilter === "kuehl") conditions.push("(avg_b < -8 OR (avg_a < -8 AND avg_b < 5))");
+  else if (opts.warmCoolFilter === "neutral") conditions.push("NOT (avg_b > 8 AND avg_a > -5) AND NOT (avg_b < -8 OR (avg_a < -8 AND avg_b < 5))");
+
+  // Sättigungs-Filter (konsistent mit Pool-Balance bySaturation)
+  // Chroma = SQRT(a*² + b*²)
+  // Niedrig (<20): glatte Hauttöne, Hintergründe
+  // Mittel (20-42): Allround-Tiles
+  // Hoch (>42): bunte, lebhafte Tiles
+  if (opts.saturationFilter === "niedrig") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) < 20");
+  else if (opts.saturationFilter === "mittel") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) >= 20 AND SQRT(avg_a * avg_a + avg_b * avg_b) <= 42");
+  else if (opts.saturationFilter === "hoch") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) > 42");
 
   // Color filter
   if (opts.colorFilter === "schwarz") conditions.push("avg_l < 25");
@@ -387,10 +408,22 @@ export async function getAdminImages(opts: {
         ELSE 'grau'
       END as "colorCategory",
       CASE
+        WHEN avg_l < 20 THEN 'Extrem-Dunkel'
         WHEN avg_l < 35 THEN 'Dunkel'
+        WHEN avg_l > 85 THEN 'Extrem-Hell'
         WHEN avg_l > 65 THEN 'Hell'
         ELSE 'Mittel'
-      END as "brightnessCategory"
+      END as "brightnessCategory",
+      CASE
+        WHEN avg_b > 8 AND avg_a > -5 THEN 'warm'
+        WHEN avg_b < -8 OR (avg_a < -8 AND avg_b < 5) THEN 'kuehl'
+        ELSE 'neutral'
+      END as "warmCoolCategory",
+      CASE
+        WHEN SQRT(avg_a * avg_a + avg_b * avg_b) < 20 THEN 'niedrig'
+        WHEN SQRT(avg_a * avg_a + avg_b * avg_b) <= 42 THEN 'mittel'
+        ELSE 'hoch'
+      END as "saturationCategory"
     FROM mosaic_images ${where} ORDER BY id DESC LIMIT $1 OFFSET $2`,
     [pageSize, offset]
   );
