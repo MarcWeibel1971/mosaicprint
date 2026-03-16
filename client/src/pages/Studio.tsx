@@ -1693,10 +1693,38 @@ export default function Studio() {
       }
     }
     console.log(`[Mosaic] Filtered ${imgFeatures.length - goodImgFeatures.length} clipart tiles, ${goodImgFeatures.length} remaining`);
-    // Replace arrays with filtered versions
-    const filteredImgFeatures = goodImgFeatures;
-    const filteredValidImgs = goodValidImgs;
-    const filteredTileIds = goodTileIds;
+    // -- Tile-Pool Diversification: remove extremely yellow tiles that cause yellow flecks --------
+    // Problem: Sunset/warm photo pools have very yellow tiles (LAB b > 28) that cause yellow flecks
+    // in bright neutral areas (white backgrounds, beige clothing) even with penalties.
+    // Solution 1: Remove tiles with b > 28 AND high saturation (these are pure yellow/orange tiles)
+    // Solution 2: Cap moderately yellow tiles (b 20-28) at max 12% of pool
+    const EXTREME_YELLOW_THRESHOLD = 28; // b > 28 with high sat = pure yellow tile, always remove
+    const MODERATE_YELLOW_THRESHOLD = 20; // b 20-28 = moderately yellow, cap at 12%
+    const MAX_MODERATE_YELLOW_FRACTION = 0.12;
+    const extremeYellowIndices: number[] = [];
+    const moderateYellowIndices: number[] = [];
+    const nonYellowTileIndices: number[] = [];
+    for (let i = 0; i < goodImgFeatures.length; i++) {
+      const b = goodImgFeatures[i].lab[2];
+      const sat = goodImgFeatures[i].saturation;
+      if (b > EXTREME_YELLOW_THRESHOLD && sat > 20) {
+        extremeYellowIndices.push(i); // These will be removed entirely
+      } else if (b > MODERATE_YELLOW_THRESHOLD && sat > 15) {
+        moderateYellowIndices.push(i); // These will be capped
+      } else {
+        nonYellowTileIndices.push(i);
+      }
+    }
+    const maxModerateCount = Math.round(goodImgFeatures.length * MAX_MODERATE_YELLOW_FRACTION);
+    const keptModerateIndices = moderateYellowIndices.length > maxModerateCount
+      ? moderateYellowIndices.slice(0, maxModerateCount)
+      : moderateYellowIndices;
+    const diversifiedIndices = [...nonYellowTileIndices, ...keptModerateIndices];
+    // Note: extremeYellowIndices are intentionally excluded
+    const filteredImgFeatures = diversifiedIndices.map(i => goodImgFeatures[i]);
+    const filteredValidImgs = diversifiedIndices.map(i => goodValidImgs[i]);
+    const filteredTileIds = diversifiedIndices.map(i => goodTileIds[i]);
+    console.log(`[Mosaic] Pool diversification: removed ${extremeYellowIndices.length} extreme yellow tiles (b>${EXTREME_YELLOW_THRESHOLD}), capped ${moderateYellowIndices.length}->${keptModerateIndices.length} moderate yellow tiles, total: ${filteredImgFeatures.length}`);
 
     // Cell features from target image
     const cellFeatures: ImgFeature[] = [];
@@ -1825,13 +1853,53 @@ export default function Studio() {
     }
 
     const useCount = new Array(filteredValidImgs.length).fill(0);
-    // MAX_REUSE: hard cap -- if we have enough tiles, limit to 1-2 uses per tile
-    // With 17k+ tiles and 2k cells, each tile should ideally be used at most once
-    const MAX_REUSE = filteredValidImgs.length >= (TOTAL_TILES) * 3
-      ? 1  // plenty of tiles: each used max once
-      : filteredValidImgs.length >= (TOTAL_TILES) * 1.5
-        ? 2  // good coverage: max 2 uses
-        : Math.max(3, Math.ceil((TOTAL_TILES * 1.5) / Math.max(1, filteredValidImgs.length)));
+    // DYNAMIC MAX_REUSE: Analyse Pool-Diversität pro Helligkeitsbereich
+    // Ziel: In Bereichen mit wenig passenden Tiles (z.B. sehr hell) höheres MAX_REUSE erlauben
+    const poolSize = filteredValidImgs.length;
+    // Globales MAX_REUSE (Basis)
+    const MAX_REUSE_GLOBAL = poolSize >= (TOTAL_TILES) * 3
+      ? 1  : poolSize >= (TOTAL_TILES) * 1.5
+        ? 2  : Math.max(3, Math.ceil((TOTAL_TILES * 1.5) / Math.max(1, poolSize)));
+    // Pool-Diversität: Zähle Tiles pro Helligkeitsbereich
+    const poolBuckets = { vd: 0, dk: 0, md: 0, br: 0, vb: 0 };
+    for (const mf of filteredImgFeatures) {
+      const L = mf.lab[0];
+      if (L < 20) poolBuckets.vd++;
+      else if (L < 40) poolBuckets.dk++;
+      else if (L < 65) poolBuckets.md++;
+      else if (L < 82) poolBuckets.br++;
+      else poolBuckets.vb++;
+    }
+    const cellBuckets = { vd: 0, dk: 0, md: 0, br: 0, vb: 0 };
+    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      const L = cellLab[ci][0];
+      if (L < 20) cellBuckets.vd++;
+      else if (L < 40) cellBuckets.dk++;
+      else if (L < 65) cellBuckets.md++;
+      else if (L < 82) cellBuckets.br++;
+      else cellBuckets.vb++;
+    }
+    const calcMR = (p: number, c: number): number => {
+      if (c === 0) return MAX_REUSE_GLOBAL;
+      const r = p / c;
+      return r >= 3.0 ? 1 : r >= 1.5 ? 2 : r >= 0.8 ? 3 : r >= 0.4 ? 5 : 8;
+    };
+    const MR_BUCKET = {
+      vd: calcMR(poolBuckets.vd, cellBuckets.vd),
+      dk: calcMR(poolBuckets.dk, cellBuckets.dk),
+      md: calcMR(poolBuckets.md, cellBuckets.md),
+      br: calcMR(poolBuckets.br, cellBuckets.br),
+      vb: calcMR(poolBuckets.vb, cellBuckets.vb),
+    };
+    console.log('[Mosaic] Pool buckets:', poolBuckets, '| Cell buckets:', cellBuckets, '| MAX_REUSE by bucket:', MR_BUCKET);
+    const getMaxReuseForCell = (cellL: number): number => {
+      if (cellL < 20) return MR_BUCKET.vd;
+      if (cellL < 40) return MR_BUCKET.dk;
+      if (cellL < 65) return MR_BUCKET.md;
+      if (cellL < 82) return MR_BUCKET.br;
+      return MR_BUCKET.vb;
+    };
+    const MAX_REUSE = MAX_REUSE_GLOBAL; // globaler Fallback
     const assignment: number[] = new Array(TOTAL_TILES).fill(-1);
     // Also store best rotation per tile (0=0deg, 1=90deg, 2=180deg, 3=270deg)
     const assignmentRotation: number[] = new Array(TOTAL_TILES).fill(0);
@@ -1922,13 +1990,14 @@ export default function Studio() {
         // Base penalties (rotation-independent)
         // For bright neutral tiles (gray hair, white background) reduce neighbor penalty
         // so they can be reused more often instead of falling back to yellow/warm tiles
-        // IMPORTANT: Only truly neutral tiles (LAB b < 12) get the reduction - yellow tiles (b >= 12) are excluded
-        const isBrightNeutralTile = mf.brightness > 65 && mf.saturation < 22 && (mf.lab?.[2] ?? 99) < 12;
+        // IMPORTANT: Only truly neutral tiles (LAB b < 10) get the reduction - yellow tiles (b >= 10) are excluded
+        const isBrightNeutralTile = mf.brightness > 60 && mf.saturation < 20 && (mf.lab?.[2] ?? 99) < 10;
         const effectiveNeighborPenalty = (isBrightNeutralTile && !inFace)
-          ? Math.round(NEIGHBOR_PENALTY * 0.45)  // 45% of normal penalty for truly neutral bright tiles
+          ? Math.round(NEIGHBOR_PENALTY * 0.30)  // 30% of normal penalty for truly neutral bright tiles (was 45%)
           : NEIGHBOR_PENALTY;
         const neighborPenalty = neighborIds.has(j) ? effectiveNeighborPenalty : 0;
-        const reusePenalty = useCount[j] >= (MAX_REUSE) ? 150 * (useCount[j] - MAX_REUSE + 1) : 0;
+        const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
+        const reusePenalty = useCount[j] >= cellMaxReuse ? 150 * (useCount[j] - cellMaxReuse + 1) : 0;
 
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
@@ -1966,7 +2035,7 @@ export default function Studio() {
           // SSD 45% . LAB 15% . Brightness 50% . Texture 15% . Quad 10% . Saturation 40%
           // Higher SSD weight = tiles that look most like the target region (color + luminance)
           const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
-          const wSsdBase = noOverlay ? 0.45 : 0.30; // 45% SSD when no overlay (pure tile rendering)
+          const wSsdBase = noOverlay ? 0.50 : 0.38; // 50% SSD when no overlay, 38% with overlay (increased for less graininess)
           const wLabBase = savedSettings.labWeight ?? 0.15;
           const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
           const wTextureBase = savedSettings.textureWeight ?? 0.08;
@@ -1990,7 +2059,7 @@ export default function Studio() {
             // nose: high brightness, moderate edge, strong sat penalty (skin area)
             // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
             const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-            const wLabF      = subRegion === 'eye' ? wLabBase * 1.5 : subRegion === 'mouth' ? wLabBase * 1.4 : wLabBase * 1.2;
+            const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4; // increased for better face clarity
             // Dynamic brightness weight:
             // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
             //   so the algorithm picks light tiles, not dark/cool ones
@@ -2002,7 +2071,7 @@ export default function Studio() {
             const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
             // Saturation weight: reduced to allow warmer tiles in face (was ×2.5/×2.0/×1.5 → too aggressive)
             const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.5 : subRegion === 'nose' ? wSatBase * 1.3 : wSatBase * 1.1;
-            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.10 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
+            let dist = wSsdFace * ssdScore * 100 + wLabF * labDist + 0.15 * quadDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100; // quadDist increased for face too
             // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
             const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
             const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
@@ -2065,7 +2134,7 @@ export default function Studio() {
           }
           // Non-face: full scoring with saturation term
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
-          let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.10 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
+          let dist = wSsdBase * ssdScore * 100 + wLabBase * labDist + 0.15 * quadDist + wBrightBase * brightDiff + wTextureBase * textureDiff * 50 + edgeWeight * edgeDiff * 100 + wSatBase * satDiff * 100;
 
           // HUE-DIRECTION ENFORCEMENT (non-face regions)
           // This is the KEY FIX for landscapes: cool/gray areas must not get warm tiles
@@ -2136,11 +2205,16 @@ export default function Studio() {
           // EXTENDED YELLOW PENALTY: penalize tiles that are much more yellow than the target
           // This fixes yellow flecks in beige sweaters, white backgrounds, gray hair
           // Condition: tile is significantly more yellow than target AND target is bright
-          if (tf.brightness > 55 && tileB > targetBLab + 14) {
+          // TWO-TIER: very bright (L>65) = aggressive; moderate (L=55-65) = gentle
+          if (tf.brightness > 55 && tileB > targetBLab + 12) {
             // Tile is much more yellow than target -> penalize
-            const yellowOvershoot = tileB - targetBLab - 14;
-            const brightStrength = Math.min(1.0, (tf.brightness - 55) / 40);
-            dist += yellowOvershoot * 16 * brightStrength; // up to ~480 for very yellow tile vs neutral target
+            const yellowOvershoot = tileB - targetBLab - 12;
+            const isVeryBright = tf.brightness > 65;
+            const brightStrength = isVeryBright
+              ? Math.min(1.0, (tf.brightness - 65) / 20) // aggressive for very bright
+              : Math.min(0.35, (tf.brightness - 55) / 28); // gentle for moderate brightness
+            const penaltyFactor = isVeryBright ? 22 : 10;
+            dist += yellowOvershoot * penaltyFactor * brightStrength;
           }
           // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
           // Moderate penalty only - avoid over-correction (white patches)
@@ -2207,21 +2281,52 @@ export default function Studio() {
 
           // YELLOW/WARM-TILE PENALTY for bright neutral non-face areas (white background, gray hair)
           // Prevents yellow/warm tiles from appearing in white walls, gray hair, neutral backgrounds
-          // The existing yellow penalty only covers face areas; this extends it to all bright neutral zones
-          if (tf.brightness > 62 && targetSatC < 30) {
+          // TWO-TIER: very bright (L>68) = aggressive; moderately bright (L=55-68) = gentle
+          if (tf.brightness > 55 && targetSatC < 32) {
             const tileLabB = mf.lab[2]; // LAB b: positive = yellow
             const tileLabA = mf.lab[1]; // LAB a: positive = red/warm
-            const neutralStrength = Math.min(1.0, (tf.brightness - 62) / 30); // 0 at L=62, 1 at L=92
-            // Penalize yellow tiles (b > 14) in bright neutral areas - stronger penalty
-            if (tileLabB > 14) {
-              dist += (tileLabB - 14) * 14 * neutralStrength; // up to ~350 for very yellow tile
+            // Very bright (L>68): full aggressive penalty for white walls/gray hair
+            // Moderately bright (L=55-68): gentle penalty only for extreme yellow tiles
+            const isVeryBrightNeutral = tf.brightness > 68;
+            const neutralStrength = isVeryBrightNeutral
+              ? Math.min(1.0, (tf.brightness - 68) / 15) // 0 at L=68, 1 at L=83
+              : Math.min(0.4, (tf.brightness - 55) / 32); // max 0.4 for moderate brightness
+            // Penalize yellow tiles in bright neutral areas
+            const yellowThreshold = isVeryBrightNeutral ? 8 : 14; // more lenient for moderate brightness
+            if (tileLabB > yellowThreshold) {
+              const factor = isVeryBrightNeutral ? 38 : 20; // aggressive for very bright, gentle for moderate
+              dist += (tileLabB - yellowThreshold) * factor * neutralStrength;
             }
-            // Penalize warm/red tiles (a > 10) in bright neutral areas
-            if (tileLabA > 10) {
-              dist += (tileLabA - 10) * 8 * neutralStrength; // up to ~200 for very warm tile
+            // Penalize warm/red tiles in very bright neutral areas only
+            if (isVeryBrightNeutral && tileLabA > 6) {
+              dist += (tileLabA - 6) * 22 * neutralStrength; // up to ~660 for very warm tile
+            }
+            // EXTENDED: also penalize tiles that are much more yellow than the target
+            const overshootThreshold = isVeryBrightNeutral ? 8 : 16;
+            if (tileLabB > targetBLab + overshootThreshold) {
+              const overshoot = tileLabB - targetBLab - overshootThreshold;
+              const overshootFactor = isVeryBrightNeutral ? 30 : 14;
+              dist += overshoot * overshootFactor * neutralStrength;
             }
           }
 
+          // NEUTRAL-TARGET PENALTY: if target is truly neutral (|b| < 14), penalize yellow OR blue tiles
+          // This is the key fix for white backgrounds and gray hair areas
+          // Different from the above: this fires for ALL neutral targets regardless of brightness
+          if (Math.abs(targetBLab) < 14 && tf.brightness > 40) {
+            const tileB2 = mf.lab[2];
+            const brightnessScale = Math.min(1.0, (tf.brightness - 40) / 20); // ramp up with brightness
+            if (tileB2 > 12) {
+              // Target is neutral but tile is yellow -> strong penalty
+              const neutralYellowPenalty = (tileB2 - 12) * brightnessScale * 45;
+              dist += neutralYellowPenalty;
+            }
+            if (tileB2 < -12) {
+              // Target is neutral but tile is blue -> also penalize (prevents blue flecks in white areas)
+              const neutralBluePenalty = (-tileB2 - 12) * brightnessScale * 35;
+              dist += neutralBluePenalty;
+            }
+          }
           // Anti-repetition penalties
           dist += neighborPenalty + reusePenalty + repPenalty;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }

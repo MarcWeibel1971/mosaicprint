@@ -157,7 +157,15 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
       buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
-      const tileComplexity = row.tile_type === 'calm' ? 0.0 : row.tile_type === 'busy' ? 1.0 : 0.5;
+      // tileComplexity: berechnet aus Quadranten-LAB-Varianz (kein tile_type in DB)
+      // Hohe Varianz zwischen Quadranten = busy (viele Details/Kanten)
+      // Niedrige Varianz = calm (ruhiges, einfarbiges Tile)
+      const quadVarA = ((tlA-a)**2 + (trA-a)**2 + (blA-a)**2 + (brA-a)**2) / 4;
+      const quadVarB = ((tlB-b)**2 + (trB-b)**2 + (blB-b)**2 + (brB-b)**2) / 4;
+      // Kombinierte Varianz: L-Varianz (Helligkeit) + Farb-Varianz (a+b)
+      const totalVar = Math.sqrt(quadVarL) + Math.sqrt(quadVarA) * 0.5 + Math.sqrt(quadVarB) * 0.5;
+      // Normalisierung: 0=calm (totalVar<3), 1=busy (totalVar>25)
+      const tileComplexity = Math.min(1.0, Math.max(0.0, (totalVar - 3) / 22));
       buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
       buf.writeFloatLE(tileComplexity, offset);   offset += 4;  // [15] tileComplexity (0=calm, 0.5=medium, 1=busy)
     }

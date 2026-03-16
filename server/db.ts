@@ -12,7 +12,7 @@ export function getPool(): pg.Pool {
     if (!url) throw new Error("DATABASE_URL not set");
     _pool = new pg.Pool({
       connectionString: url,
-      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+      ssl: { rejectUnauthorized: false }, // TiDB requires SSL always (local dev + production)
       max: 10,
     });
   }
