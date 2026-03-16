@@ -1920,7 +1920,14 @@ export default function Studio() {
       for (const j of candidateIndices) {
         const mf = filteredImgFeatures[j];
         // Base penalties (rotation-independent)
-        const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
+        // For bright neutral tiles (gray hair, white background) reduce neighbor penalty
+        // so they can be reused more often instead of falling back to yellow/warm tiles
+        // IMPORTANT: Only truly neutral tiles (LAB b < 12) get the reduction - yellow tiles (b >= 12) are excluded
+        const isBrightNeutralTile = mf.brightness > 65 && mf.saturation < 22 && (mf.lab?.[2] ?? 99) < 12;
+        const effectiveNeighborPenalty = (isBrightNeutralTile && !inFace)
+          ? Math.round(NEIGHBOR_PENALTY * 0.45)  // 45% of normal penalty for truly neutral bright tiles
+          : NEIGHBOR_PENALTY;
+        const neighborPenalty = neighborIds.has(j) ? effectiveNeighborPenalty : 0;
         const reusePenalty = useCount[j] >= (MAX_REUSE) ? 150 * (useCount[j] - MAX_REUSE + 1) : 0;
 
         for (const rot of rotations) {
@@ -2126,6 +2133,15 @@ export default function Studio() {
             // Tile is very yellow but target is warm/skin (not yellow) -> penalize
             dist += (tileB - 28) * (targetA / 10) * 6; // up to ~120 penalty
           }
+          // EXTENDED YELLOW PENALTY: penalize tiles that are much more yellow than the target
+          // This fixes yellow flecks in beige sweaters, white backgrounds, gray hair
+          // Condition: tile is significantly more yellow than target AND target is bright
+          if (tf.brightness > 55 && tileB > targetBLab + 14) {
+            // Tile is much more yellow than target -> penalize
+            const yellowOvershoot = tileB - targetBLab - 14;
+            const brightStrength = Math.min(1.0, (tf.brightness - 55) / 40);
+            dist += yellowOvershoot * 16 * brightStrength; // up to ~480 for very yellow tile vs neutral target
+          }
           // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
           // Moderate penalty only - avoid over-correction (white patches)
           const targetBr = tf.brightness; // 0-100
@@ -2187,6 +2203,23 @@ export default function Studio() {
             // Brightness matching: transition zone needs smooth brightness gradient
             const borderBrightPenalty = brightDiff * 0.4 * blendFaceWeight;
             dist += borderBrightPenalty;
+          }
+
+          // YELLOW/WARM-TILE PENALTY for bright neutral non-face areas (white background, gray hair)
+          // Prevents yellow/warm tiles from appearing in white walls, gray hair, neutral backgrounds
+          // The existing yellow penalty only covers face areas; this extends it to all bright neutral zones
+          if (tf.brightness > 62 && targetSatC < 30) {
+            const tileLabB = mf.lab[2]; // LAB b: positive = yellow
+            const tileLabA = mf.lab[1]; // LAB a: positive = red/warm
+            const neutralStrength = Math.min(1.0, (tf.brightness - 62) / 30); // 0 at L=62, 1 at L=92
+            // Penalize yellow tiles (b > 14) in bright neutral areas - stronger penalty
+            if (tileLabB > 14) {
+              dist += (tileLabB - 14) * 14 * neutralStrength; // up to ~350 for very yellow tile
+            }
+            // Penalize warm/red tiles (a > 10) in bright neutral areas
+            if (tileLabA > 10) {
+              dist += (tileLabA - 10) * 8 * neutralStrength; // up to ~200 for very warm tile
+            }
           }
 
           // Anti-repetition penalties
