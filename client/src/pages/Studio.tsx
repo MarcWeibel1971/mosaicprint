@@ -380,6 +380,27 @@ export default function Studio() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Preload: Load the tile URL index (tileId -> R2/CDN URL) in the background
+  // Used to load tiles directly from tiles.mosaicprint.ch (CDN) instead of Railway proxy
+  // This avoids rate-limiting and reduces Railway egress costs
+  useEffect(() => {
+    if (tileUrlIndexLoadedRef.current) return;
+    fetch('/api/tile-url-index')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: { urls: Record<string, string>; r2Count: number; proxyCount: number; count: number }) => {
+        tileUrlIndexRef.current = data.urls;
+        tileUrlIndexLoadedRef.current = true;
+        console.log(`[Studio] Tile URL index loaded: ${data.count} tiles, ${data.r2Count} R2 CDN, ${data.proxyCount} proxy fallback`);
+      })
+      .catch(e => {
+        console.warn('[Studio] Tile URL index not available, will use proxy fallback:', e);
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hiResCanvasRef = useRef<HTMLCanvasElement>(null); // second canvas for hi-res zoom
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -398,6 +419,10 @@ export default function Studio() {
   const labIndexRef = useRef<Float32Array | null>(null);
   const labIndexLoadedRef = useRef<boolean>(false);
   const floatsPerTileRef = useRef<number>(4); // 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity)
+  // Tile URL index: maps tileId (string) -> direct R2/CDN URL (tiles.mosaicprint.ch)
+  // Loaded once at startup alongside LAB index, used to load tiles directly from CDN
+  const tileUrlIndexRef = useRef<Record<string, string> | null>(null);
+  const tileUrlIndexLoadedRef = useRef<boolean>(false);
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
   const [hiResReady, setHiResReady] = useState(false);
   const [hiResLoading, setHiResLoading] = useState(false);
@@ -1403,9 +1428,54 @@ export default function Studio() {
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
+      // -- Strategy: Direct R2/CDN loading (preferred) or Atlas fallback --
+      // If tile URL index is available (tiles.mosaicprint.ch CDN), load tiles directly
+      // This bypasses Railway proxy, avoids 429 rate-limiting, and is much faster
+      const urlIndex = tileUrlIndexRef.current;
+      const hasDirectUrls = urlIndex !== null && Object.keys(urlIndex).length > 0;
+      const neededArray = Array.from(neededTileIds);
+
+      if (hasDirectUrls) {
+        // -- Direct R2/CDN loading strategy --
+        // Load tiles in parallel batches directly from tiles.mosaicprint.ch
+        // CDN has no rate limits and serves from edge nodes worldwide
+        const DIRECT_BATCH = isMobileOrSlow ? 30 : 100; // Parallel requests per batch
+        const DIRECT_TIMEOUT = isMobileOrSlow ? 12000 : 15000;
+        const BATCH_DELAY = isMobileOrSlow ? 100 : 50; // ms between batches
+        let loaded = 0;
+        let r2Loaded = 0;
+        let proxyFallback = 0;
+        setProgressMsg(`Lade ${neededArray.length} Kacheln direkt von CDN...`);
+        for (let i = 0; i < neededArray.length; i += DIRECT_BATCH) {
+          const batchIds = neededArray.slice(i, i + DIRECT_BATCH);
+          const batchImgs = await Promise.all(
+            batchIds.map(async (id) => {
+              const directUrl = urlIndex[String(id)];
+              if (directUrl) {
+                // Try direct R2/CDN URL first
+                try {
+                  const img = await loadImageCached(directUrl, DIRECT_TIMEOUT);
+                  if (img) { r2Loaded++; return img; }
+                } catch { /* fall through to proxy */ }
+              }
+              // Fallback: Railway proxy (always works, just slower)
+              proxyFallback++;
+              return loadImageCached(`/api/tile/${id}?size=64`, DIRECT_TIMEOUT);
+            })
+          );
+          for (let j = 0; j < batchIds.length; j++) {
+            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+          }
+          loaded += batchIds.length;
+          const pct = 25 + Math.round((loaded / neededArray.length) * 17);
+          setProgress(Math.min(pct, 42));
+          if (i + DIRECT_BATCH < neededArray.length) await new Promise(r => setTimeout(r, BATCH_DELAY));
+        }
+        console.log(`[Studio] Direct CDN loading: ${tileImgMap.size}/${neededArray.length} tiles (${r2Loaded} R2, ${proxyFallback} proxy fallback)`);
+        setProgress(42);
+      } else {
       // -- Targeted Atlas strategy: build sprite-sheet only for needed tile IDs --
       // Split into chunks of max 1500 to avoid Railway timeouts and 429s
-      const neededArray = Array.from(neededTileIds);
       const ATLAS_CHUNK = isMobileOrSlow ? 200 : 500; // Smaller chunks = more reliable (no IncompleteRead)
       const ATLAS_TIMEOUT = isMobileOrSlow ? 20000 : 30000; // 30s per chunk (500 tiles)
 
@@ -1565,6 +1635,7 @@ export default function Studio() {
       }
 
       setProgress(45);
+      } // end else (Atlas fallback)
     }
 
     // -- Fallback: legacy pool if 2-stage not available ------------------------

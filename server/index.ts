@@ -317,6 +317,67 @@ app.get("/api/tile-urls", async (req, res) => {
   }
 });
 
+// GET /api/tile-url-index  – returns compact JSON map of tileId → R2/CDN URL
+// Used by Studio.tsx to load tiles directly from R2/CDN (tiles.mosaicprint.ch) without Railway proxy
+// Format: { urls: { "123": "https://tiles.mosaicprint.ch/tiles/123.jpg", ... }, r2BaseUrl: "...", count: N, r2Count: N, proxyCount: N }
+// Tiles without r2_url fall back to tile128_url (Railway proxy) for backward compatibility
+// Cache: 5 minutes server-side, 1 hour browser-side
+const tileUrlIndexCache = new Map<string, { json: string; builtAt: number }>();
+const TILE_URL_INDEX_TTL_MS = 5 * 60 * 1000; // 5 minutes
+app.get("/api/tile-url-index", async (req, res) => {
+  try {
+    const theme = (req.query.theme as string ?? '').toLowerCase().trim();
+    const cacheKey = theme || '__all__';
+    const cached = tileUrlIndexCache.get(cacheKey);
+    if (cached && (Date.now() - cached.builtAt) < TILE_URL_INDEX_TTL_MS) {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.setHeader('X-Cache', 'HIT');
+      return res.send(cached.json);
+    }
+    const pool = db.getPool();
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
+    const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `AND subject = $1` : ``;
+    const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
+    const result = await pool.query(
+      `SELECT id, tile128_url, r2_url FROM mosaic_images
+       WHERE avg_l IS NOT NULL
+         AND (r2_url IS NOT NULL OR COALESCE(source_provider, '') != 'pixabay')
+         ${themeFilter} ORDER BY id ASC`,
+      queryParams
+    );
+    const rows = result.rows;
+    // Build compact URL map: prefer r2_url (CDN), fallback to tile128_url (proxy)
+    const r2BaseUrl = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
+    const urls: Record<string, string> = {};
+    let r2Count = 0;
+    let proxyCount = 0;
+    for (const row of rows) {
+      if (row.r2_url) {
+        urls[String(row.id)] = row.r2_url;
+        r2Count++;
+      } else if (row.tile128_url) {
+        urls[String(row.id)] = row.tile128_url;
+        proxyCount++;
+      }
+      // Skip tiles with no URL at all
+    }
+    const payload = { urls, r2BaseUrl, count: rows.length, r2Count, proxyCount, builtAt: Date.now() };
+    const json = JSON.stringify(payload);
+    tileUrlIndexCache.set(cacheKey, { json, builtAt: Date.now() });
+    console.log(`[tile-url-index] Built: ${rows.length} tiles, ${r2Count} R2, ${proxyCount} proxy, ${(json.length/1024).toFixed(0)} KB`);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('X-Cache', 'MISS');
+    res.setHeader('X-R2-Count', r2Count.toString());
+    res.setHeader('X-Proxy-Count', proxyCount.toString());
+    res.send(json);
+  } catch (e) {
+    console.error('[tile-url-index] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // Image proxy endpoint - proxies external images to avoid CORS issues
 // Used by image-cache.ts for picsum, unsplash, cloudfront, and pexels images
 app.get("/api/proxy/portrait", async (req, res) => {
