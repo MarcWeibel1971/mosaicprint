@@ -378,6 +378,21 @@ app.get("/api/tile-url-index", async (req, res) => {
   }
 });
 
+// GET /api/admin/import-report/:source  – download last import report as JSON
+app.get('/api/admin/import-report/:source', (req, res) => {
+  try {
+    const { source } = req.params;
+    const isAnalysis = req.query.analysis === 'true';
+    // Access the smartImportJobs map via the router module (dynamic import)
+    // The report is stored in-memory on the router module
+    // We expose it via the tRPC getLastImportReport procedure instead
+    // This endpoint just redirects to the tRPC JSON response for download
+    res.status(200).json({ message: 'Use tRPC getLastImportReport procedure', source, isAnalysis });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // Image proxy endpoint - proxies external images to avoid CORS issues
 // Used by image-cache.ts for picsum, unsplash, cloudfront, and pexels images
 app.get("/api/proxy/portrait", async (req, res) => {
@@ -668,101 +683,126 @@ app.post("/api/admin/migrate-r2-urls", async (_req, res) => {
   }
 });
 
-// ── fal.ai Image Analysis ────────────────────────────────────────────────────
+// ── Gemini 2.5 Flash Image Analysis (replaces fal.ai Florence-2) ─────────────
 // POST /api/analyze-image-fal
-// Body: { imageBase64: string, mimeType?: string }
+// Body: { imageBase64: string, mimeType?: string } OR { imageUrl: string }
 // Returns: { description, sceneType, attributes, keywordSuggestions, hasFace, faceCount }
 app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, res) => {
   try {
-    const FAL_KEY = process.env.FAL_AI_KEY || '3895037d-8203-4913-bb33-8be7665771e4:29c49fc075b096e60783b291fc7467c9';
+    const GEMINI_KEY = process.env.GEMINI_API_KEY;
+    if (!GEMINI_KEY) return res.status(500).json({ ok: false, error: 'GEMINI_API_KEY not configured' });
+
     const { imageBase64, imageUrl: directUrl, mimeType = 'image/jpeg' } = req.body ?? {};
     if (!imageBase64 && !directUrl) return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
 
-    let file_url: string;
+    // Build Gemini request parts
+    const prompt = `Analyze this image for photo mosaic tile import. Return ONLY valid JSON with exactly these fields:
+{
+  "sceneType": "portrait|landscape|abstract|architecture|nature|food|animal|night_skyline|colorful",
+  "description": "one sentence description",
+  "hasFace": true|false,
+  "faceCount": 0-10,
+  "attributes": {
+    "hasBeard": true|false,
+    "hasGlasses": true|false,
+    "hasWhiteHair": true|false,
+    "isNight": true|false,
+    "isNature": true|false,
+    "isColorful": true|false,
+    "isArchitecture": true|false,
+    "skinTone": "light|medium|dark|none",
+    "hairColor": "blonde|brown|black|gray|white|red|none"
+  },
+  "importKeywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
+  "keywordSuggestions": [
+    {"keyword": "search term", "reason": "why needed for mosaic", "priority": "high|medium|low"}
+  ]
+}
+For portraits: importKeywords must include skin tone keywords, hair color, and specific facial features.
+For landscapes: include dominant colors, scene type, mood.
+No explanation, only JSON.`;
 
+    let imagePart: any;
     if (directUrl) {
-      // Use URL directly for Florence-2
-      file_url = directUrl;
+      imagePart = { file_data: { mime_type: mimeType, file_uri: directUrl } };
     } else {
-      // Step 1: Upload image to fal.ai storage
-      const imgBuf = Buffer.from(imageBase64, 'base64');
-      const ext = mimeType.includes('png') ? 'png' : 'jpg';
-      const initResp = await fetch('https://rest.alpha.fal.ai/storage/upload/initiate', {
+      imagePart = { inline_data: { mime_type: mimeType, data: imageBase64 } };
+    }
+
+    const geminiResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
         method: 'POST',
-        headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_name: `analysis.${ext}`, content_type: mimeType }),
-      });
-      if (!initResp.ok) throw new Error(`fal.ai storage initiate failed: ${initResp.status}`);
-      const { file_url: furl, upload_url } = await initResp.json() as { file_url: string; upload_url: string };
-      file_url = furl;
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }, imagePart] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+        }),
+        signal: AbortSignal.timeout(30000),
+      }
+    );
 
-      // Step 2: Upload the actual image bytes
-      const uploadResp = await fetch(upload_url, {
-        method: 'PUT',
-        headers: { 'Content-Type': mimeType },
-        body: imgBuf,
-      });
-      if (!uploadResp.ok) throw new Error(`fal.ai storage upload failed: ${uploadResp.status}`);
+    if (!geminiResp.ok) {
+      const errText = await geminiResp.text();
+      throw new Error(`Gemini API failed: ${geminiResp.status} – ${errText.substring(0, 200)}`);
     }
 
-    // Step 3: Run Florence-2 for detailed caption
-    const captionResp = await fetch('https://fal.run/fal-ai/florence-2-large/more-detailed-caption', {
-      method: 'POST',
-      headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_url: file_url }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!captionResp.ok) throw new Error(`Florence-2 failed: ${captionResp.status}`);
-    const captionData = await captionResp.json() as { results?: string };
-    const description = captionData.results ?? '';
+    const geminiData = await geminiResp.json() as any;
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    let parsed: any = {};
+    try { parsed = JSON.parse(rawText); } catch { parsed = {}; }
 
-    // Step 4: Parse description into structured attributes
-    const lower = description.toLowerCase();
-    const hasFace = /\bface\b|\bperson\b|\bman\b|\bwoman\b|\bportrait\b|\bgirl\b|\bboy\b|\bchild\b|\bpeople\b/.test(lower);
-    const hasBeard = /\bbeard\b|\bstubble\b|\bmustache\b/.test(lower);
-    const hasGlasses = /\bglasses\b|\bspectacles\b|\beyeglasses\b|\bsunglasses\b|\bshades\b/.test(lower);
-    const hasWhiteHair = /\bwhite hair\b|\bgray hair\b|\bgrey hair\b|\bsilver hair\b/.test(lower);
-    const isNight = /\bnight\b|\bdark sky\b|\bskyline\b|\bneon\b|\bcity lights\b/.test(lower);
-    const isNature = /\bforest\b|\btrees\b|\bmountain\b|\bocean\b|\bsea\b|\bbeach\b|\briver\b|\blandscape\b/.test(lower);
-    const isColorful = /\bcolorful\b|\bvibrant\b|\bbright colors\b|\brainbow\b/.test(lower);
-    const isArchitecture = /\bbuilding\b|\barchitecture\b|\bbridge\b|\bstreet\b|\bcity\b/.test(lower);
+    const sceneType = parsed.sceneType ?? 'unknown';
+    const hasFace = parsed.hasFace ?? false;
+    const faceCount = parsed.faceCount ?? 0;
+    const description = parsed.description ?? '';
+    const attributes = {
+      hasBeard: parsed.attributes?.hasBeard ?? false,
+      hasGlasses: parsed.attributes?.hasGlasses ?? false,
+      hasWhiteHair: parsed.attributes?.hasWhiteHair ?? false,
+      isNight: parsed.attributes?.isNight ?? false,
+      isNature: parsed.attributes?.isNature ?? false,
+      isColorful: parsed.attributes?.isColorful ?? false,
+      isArchitecture: parsed.attributes?.isArchitecture ?? false,
+      skinTone: parsed.attributes?.skinTone ?? 'none',
+      hairColor: parsed.attributes?.hairColor ?? 'none',
+    };
 
-    // Determine scene type
-    let sceneType = 'unknown';
-    if (hasFace && hasWhiteHair) sceneType = 'portrait_white_hair';
-    else if (hasFace) sceneType = 'portrait';
-    else if (isNight) sceneType = 'night_skyline';
-    else if (isNature) sceneType = 'nature';
-    else if (isArchitecture) sceneType = 'architecture';
-    else if (isColorful) sceneType = 'colorful';
-
-    // Generate keyword suggestions for tile import
-    const keywordSuggestions: Array<{keyword: string; reason: string; priority: string}> = [];
-    if (hasFace) {
-      keywordSuggestions.push({ keyword: 'portrait face skin tone warm', reason: 'Gesicht erkannt – Hautton-Tiles benötigt', priority: 'high' });
-      if (hasBeard) keywordSuggestions.push({ keyword: 'beard stubble dark texture', reason: 'Bart erkannt', priority: 'medium' });
-      if (hasGlasses) keywordSuggestions.push({ keyword: 'glasses reflection lens', reason: 'Brille erkannt', priority: 'medium' });
-      if (hasWhiteHair) keywordSuggestions.push({ keyword: 'white gray silver texture light', reason: 'Weißes/graues Haar erkannt', priority: 'high' });
+    // Build keywordSuggestions if not provided by Gemini
+    let keywordSuggestions = parsed.keywordSuggestions ?? [];
+    if (keywordSuggestions.length === 0) {
+      if (hasFace) {
+        const skinMap: Record<string, string> = { light: 'fair skin light complexion', medium: 'medium skin tone warm', dark: 'dark skin tone brown' };
+        keywordSuggestions.push({ keyword: skinMap[attributes.skinTone] ?? 'portrait face skin tone', reason: 'Gesicht erkannt – Hautton-Tiles benötigt', priority: 'high' });
+        if (attributes.hasBeard) keywordSuggestions.push({ keyword: 'beard stubble dark texture', reason: 'Bart erkannt', priority: 'medium' });
+        if (attributes.hasGlasses) keywordSuggestions.push({ keyword: 'glasses reflection lens', reason: 'Brille erkannt', priority: 'medium' });
+        if (attributes.hasWhiteHair || attributes.hairColor === 'gray' || attributes.hairColor === 'white') {
+          keywordSuggestions.push({ keyword: 'white gray silver texture light', reason: 'Weißes/graues Haar erkannt', priority: 'high' });
+        }
+      }
+      if (attributes.isNight) keywordSuggestions.push({ keyword: 'night city lights dark blue', reason: 'Nacht-Szene erkannt', priority: 'high' });
+      if (attributes.isNature) keywordSuggestions.push({ keyword: 'nature green forest landscape', reason: 'Natur-Szene erkannt', priority: 'medium' });
     }
-    if (isNight) keywordSuggestions.push({ keyword: 'night city lights dark blue', reason: 'Nacht-Szene erkannt', priority: 'high' });
-    if (isNature) keywordSuggestions.push({ keyword: 'nature green forest landscape', reason: 'Natur-Szene erkannt', priority: 'medium' });
-    if (isColorful) keywordSuggestions.push({ keyword: 'colorful vibrant abstract', reason: 'Farbige Szene erkannt', priority: 'medium' });
 
-    console.log(`[fal.ai] Analysis: sceneType=${sceneType} hasFace=${hasFace} beard=${hasBeard} glasses=${hasGlasses}`);
-    console.log(`[fal.ai] Description: ${description.substring(0, 100)}...`);
+    const importKeywords: string[] = parsed.importKeywords ?? keywordSuggestions.slice(0, 5).map((k: any) => k.keyword);
+
+    console.log(`[Gemini] Analysis: sceneType=${sceneType} hasFace=${hasFace} skinTone=${attributes.skinTone} hairColor=${attributes.hairColor}`);
+    console.log(`[Gemini] Description: ${description}`);
+    console.log(`[Gemini] Keywords: ${importKeywords.join(', ')}`);
 
     return res.json({
       ok: true,
       description,
       sceneType,
       hasFace,
-      faceCount: hasFace ? 1 : 0,
-      attributes: { hasBeard, hasGlasses, hasWhiteHair, isNight, isNature, isColorful, isArchitecture },
+      faceCount,
+      attributes,
       keywordSuggestions,
-      imageUrl: file_url,
+      importKeywords,
+      imageUrl: directUrl ?? '(uploaded file)',
     });
   } catch (e: any) {
-    console.error('[fal.ai analyze] Error:', e);
+    console.error('[Gemini analyze] Error:', e);
     return res.status(500).json({ ok: false, error: e.message ?? String(e) });
   }
 });

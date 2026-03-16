@@ -381,6 +381,13 @@ export default function Admin() {
   const [importAllBatch, setImportAllBatch] = useState(500)
   const [importAllRunning, setImportAllRunning] = useState(false)
   const [importCategory, setImportCategory] = useState<string>('')  // selected category for targeted import
+  // Freie Keyword-Eingabe
+  const [customKeywords, setCustomKeywords] = useState<string>('')  // comma-separated keywords
+  const [customKeywordSource, setCustomKeywordSource] = useState<'pexels' | 'unsplash' | 'pixabay'>('pixabay')
+  const [customKeywordCount, setCustomKeywordCount] = useState(100)
+  const [customKeywordLoading, setCustomKeywordLoading] = useState(false)
+  const [customKeywordResult, setCustomKeywordResult] = useState<string>('')
+  const [customKeywordPreview, setCustomKeywordPreview] = useState<Array<{query: string; count: number; status: string}>>([])
   // Gezielte Importe (Empfehlungen)
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
   const [recsLoading, setRecsLoading] = useState(false)
@@ -1187,6 +1194,73 @@ export default function Admin() {
                 )}
               </div>
 
+              {/* ── Freie Keyword-Eingabe ── */}
+              <div className="mb-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-semibold text-emerald-900">🔍 Eigene Keywords importieren</span>
+                  <span className="text-xs text-emerald-600">Kommagetrennte Keywords – jedes Keyword wird separat importiert</span>
+                </div>
+                <textarea
+                  value={customKeywords}
+                  onChange={e => setCustomKeywords(e.target.value)}
+                  placeholder="z.B. white fog minimal, pure white background, snow texture, dark night sky, dark wood texture, monochrome blue abstract"
+                  rows={3}
+                  className="w-full text-sm border border-emerald-300 rounded-lg px-3 py-2 bg-white text-gray-800 resize-none mb-2 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+                <div className="flex items-center gap-3 flex-wrap">
+                  <select
+                    value={customKeywordSource}
+                    onChange={e => setCustomKeywordSource(e.target.value as 'pexels' | 'unsplash' | 'pixabay')}
+                    className="text-sm border border-emerald-300 rounded-lg px-3 py-1.5 bg-white text-gray-800"
+                    disabled={customKeywordLoading}
+                  >
+                    <option value="pixabay">🟠 Pixabay (200/Keyword, empfohlen)</option>
+                    <option value="pexels">🟢 Pexels (80/Keyword)</option>
+                    <option value="unsplash">🟣 Unsplash (30/Keyword)</option>
+                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-emerald-700">Bilder/Keyword:</span>
+                    <input
+                      type="number"
+                      value={customKeywordCount}
+                      onChange={e => setCustomKeywordCount(Math.max(10, Math.min(500, Number(e.target.value))))} 
+                      className="w-20 text-sm border border-emerald-300 rounded-lg px-2 py-1.5 text-center"
+                      min={10} max={500} step={10}
+                      disabled={customKeywordLoading}
+                    />
+                  </div>
+                  <button
+                    onClick={runCustomKeywordImport}
+                    disabled={customKeywordLoading || !customKeywords.trim()}
+                    className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm"
+                  >
+                    {customKeywordLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>▶</span>}
+                    {customKeywordLoading ? 'Läuft...' : '🔍 Import starten'}
+                  </button>
+                </div>
+                {customKeywords.trim() && (
+                  <div className="mt-2 text-xs text-emerald-700">
+                    {customKeywords.split(',').filter(k => k.trim()).length} Keywords erkannt: 
+                    {customKeywords.split(',').filter(k => k.trim()).map((k, i) => (
+                      <span key={i} className="inline-block bg-emerald-100 text-emerald-800 rounded px-1.5 py-0.5 mr-1 mb-1">{k.trim()}</span>
+                    ))}
+                  </div>
+                )}
+                {customKeywordResult && (
+                  <div className={`mt-2 text-xs font-medium ${customKeywordResult.startsWith('❌') ? 'text-red-600' : 'text-emerald-700'}`}>{customKeywordResult}</div>
+                )}
+                {customKeywordPreview.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {customKeywordPreview.map((p, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <span className="font-medium text-gray-700 truncate flex-1">"{p.query}"</span>
+                        <span className={p.status.startsWith('✅') ? 'text-green-600' : p.status.startsWith('❌') ? 'text-red-500' : 'text-amber-500'}>{p.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* Alle gleichzeitig */}
               <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
                 <div className="flex-1 min-w-0">
@@ -1486,6 +1560,40 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setQuickImportLoading(null)
     }
   }, [fetchDbStats, fetchImages])
+
+  const runCustomKeywordImport = useCallback(async () => {
+    const keywords = customKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
+    if (keywords.length === 0) { setCustomKeywordResult('❌ Bitte mindestens ein Keyword eingeben'); return }
+    setCustomKeywordLoading(true)
+    setCustomKeywordResult(`⏳ Starte Import für ${keywords.length} Keywords via ${customKeywordSource}...`)
+    setCustomKeywordPreview(keywords.map(q => ({ query: q, count: 0, status: '⏳' })))
+    let totalImported = 0
+    for (let i = 0; i < keywords.length; i++) {
+      const query = keywords[i]
+      setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: '⏳ läuft...' } : p))
+      try {
+        const res = await fetch('/api/trpc/targetedImport', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount }),
+        })
+        const data = await res.json()
+        if (data.result?.data?.started || data.started) {
+          setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: `✅ gestartet (~${customKeywordCount} Bilder)` } : p))
+          totalImported += customKeywordCount
+        } else {
+          setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${data.result?.data?.error ?? 'Fehler'}` } : p))
+        }
+      } catch {
+        setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: '❌ Netzwerkfehler' } : p))
+      }
+      // Small delay between requests to avoid rate limiting
+      if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 500))
+    }
+    setCustomKeywordResult(`✅ Import gestartet: ${keywords.length} Keywords, ca. ${totalImported} Bilder via ${customKeywordSource}`)
+    setCustomKeywordLoading(false)
+    setTimeout(() => { fetchDbStats(); fetchImages(1) }, 10000)
+  }, [customKeywords, customKeywordSource, customKeywordCount, fetchDbStats, fetchImages])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter])

@@ -1262,6 +1262,42 @@ export const appRouter = router({
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
           // Track if Unsplash is rate-limited → fall back to Pexels automatically
           let unsplashRateLimited = false;
+          let pexelsRateLimited = false;
+          let pexelsRateLimitUntil = 0; // timestamp until which Pexels is rate-limited
+
+          // Helper: fetch from Pexels with automatic backoff on 429
+          const fetchPexels = async (query: string, perPg: number, key: string): Promise<Array<{sourceUrl: string; tile128Url: string}>> => {
+            if (pexelsRateLimited && Date.now() < pexelsRateLimitUntil) return [];
+            const res = await fetch(
+              `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${perPg}&orientation=square`,
+              { headers: { Authorization: key } }
+            );
+            if (res.status === 429) {
+              const retryAfter = parseInt(res.headers.get('Retry-After') ?? '60', 10);
+              pexelsRateLimited = true;
+              pexelsRateLimitUntil = Date.now() + retryAfter * 1000;
+              log(`⏳ Pexels 429 – warte ${retryAfter}s (bis ${new Date(pexelsRateLimitUntil).toLocaleTimeString('de-CH')})`);
+              return [];
+            }
+            if (!res.ok) { log(`⚠️ Pexels ${res.status} for "${query}"`); return []; }
+            pexelsRateLimited = false;
+            const data = await res.json() as any;
+            return (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+          };
+
+          // Helper: fetch from Pixabay
+          const fetchPixabay = async (query: string, perPg: number, key: string): Promise<Array<{sourceUrl: string; tile128Url: string}>> => {
+            const res = await fetch(
+              `https://pixabay.com/api/?key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&per_page=${perPg}&image_type=photo&safesearch=true&orientation=horizontal`,
+              { headers: { Accept: 'application/json' } }
+            );
+            if (!res.ok) { log(`⚠️ Pixabay ${res.status} for "${query}"`); return []; }
+            const data = await res.json() as any;
+            return (data.hits ?? []).map((p: any) => ({
+              sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
+              tile128Url: p.webformatURL || p.previewURL || '',
+            })).filter((p: any) => p.tile128Url);
+          };
 
           // If specific keywords provided (from image analysis), use them directly
           // Otherwise fall back to DB gap analysis
@@ -1285,16 +1321,12 @@ export const appRouter = router({
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.sourceId === "pexels") {
-                const res = await fetch(
-                  `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=square`,
-                  { headers: { Authorization: apiKey } }
-                );
-                if (!res.ok) { log(`⚠️ Pexels API error ${res.status} for "${task.query}"`); continue; }
-                const data = await res.json() as any;
-                photos = (data.photos ?? []).map((p: any) => ({
-                  sourceUrl: p.src.large,
-                  tile128Url: p.src.small,
-                }));
+                photos = await fetchPexels(task.query, perPage, apiKey);
+                // Auto-fallback to Pixabay when Pexels is rate-limited
+                if (photos.length === 0 && pexelsRateLimited && process.env.PIXABAY_API_KEY) {
+                  log(`🔄 Pexels rate-limited → Pixabay fallback for "${task.query}"`);
+                  photos = await fetchPixabay(task.query, 200, process.env.PIXABAY_API_KEY);
+                }
               } else if (input.sourceId === "pixabay") {
                 const res = await fetch(
                   `https://pixabay.com/api/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(task.query)}&per_page=${perPage}&image_type=photo&safesearch=true&orientation=horizontal`,
@@ -1389,6 +1421,37 @@ export const appRouter = router({
           }
           log(`✅ Smart Import fertig: ${imported} neue Bilder importiert`);
           smartImportJobs[jobKey].finishedAt = new Date().toISOString();
+
+          // ── Import-Bericht erstellen ──
+          try {
+            const pool = db.getPool();
+            const totalRes = await pool.query('SELECT COUNT(*) FROM mosaic_images');
+            const totalTiles = Number(totalRes.rows[0].count);
+            // Gather per-keyword stats from log
+            const keywordStats: Array<{query: string; imported: number; rejected: number}> = [];
+            for (const line of smartImportJobs[jobKey].log) {
+              const m = line.match(/"([^"]+)":\s\+(\d+) importiert,\s(\d+) abgelehnt/);
+              if (m) keywordStats.push({ query: m[1], imported: Number(m[2]), rejected: Number(m[3]) });
+            }
+            const report = {
+              timestamp: new Date().toISOString(),
+              jobKey,
+              source: input.sourceId,
+              duration: smartImportJobs[jobKey].finishedAt && smartImportJobs[jobKey].startedAt
+                ? Math.round((new Date(smartImportJobs[jobKey].finishedAt!).getTime() - new Date(smartImportJobs[jobKey].startedAt!).getTime()) / 1000)
+                : null,
+              imported,
+              totalTilesAfter: totalTiles,
+              pexelsRateLimited,
+              keywordStats: keywordStats.sort((a, b) => b.imported - a.imported),
+              topImported: keywordStats.filter(k => k.imported > 0).slice(0, 10),
+              log: smartImportJobs[jobKey].log.slice(-50),
+            };
+            // Store report in job status for retrieval
+            (smartImportJobs[jobKey] as any).report = report;
+            log(`📊 Bericht erstellt: ${keywordStats.length} Keywords, ${imported} importiert, ${totalTiles} total`);
+          } catch (e) { log(`⚠️ Bericht-Fehler: ${e}`); }
+
         } catch (e: unknown) {
           smartImportJobs[jobKey].error = e instanceof Error ? e.message : String(e);
         } finally {
@@ -1403,7 +1466,18 @@ export const appRouter = router({
     .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
       const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
-      return smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
+      const job = smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
+      return { ...job, report: (job as any).report ?? null };
+    }),
+
+  // Admin: Get last import report (JSON download)
+  getLastImportReport: publicProcedure
+    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"), isAnalysis: z.boolean().optional() }))
+    .query(({ input }) => {
+      const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
+      const job = smartImportJobs[jobKey];
+      if (!job) return null;
+      return (job as any).report ?? null;
     }),
 
   // Admin: Get import recommendations from analyzeDbGaps
