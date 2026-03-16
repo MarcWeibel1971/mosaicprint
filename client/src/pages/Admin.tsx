@@ -744,6 +744,39 @@ export default function Admin() {
     } finally { setActiveJob(null) }
   }
 
+  const runCustomKeywordImport = async () => {
+    const keywords = customKeywords.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0)
+    if (keywords.length === 0) { setCustomKeywordResult('❌ Bitte mindestens ein Keyword eingeben'); return }
+    setCustomKeywordLoading(true)
+    setCustomKeywordResult(`⏳ Starte Import für ${keywords.length} Keywords via ${customKeywordSource}...`)
+    setCustomKeywordPreview(keywords.map((q: string) => ({ query: q, count: 0, status: '⏳' })))
+    let totalImported = 0
+    for (let i = 0; i < keywords.length; i++) {
+      const query = keywords[i]
+      setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '⏳ läuft...' } : p))
+      try {
+        const res = await fetch('/api/trpc/targetedImport', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount }),
+        })
+        const data = await res.json()
+        if (data.result?.data?.started || data.started) {
+          setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `✅ gestartet (~${customKeywordCount} Bilder)` } : p))
+          totalImported += customKeywordCount
+        } else {
+          setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${data.result?.data?.error ?? 'Fehler'}` } : p))
+        }
+      } catch {
+        setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '❌ Netzwerkfehler' } : p))
+      }
+      if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 500))
+    }
+    setCustomKeywordResult(`✅ Import gestartet: ${keywords.length} Keywords, ca. ${totalImported} Bilder via ${customKeywordSource}`)
+    setCustomKeywordLoading(false)
+    setTimeout(() => fetchStats(), 10000)
+  }
+
   const msgColors = {
     success: 'bg-green-50 border-green-200 text-green-800',
     error: 'bg-red-50 border-red-200 text-red-800',
@@ -1560,40 +1593,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setQuickImportLoading(null)
     }
   }, [fetchDbStats, fetchImages])
-
-  const runCustomKeywordImport = useCallback(async () => {
-    const keywords = customKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
-    if (keywords.length === 0) { setCustomKeywordResult('❌ Bitte mindestens ein Keyword eingeben'); return }
-    setCustomKeywordLoading(true)
-    setCustomKeywordResult(`⏳ Starte Import für ${keywords.length} Keywords via ${customKeywordSource}...`)
-    setCustomKeywordPreview(keywords.map(q => ({ query: q, count: 0, status: '⏳' })))
-    let totalImported = 0
-    for (let i = 0; i < keywords.length; i++) {
-      const query = keywords[i]
-      setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: '⏳ läuft...' } : p))
-      try {
-        const res = await fetch('/api/trpc/targetedImport', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount }),
-        })
-        const data = await res.json()
-        if (data.result?.data?.started || data.started) {
-          setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: `✅ gestartet (~${customKeywordCount} Bilder)` } : p))
-          totalImported += customKeywordCount
-        } else {
-          setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${data.result?.data?.error ?? 'Fehler'}` } : p))
-        }
-      } catch {
-        setCustomKeywordPreview(prev => prev.map((p, idx) => idx === i ? { ...p, status: '❌ Netzwerkfehler' } : p))
-      }
-      // Small delay between requests to avoid rate limiting
-      if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 500))
-    }
-    setCustomKeywordResult(`✅ Import gestartet: ${keywords.length} Keywords, ca. ${totalImported} Bilder via ${customKeywordSource}`)
-    setCustomKeywordLoading(false)
-    setTimeout(() => { fetchDbStats(); fetchImages(1) }, 10000)
-  }, [customKeywords, customKeywordSource, customKeywordCount, fetchDbStats, fetchImages])
 
   useEffect(() => { fetchDbStats() }, [fetchDbStats])
   useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, semanticThemeFilter])
