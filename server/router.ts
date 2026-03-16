@@ -253,6 +253,42 @@ const ABSTRACT_LOW_EDGE_KEYWORDS = [
   "smooth silk texture neutral", "gentle blur abstract warm",
 ];
 
+// CALM_NATURE_KEYWORDS: Natural calm tiles (sky, water, fog, bokeh) – the most important
+// category for smooth portrait mosaics. These are the "boring" tiles that make mosaics smooth.
+// Target: 30% of DB. Priority: HIGHEST.
+const CALM_NATURE_KEYWORDS = [
+  // Sky gradients (most important – maps to skin highlights, backgrounds)
+  "clear blue sky gradient minimal", "overcast sky soft gray", "pale sky horizon minimal",
+  "sunrise sky gradient soft", "sunset sky gradient orange pink", "golden hour sky smooth",
+  "blue sky cloudless minimal", "white sky overcast soft", "dawn sky gradient pale",
+  "dusk sky gradient purple", "hazy sky minimal", "morning sky soft light",
+  // Fog and mist (maps to pale skin, highlights, soft backgrounds)
+  "fog mist minimal soft", "morning fog landscape", "misty forest soft",
+  "haze soft minimal", "foggy morning field", "mist water reflection",
+  "soft mist abstract", "fog neutral minimal", "misty mountain soft gray",
+  "foggy lake morning", "white mist minimal", "soft haze neutral",
+  // Water surfaces (calm, reflective – maps to cool skin tones)
+  "calm water surface reflection", "still lake reflection", "ocean horizon calm",
+  "smooth water abstract", "blue water surface minimal", "water reflection soft",
+  "calm sea surface", "lake water smooth", "river reflection calm",
+  "water texture smooth blue", "ocean calm minimal", "still water abstract",
+  // Bokeh backgrounds (most useful for portrait mosaics)
+  "bokeh background soft blur", "out of focus background neutral", "defocused background warm",
+  "blurred background abstract", "bokeh lights soft", "soft focus background",
+  "warm bokeh blur", "cool bokeh blur", "neutral bokeh background",
+  "defocused green bokeh", "blurred warm bokeh", "soft bokeh minimal",
+  // Fabric and textile (maps to clothing areas)
+  "fabric texture smooth minimal", "linen texture neutral", "cotton fabric smooth",
+  "silk texture smooth", "wool texture soft", "canvas texture neutral",
+  "smooth cloth texture", "fabric background minimal", "textile texture smooth",
+  // Sand and earth (maps to warm skin tones)
+  "sand texture smooth minimal", "beach sand closeup", "fine sand texture",
+  "sandy beach smooth", "desert sand minimal", "warm sand abstract",
+  // Paper and minimal surfaces
+  "paper texture minimal white", "blank paper background", "white paper smooth",
+  "cream paper texture", "off-white paper minimal", "light paper background",
+];
+
 // CALM_MONOCHROME_KEYWORDS: Single-hue, low-texture tiles for backgrounds and clothing
 // These are ruhige Naturbilder with a single dominant color tone — ideal for:
 //   - Dark clothing (navy, charcoal, forest green)
@@ -481,6 +517,23 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
+  // ── Step 2b2: Calm Nature tiles (HIGHEST PRIORITY – sky, water, fog, bokeh) ──
+  // Target: 30% of DB. These are the most important tiles for smooth portrait mosaics.
+  // "70% boring" principle: calm tiles should dominate the pool.
+  {
+    const calmNatureCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'calm_nature'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const calmNaturePct = calmNatureCnt / total;
+    const calmNaturePriority = Math.max(0, (0.30 - calmNaturePct) / 0.30) * 3.5; // max 3.5 – HIGHEST
+    if (calmNaturePriority > 0.05) {
+      const deficit = Math.round((0.30 - calmNaturePct) * total);
+      for (const kw of CALM_NATURE_KEYWORDS) {
+        tasks.push({ query: kw, priority: calmNaturePriority, deficit, label: `🌤️ Calm-Natur (Sky/Fog/Water/Bokeh) (${Math.round(calmNaturePct*100)}% → Ziel 30%)`, subject: 'calm_nature' });
+      }
+    }
+  }
+
   // ── Step 2b2: Calm Monochrome tiles ──
   // Target: 20% of DB. Single-hue, low-texture tiles for backgrounds and clothing.
   // These reduce graininess in uniform areas (dark jackets, light backgrounds).
@@ -489,7 +542,7 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'calm_monochrome'`
     ).then(r => Number(r.rows[0]?.cnt ?? 0));
     const calmPct = calmCnt / total;
-    const calmPriority = Math.max(0, (0.20 - calmPct) / 0.20) * 2.5; // max 2.5
+    const calmPriority = Math.max(0, (0.20 - calmPct) / 0.20) * 3.0; // max 3.0 (erhöht von 2.5)
     if (calmPriority > 0.05) {
       const deficit = Math.round((0.20 - calmPct) * total);
       for (const kw of CALM_MONOCHROME_KEYWORDS) {
@@ -505,7 +558,7 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'abstract_smooth'`
     ).then(r => Number(r.rows[0]?.cnt ?? 0));
     const abstractPct = abstractCnt / total;
-    const abstractPriority = Math.max(0, (0.25 - abstractPct) / 0.25) * 2.0; // max 2.0 – target 25% (was 20%)
+    const abstractPriority = Math.max(0, (0.25 - abstractPct) / 0.25) * 2.8; // max 2.8 (erhöht von 2.0)
     if (abstractPriority > 0.05) {
       const deficit = Math.round((0.25 - abstractPct) * total);
       for (const kw of ABSTRACT_LOW_EDGE_KEYWORDS) {
@@ -620,7 +673,16 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
   }
 
   // Sort by priority descending (most needed first)
-  tasks.sort((a, b) => b.priority - a.priority);
+  // Boost calm categories to ensure they dominate imports
+  tasks.sort((a, b) => {
+    // Calm categories always first
+    const calmSubjects = ['calm_nature', 'calm_monochrome', 'abstract_smooth'];
+    const aIsCalm = calmSubjects.includes(a.subject);
+    const bIsCalm = calmSubjects.includes(b.subject);
+    if (aIsCalm && !bIsCalm) return -1;
+    if (!aIsCalm && bIsCalm) return 1;
+    return b.priority - a.priority;
+  });
   return tasks;
 }
 
@@ -846,8 +908,12 @@ async function checkTileQuality(url: string, subject?: string): Promise<QualityR
     // Use relaxed thresholds for portrait subjects to avoid over-filtering
     const isPortraitSubject = subject === 'portrait' || subject === 'portrait_nature' ||
       subject === 'analysis' || subject === 'face';
-    const satThreshold = isPortraitSubject ? 0.75 : 0.65;  // portraits can be more saturated
-    const edgeThreshold = isPortraitSubject ? 0.85 : 0.60;  // portraits have high edge energy
+    // Calm subjects (sky, water, fog, bokeh) have naturally low edge energy
+    // Use very lenient thresholds to avoid over-filtering these critical tiles
+    const isCalmSubject = subject === 'calm_nature' || subject === 'calm_monochrome' ||
+      subject === 'abstract_smooth' || subject === 'skin_tone';
+    const satThreshold = isPortraitSubject ? 0.75 : isCalmSubject ? 0.70 : 0.65;
+    const edgeThreshold = isPortraitSubject ? 0.85 : isCalmSubject ? 0.75 : 0.60;  // calm tiles: lenient
     const reasons: string[] = [];
     if (saturation > satThreshold) reasons.push(`sat=${saturation.toFixed(2)}>${satThreshold}`);
     if (edgeEnergy  > edgeThreshold) reasons.push(`edge=${edgeEnergy.toFixed(2)}>${edgeThreshold}`);
