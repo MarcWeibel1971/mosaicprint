@@ -130,7 +130,7 @@ const PRESET_PROFILES: Profile[] = [
       baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0,
       brightnessWeight: 0.45, labWeight: 0.30, textureWeight: 0.12, edgeWeight: 0.13,
       contrastBoost: 1.28, histogramBlend: 0.08, overlayMode: 'softlight', enableRotation: false,
-      neighborRadius: 5, neighborPenalty: 240,
+      neighborRadius: 6, neighborPenalty: 400,
     }
   },
   {
@@ -3029,9 +3029,12 @@ function ProfilePopup({ profile, onClose, onApply }: {
           <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Farb-Korrektur</p>
           {numField('contrastBoost', 'Kontrast-Boost', 1.0, 1.8, 0.05, v => v.toFixed(2)+'×')}
           {numField('histogramBlend', 'Farb-Transfer', 0, 0.15, 0.01, v => Math.round(v*650)+'%')}
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Farb-Overlay</p>
+          {numField('baseOverlay', 'Basis-Overlay', 0, 0.5, 0.01, v => Math.round(v*100)+'%')}
+          {numField('edgeBoost', 'Kanten-Boost', 0, 0.5, 0.01, v => Math.round(v*100)+'%')}
           <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 mt-4">Anti-Repetition</p>
           {numField('neighborRadius', 'Radius', 1, 20, 1)}
-          {numField('neighborPenalty', 'Penalty', 0, 500, 10)}
+          {numField('neighborPenalty', 'Penalty', 0, 600, 10)}
           <div className="flex items-center justify-between py-2 border-b border-gray-100">
             <span className="text-xs font-medium text-gray-700">Overlay-Modus</span>
             <div className="flex gap-1">
@@ -3184,8 +3187,11 @@ function AlgorithmSettings() {
           <SliderRow label="Kanten-Boost" desc="Zusätzlicher Overlay an Kanten/Konturen. Höher = schärfere Konturen." settingKey="edgeBoost" min={0} max={0.5} step={0.01} format={v => (v * 100).toFixed(0) + '%'} />
 
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 mt-6">Anti-Repetition</h3>
-          <SliderRow label="Nachbar-Radius" desc="Wie viele Kacheln um eine Kachel herum auf Wiederholung geprüft werden." settingKey="neighborRadius" min={1} max={8} />
-          <SliderRow label="Nachbar-Penalty" desc="Stärke der Bestrafung für wiederholte Kacheln in der Nähe. Höher = mehr Vielfalt." settingKey="neighborPenalty" min={0} max={500} step={10} />
+          <div className="mb-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+            ⚠️ <strong>Hinweis:</strong> Bei Portrait-Bildern werden Nachbar-Radius und Nachbar-Penalty durch das Portrait-Preset überschrieben (aktuell: Radius 6, Penalty 400). Änderungen hier wirken nur bei Nicht-Portrait-Bildern.
+          </div>
+          <SliderRow label="Nachbar-Radius" desc="Wie viele Kacheln um eine Kachel herum auf Wiederholung geprüft werden. Bei Portraits: durch Preset gesperrt (6)." settingKey="neighborRadius" min={1} max={10} />
+          <SliderRow label="Nachbar-Penalty" desc="Stärke der Bestrafung für wiederholte Kacheln in der Nähe. Höher = mehr Vielfalt. Bei Portraits: durch Preset gesperrt (400)." settingKey="neighborPenalty" min={0} max={600} step={10} />
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 mt-6">Mobile-Optimierung</h3>
           <SliderRow label="Mobile Max Tiles" desc="Maximale Anzahl einzigartiger Kacheln auf Mobilgeräten. Höher = bessere Qualität, mehr RAM-Verbrauch. Empfohlen: 1500–5000. Bis 10000 für Tests möglich." settingKey="mobileMaxTiles" min={500} max={10000} step={500} />
           <SliderRow label="Blur-Overlay Opacity" desc="Stärke des 1px-Blur-Überlagerungseffekts auf Kachel-Rändern. 0% = aus, 8% = subtil (Standard), 20-30% = sichtbar weicher. Nur im Modus 'none' aktiv." settingKey="blurOpacity" min={0} max={0.30} step={0.01} format={v => Math.round(v * 100) + '%'} />

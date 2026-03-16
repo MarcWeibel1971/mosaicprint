@@ -724,11 +724,11 @@ export default function Studio() {
           } else if (imageType === 'portrait') {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
-              tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
-              maxReuse: 6,            // allow reuse: prevents forced bad matches
-              rotation: false,        // no rotation: keeps tile orientation consistent
-              neighborRadius: 5,
-              neighborPenalty: 280,   // higher penalty: less tile repetition = more detail
+               tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
+               maxReuse: 4,            // reduced: prevents forced bad matches (was 6)
+               rotation: false,        // no rotation: keeps tile orientation consistent
+               neighborRadius: 6,      // wider radius: more anti-repetition (was 5)
+               neighborPenalty: 400,   // VERSCHÄRFT: less tile repetition = more detail (was 280)
               contrastBoost: 1.35,    // stronger contrast for crisp edges
               histogramBlend: 0.09,   // slightly more blend for smoother skin tones
               baseOverlay: 0.22,      // stronger overlay for clearer mosaic structure
@@ -821,7 +821,7 @@ export default function Studio() {
                 };
                 if (falHasFace && imageType !== 'portrait') {
                   // fal.ai found a face but heuristic missed it
-                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 6, rotation: false, neighborRadius: 5, neighborPenalty: 280, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
+                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 4, rotation: false, neighborRadius: 6, neighborPenalty: 400, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
                   localStorage.removeItem('mosaicprint_selected_theme');
                   setAutoPresetApplied('Portrait');
@@ -905,12 +905,12 @@ export default function Studio() {
               {
                 key: 'portrait', label: 'Portrait', emoji: '👤',
                 score: (imageType === 'portrait') ? 3.0 : warmRatio * 0.8 + brightRatio * 0.5,
-                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.30, textureWeight: 0.12, edgeWeight: 0.13, contrastBoost: 1.28, histogramBlend: 0.08, overlayMode: 'softlight', enableRotation: false, neighborRadius: 5, neighborPenalty: 240 }
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.20, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.30, textureWeight: 0.12, edgeWeight: 0.13, contrastBoost: 1.28, histogramBlend: 0.08, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 400 }
               },
               {
                 key: 'portrait_dark', label: 'Portrait dunkel', emoji: '🧑🏿',
                 score: (imageType === 'portrait' && darkRatio > 0.35) ? 2.5 : 0,
-                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.18, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.35, textureWeight: 0.10, edgeWeight: 0.10, contrastBoost: 1.15, histogramBlend: 0.09, overlayMode: 'softlight', enableRotation: false, neighborRadius: 5, neighborPenalty: 220 }
+                profileSettings: { baseTiles: 120, tilePx: 8, baseOverlay: 0.18, edgeBoost: 0.0, brightnessWeight: 0.45, labWeight: 0.35, textureWeight: 0.10, edgeWeight: 0.10, contrastBoost: 1.15, histogramBlend: 0.09, overlayMode: 'softlight', enableRotation: false, neighborRadius: 6, neighborPenalty: 380 }
               },
               {
                 key: 'white_hair', label: 'Weiße Haare', emoji: '👴',
@@ -1313,18 +1313,20 @@ export default function Studio() {
              const tileComplexity = labIndex[i + 15]; // 0=calm, 0.5=medium, 1=busy
              const cellEdge = targetEdge; // 0-1 target edge energy (passed as parameter)
              if (cellEdge < 0.15) {
-               // Very smooth target (sky, fog, skin highlight): strongly penalize busy tiles
-               if (tileComplexity > 0.40) dist += (tileComplexity - 0.40) * 600; // up to +360
+               // Very smooth target (sky, fog, skin highlight): AGGRESSIVELY penalize busy tiles
+               if (tileComplexity > 0.30) dist += (tileComplexity - 0.30) * 900; // up to +630 (was +360)
              } else if (cellEdge < 0.30) {
-               // Smooth target (skin, calm water, background): penalize busy tiles
-               if (tileComplexity > 0.50) dist += (tileComplexity - 0.50) * 400; // up to +200
+               // Smooth target (skin, calm water, background): strongly penalize busy tiles
+               if (tileComplexity > 0.40) dist += (tileComplexity - 0.40) * 700; // up to +420 (was +200)
              } else if (cellEdge < 0.50) {
-               // Moderate target (face skin, gradients): penalize very busy tiles
-               // This is the critical range for portrait skin areas!
-               if (tileComplexity > 0.65) dist += (tileComplexity - 0.65) * 250; // up to +87
-             } else if (cellEdge > 0.50 && tileComplexity < 0.2) {
+               // Moderate target (face skin, gradients): penalize busy tiles
+               if (tileComplexity > 0.55) dist += (tileComplexity - 0.55) * 500; // up to +225 (was +87)
+             } else if (cellEdge < 0.70) {
+               // Higher-edge target: still penalize very busy tiles
+               if (tileComplexity > 0.75) dist += (tileComplexity - 0.75) * 300; // up to +75 (new)
+             } else if (cellEdge > 0.70 && tileComplexity < 0.2) {
                // Very detailed target + calm tile = mild penalty (calm tiles lack detail for edges)
-               dist += (0.2 - tileComplexity) * 100; // up to +20
+               dist += (0.2 - tileComplexity) * 80; // up to +16
              }
            }
         } else if (IS_7D) {
@@ -2224,21 +2226,30 @@ export default function Studio() {
                  dist += 150; // stronger: push non-skin-subject tiles down in face ranking
                }
              }
-             // tileComplexity Penalty in Face (Stage-2):
+             // tileComplexity Penalty in Face (Stage-2) - VERSCHÄRFT:
              // Penalize busy/detailed tiles in smooth skin areas.
              // Eye zone allows complexity (eyebrows, lashes), skin/cheek/forehead must be calm.
              {
                const faceTileCx = mf.edgeEnergy; // proxy for tileComplexity (0=calm, 1=busy)
                const faceCellEdge = edgeMap[ci];  // 0-1 target edge energy
                if (subRegion === 'cheek' || subRegion === 'forehead' || subRegion === 'nose') {
-                 // Skin areas: penalize busy tiles even in moderate-edge cells
-                 if (faceCellEdge < 0.50 && faceTileCx > 0.45) {
-                   dist += (faceTileCx - 0.45) / 0.55 * 120; // up to +120 in skin zones
+                 // Skin areas: AGGRESSIVELY penalize busy tiles
+                 if (faceCellEdge < 0.25 && faceTileCx > 0.30) {
+                   dist += (faceTileCx - 0.30) * 600; // up to +420 (was +120)
+                 } else if (faceCellEdge < 0.50 && faceTileCx > 0.40) {
+                   dist += (faceTileCx - 0.40) * 400; // up to +240 (was +120)
+                 } else if (faceCellEdge < 0.70 && faceTileCx > 0.60) {
+                   dist += (faceTileCx - 0.60) * 200; // up to +80 (new)
                  }
                } else if (subRegion === 'mouth') {
                  // Mouth: some complexity OK (lip texture), but not too busy
-                 if (faceCellEdge < 0.35 && faceTileCx > 0.55) {
-                   dist += (faceTileCx - 0.55) / 0.45 * 80;
+                 if (faceCellEdge < 0.50 && faceTileCx > 0.50) {
+                   dist += (faceTileCx - 0.50) * 300; // up to +150 (was +80)
+                 }
+               } else if (subRegion === 'chin' || subRegion === 'jaw') {
+                 // Chin/jaw: smooth areas, penalize busy tiles
+                 if (faceCellEdge < 0.40 && faceTileCx > 0.40) {
+                   dist += (faceTileCx - 0.40) * 350; // up to +210 (new)
                  }
                }
                // Eye zone: no tileComplexity penalty (eyes need detail)
@@ -2361,29 +2372,33 @@ export default function Studio() {
             dist += (15 - tileBr) / 15 * (targetBr - 70) / 30 * 2 * 100; // up to +200 for near-black tile in very bright area
           }
 
-          // FIX 2: SMOOTH-REGION → CALM-TILES RULE
+          // FIX 2: SMOOTH-REGION → CALM-TILES RULE (VERSCHÄRFT)
           // If target cell is smooth (low edgeEnergy), only allow calm tiles
           // This prevents busy/detailed tiles from appearing in sky, water, fog, haze
           const cellEdgeEnergy = edgeMap[ci]; // 0-1: how much edge/detail in target cell
           const tileEdgeEnergy = mf.edgeEnergy; // 0-1: how much edge/detail in tile
           if (cellEdgeEnergy < 0.15) {
-            // Very smooth target (sky, fog, calm water): strongly penalize busy tiles
-            if (tileEdgeEnergy > 0.35) {
-              dist += (tileEdgeEnergy - 0.35) * 600; // up to +390 for very busy tile in smooth area
+            // Very smooth target (sky, fog, calm water): AGGRESSIVELY penalize busy tiles
+            if (tileEdgeEnergy > 0.25) {
+              dist += (tileEdgeEnergy - 0.25) * 1000; // up to +750 (was +390)
             }
           } else if (cellEdgeEnergy < 0.30) {
-            // Moderately smooth target: penalize very busy tiles
-            if (tileEdgeEnergy > 0.55) {
-              dist += (tileEdgeEnergy - 0.55) * 300; // up to +135 for very busy tile
+            // Smooth target: strongly penalize busy tiles
+            if (tileEdgeEnergy > 0.40) {
+              dist += (tileEdgeEnergy - 0.40) * 700; // up to +420 (was +135)
+            }
+          } else if (cellEdgeEnergy < 0.50) {
+            // Moderate target: penalize very busy tiles
+            if (tileEdgeEnergy > 0.60) {
+              dist += (tileEdgeEnergy - 0.60) * 400; // up to +160 (new tier)
             }
           }
 
-          // FIX 3: EDGE-MISMATCH PENALTY (stronger than current edgeWeight)
-          // The existing edgeWeight term is adaptive (0.05-0.50) but not enough for smooth regions
+          // FIX 3: EDGE-MISMATCH PENALTY (VERSCHÄRFT)
           // Add an explicit mismatch penalty: if cell is smooth but tile is detailed, penalize hard
-          if (cellEdgeEnergy < 0.20 && tileEdgeEnergy > 0.50) {
+          if (cellEdgeEnergy < 0.25 && tileEdgeEnergy > 0.45) {
             // Smooth cell + busy tile = very bad match
-            dist += (tileEdgeEnergy - 0.50) * (0.20 - cellEdgeEnergy) * 1000;
+            dist += (tileEdgeEnergy - 0.45) * (0.25 - cellEdgeEnergy) * 1500; // was 1000
           }
 
           // FIX 4: DARK-REGION PROTECTION
