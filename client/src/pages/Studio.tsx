@@ -1443,10 +1443,18 @@ export default function Studio() {
             blob = await atlasResp.blob();
           }
           const atlasUrl = URL.createObjectURL(blob);
+          // Debug: log blob size and type
+          console.log(`[Studio] Atlas blob: ${blob.size} bytes, type=${blob.type}, url=${atlasUrl.slice(0,40)}`);
           const atlasImg = await new Promise<HTMLImageElement>((resolve, reject) => {
             const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = reject;
+            img.onload = () => {
+              console.log(`[Studio] Atlas img loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+              resolve(img);
+            };
+            img.onerror = (e) => {
+              console.error(`[Studio] Atlas img FAILED to load. Blob size=${blob.size}, type=${blob.type}`, e);
+              reject(new Error(`Atlas image load failed: blob size=${blob.size}`));
+            };
             img.src = atlasUrl;
           });
           const offscreen = document.createElement('canvas');
