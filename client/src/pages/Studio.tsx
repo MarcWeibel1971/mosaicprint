@@ -1312,9 +1312,16 @@ export default function Studio() {
            if (IS_16D) {
              const tileComplexity = labIndex[i + 15]; // 0=calm, 0.5=medium, 1=busy
              const cellEdge = targetEdge; // 0-1 target edge energy (passed as parameter)
-             if (cellEdge < 0.15 && tileComplexity > 0.6) {
-               // Very smooth target + busy tile = strong penalty
-               dist += (tileComplexity - 0.6) * 500; // up to +200 for very busy tile in smooth area
+             if (cellEdge < 0.15) {
+               // Very smooth target (sky, fog, skin highlight): strongly penalize busy tiles
+               if (tileComplexity > 0.40) dist += (tileComplexity - 0.40) * 600; // up to +360
+             } else if (cellEdge < 0.30) {
+               // Smooth target (skin, calm water, background): penalize busy tiles
+               if (tileComplexity > 0.50) dist += (tileComplexity - 0.50) * 400; // up to +200
+             } else if (cellEdge < 0.50) {
+               // Moderate target (face skin, gradients): penalize very busy tiles
+               // This is the critical range for portrait skin areas!
+               if (tileComplexity > 0.65) dist += (tileComplexity - 0.65) * 250; // up to +87
              } else if (cellEdge > 0.50 && tileComplexity < 0.2) {
                // Very detailed target + calm tile = mild penalty (calm tiles lack detail for edges)
                dist += (0.2 - tileComplexity) * 100; // up to +20
@@ -2216,6 +2223,25 @@ export default function Studio() {
                if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 35) {
                  dist += 150; // stronger: push non-skin-subject tiles down in face ranking
                }
+             }
+             // tileComplexity Penalty in Face (Stage-2):
+             // Penalize busy/detailed tiles in smooth skin areas.
+             // Eye zone allows complexity (eyebrows, lashes), skin/cheek/forehead must be calm.
+             {
+               const faceTileCx = mf.edgeEnergy; // proxy for tileComplexity (0=calm, 1=busy)
+               const faceCellEdge = edgeMap[ci];  // 0-1 target edge energy
+               if (subRegion === 'cheek' || subRegion === 'forehead' || subRegion === 'nose') {
+                 // Skin areas: penalize busy tiles even in moderate-edge cells
+                 if (faceCellEdge < 0.50 && faceTileCx > 0.45) {
+                   dist += (faceTileCx - 0.45) / 0.55 * 120; // up to +120 in skin zones
+                 }
+               } else if (subRegion === 'mouth') {
+                 // Mouth: some complexity OK (lip texture), but not too busy
+                 if (faceCellEdge < 0.35 && faceTileCx > 0.55) {
+                   dist += (faceTileCx - 0.55) / 0.45 * 80;
+                 }
+               }
+               // Eye zone: no tileComplexity penalty (eyes need detail)
              }
             // Low-saturation penalty: only active for non-bright target areas (L < 75)
             // For very bright areas (white hair/beard, L>75): skip sat penalties entirely

@@ -371,6 +371,76 @@ const EXTREME_BRIGHTNESS_KEYWORDS = [
   "white flower macro", "bright eye highlight",
 ];
 
+// TEXTURE_KEYWORDS: Strukturierte Oberflächen – Stein, Beton, Papier, Stoff, Marmor
+// Kategorie 4 aus dem Dokument: "Texturen (extrem wichtig)"
+// Ziel: 20% des Pools. Geben strukturelle Vielfalt ohne Farbrauschen.
+const TEXTURE_KEYWORDS = [
+  // Stein & Beton
+  "concrete texture closeup", "stone texture surface", "rough concrete wall",
+  "granite texture closeup", "limestone texture surface", "cobblestone texture",
+  "slate rock texture", "sandstone surface closeup", "rough stone wall",
+  // Papier & Stoff
+  "paper texture white minimal", "linen fabric texture closeup", "canvas texture neutral",
+  "cotton fabric closeup", "rough burlap texture", "smooth silk texture",
+  "woven fabric texture", "denim texture closeup", "velvet texture dark",
+  // Marmor & Holz
+  "marble texture white veins", "wood grain texture closeup", "oak wood texture",
+  "dark marble texture", "light marble surface", "walnut wood grain",
+  "bamboo texture closeup", "cork texture surface", "birch wood texture",
+  // Metall & Glas
+  "metal texture brushed", "rust texture abstract", "glass texture surface",
+  "steel texture smooth", "copper texture closeup", "aluminum surface texture",
+];
+
+// ARCHITECTURE_KEYWORDS: Gebäude, Fassaden, Fenster, Muster
+// Kategorie 8 aus dem Dokument: "Architektur"
+// Ziel: 15% des Pools. Viele interessante Muster und Strukturen.
+const ARCHITECTURE_KEYWORDS = [
+  // Fassaden & Wände
+  "building facade minimal", "brick wall texture", "concrete building facade",
+  "modern architecture minimal", "glass building facade", "stone building wall",
+  "white wall architecture", "industrial building facade", "urban wall texture",
+  // Fenster & Muster
+  "window pattern architecture", "geometric building pattern", "grid window facade",
+  "repeating pattern architecture", "abstract building geometry", "symmetrical facade",
+  // Spezifische Strukturen
+  "wooden door texture", "metal door abstract", "tile floor pattern",
+  "mosaic tile pattern", "geometric tile abstract", "staircase abstract minimal",
+];
+
+// URBAN_KEYWORDS: Strassen, Asphalt, Stadtoberflächen
+// Kategorie 9 aus dem Dokument: "Strassen / Urban"
+// Ziel: 10% des Pools. Dunkle und mittlere Töne für Schatten und Hintergründe.
+const URBAN_KEYWORDS = [
+  // Asphalt & Strassen
+  "asphalt texture closeup", "road surface texture", "wet asphalt abstract",
+  "pavement texture minimal", "sidewalk texture", "cobblestone street",
+  "concrete road surface", "tarmac texture closeup", "gravel texture surface",
+  // Urban Oberflächen
+  "urban texture abstract", "city street minimal", "graffiti wall abstract",
+  "rusty metal urban", "weathered wall texture", "peeling paint texture",
+  "urban decay abstract", "industrial texture minimal", "worn concrete surface",
+];
+
+// PLANTS_GREEN_KEYWORDS: Pflanzen, Grünflächen, Blätter
+// Kategorie 10 aus dem Dokument: "Pflanzen / Grünflächen"
+// Ziel: 10% des Pools. Wichtig für Farbdiversität (Grüntöne).
+const PLANTS_GREEN_KEYWORDS = [
+  // Blätter & Pflanzen
+  "green leaves texture closeup", "leaf texture macro", "plant texture minimal",
+  "tropical leaves closeup", "fern texture green", "moss texture closeup",
+  "ivy leaves texture", "palm leaf texture", "bamboo leaves minimal",
+  // Gras & Felder
+  "grass texture closeup", "grass field minimal", "lawn texture green",
+  "meadow grass abstract", "green field minimal", "clover texture closeup",
+  // Wald & Natur
+  "forest texture abstract", "tree canopy minimal", "forest floor texture",
+  "dark forest abstract", "woodland texture minimal", "tree bark texture",
+  // Abstrakt Grün
+  "green bokeh background", "blurred green nature", "soft green abstract",
+  "dark green minimal", "forest green abstract", "muted green texture",
+];
+
 function getColorCategory(avgL: number, avgA: number, avgB: number): string {
   if (avgL < 25) return "black";
   if (avgL > 80) return "white";
@@ -618,6 +688,70 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
+  // ── Step 2e: Texture tiles (Kategorie 4 aus dem Dokument) ──
+  // Ziel: 20% des Pools. Strukturelle Vielfalt: Stein, Beton, Papier, Stoff, Marmor, Holz.
+  {
+    const textureCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'texture'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const texturePct = textureCnt / total;
+    const texturePriority = Math.max(0, (0.20 - texturePct) / 0.20) * 2.0; // max 2.0
+    if (texturePriority > 0.05) {
+      const deficit = Math.round((0.20 - texturePct) * total);
+      for (const kw of TEXTURE_KEYWORDS) {
+        tasks.push({ query: kw, priority: texturePriority, deficit, label: `🧱 Texturen (Stein/Stoff/Holz) (${Math.round(texturePct*100)}% → Ziel 20%)`, subject: 'texture' });
+      }
+    }
+  }
+
+  // ── Step 2f: Architecture tiles (Kategorie 8 aus dem Dokument) ──
+  // Ziel: 15% des Pools. Gebäude, Fassaden, Fenster, Muster.
+  {
+    const archCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'architecture'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const archPct = archCnt / total;
+    const archPriority = Math.max(0, (0.15 - archPct) / 0.15) * 1.8; // max 1.8
+    if (archPriority > 0.05) {
+      const deficit = Math.round((0.15 - archPct) * total);
+      for (const kw of ARCHITECTURE_KEYWORDS) {
+        tasks.push({ query: kw, priority: archPriority, deficit, label: `🏛️ Architektur (Fassaden/Muster) (${Math.round(archPct*100)}% → Ziel 15%)`, subject: 'architecture' });
+      }
+    }
+  }
+
+  // ── Step 2g: Urban tiles (Kategorie 9 aus dem Dokument) ──
+  // Ziel: 10% des Pools. Strassen, Asphalt, Stadtoberflächen.
+  {
+    const urbanCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'urban'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const urbanPct = urbanCnt / total;
+    const urbanPriority = Math.max(0, (0.10 - urbanPct) / 0.10) * 1.5; // max 1.5
+    if (urbanPriority > 0.05) {
+      const deficit = Math.round((0.10 - urbanPct) * total);
+      for (const kw of URBAN_KEYWORDS) {
+        tasks.push({ query: kw, priority: urbanPriority, deficit, label: `🏙️ Urban (Asphalt/Strassen) (${Math.round(urbanPct*100)}% → Ziel 10%)`, subject: 'urban' });
+      }
+    }
+  }
+
+  // ── Step 2h: Plants/Green tiles (Kategorie 10 aus dem Dokument) ──
+  // Ziel: 10% des Pools. Pflanzen, Grünflächen, Blätter.
+  {
+    const plantsCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'plants'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const plantsPct = plantsCnt / total;
+    const plantsPriority = Math.max(0, (0.10 - plantsPct) / 0.10) * 1.5; // max 1.5
+    if (plantsPriority > 0.05) {
+      const deficit = Math.round((0.10 - plantsPct) * total);
+      for (const kw of PLANTS_GREEN_KEYWORDS) {
+        tasks.push({ query: kw, priority: plantsPriority, deficit, label: `🌿 Pflanzen/Grün (${Math.round(plantsPct*100)}% → Ziel 10%)`, subject: 'plants' });
+      }
+    }
+  }
+
   // ── Step 3: Color bucket gaps (lower priority, fills color diversity) ──
   const res = await pool.query(`
     SELECT
@@ -674,13 +808,20 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
 
   // Sort by priority descending (most needed first)
   // Boost calm categories to ensure they dominate imports
+  // New categories (texture, architecture, urban, plants) come after calm but before color buckets
   tasks.sort((a, b) => {
-    // Calm categories always first
+    // Calm categories always first (portrait quality)
     const calmSubjects = ['calm_nature', 'calm_monochrome', 'abstract_smooth'];
     const aIsCalm = calmSubjects.includes(a.subject);
     const bIsCalm = calmSubjects.includes(b.subject);
     if (aIsCalm && !bIsCalm) return -1;
     if (!aIsCalm && bIsCalm) return 1;
+    // Structural categories second (texture, architecture, urban, plants)
+    const structuralSubjects = ['texture', 'architecture', 'urban', 'plants'];
+    const aIsStructural = structuralSubjects.includes(a.subject);
+    const bIsStructural = structuralSubjects.includes(b.subject);
+    if (aIsStructural && !bIsStructural && b.subject !== 'general') return -1;
+    if (!aIsStructural && bIsStructural && a.subject !== 'general') return 1;
     return b.priority - a.priority;
   });
   return tasks;
