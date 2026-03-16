@@ -364,6 +364,169 @@ function R2MigrationPanel() {
   );
 }
 
+// ── Keyword Generator ──────────────────────────────────────────────────────────
+// Generates ready-to-use import keywords for calm/monochrome/extreme tiles
+function KeywordGenerator({ onInsertKeywords }: { onInsertKeywords: (kws: string) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const [activeCategory, setActiveCategory] = useState<'calm' | 'extreme_dark' | 'extreme_bright' | null>(null)
+  const [selectedColor, setSelectedColor] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // ── Keyword tables ──────────────────────────────────────────────────────────
+  const CALM_MONO_BY_COLOR: Record<string, { label: string; emoji: string; keywords: string[] }> = {
+    white:   { label: 'Weiss/Hell', emoji: '⬜', keywords: ['plain white wall minimal', 'white paper background clean', 'cream white background minimal', 'off white texture smooth', 'white mist fog minimal', 'bright white abstract', 'white studio background', 'white fabric smooth', 'white bokeh bright'] },
+    gray:    { label: 'Grau', emoji: '🩶', keywords: ['light gray wall smooth', 'gray concrete smooth minimal', 'pale gray sky overcast', 'silver gray smooth abstract', 'pale neutral background', 'dark gray smooth abstract', 'charcoal gray smooth minimal', 'dark slate background clean', 'deep charcoal minimal'] },
+    black:   { label: 'Schwarz/Dunkel', emoji: '⬛', keywords: ['dark navy blue smooth', 'black smooth gradient', 'very dark gray minimal', 'black gradient smooth', 'deep charcoal minimal', 'dark blue smooth background', 'dark slate background clean'] },
+    blue:    { label: 'Blau', emoji: '🔵', keywords: ['clear blue sky minimal', 'smooth blue gradient abstract', 'pale blue background minimal', 'deep blue ocean smooth', 'navy blue smooth gradient', 'soft blue abstract smooth', 'blue gradient minimal', 'cornflower blue smooth', 'blue sky cloudless'] },
+    green:   { label: 'Grün', emoji: '🟢', keywords: ['dark green smooth bokeh', 'forest green abstract blur', 'olive green smooth minimal', 'soft green bokeh background', 'deep green smooth gradient', 'sage green minimal', 'muted green abstract smooth', 'dark olive smooth', 'forest bokeh green blur'] },
+    red:     { label: 'Rot/Burgund', emoji: '🔴', keywords: ['dark burgundy smooth minimal', 'deep red smooth gradient', 'muted red abstract smooth', 'wine red minimal', 'dark maroon smooth', 'soft red gradient abstract'] },
+    orange:  { label: 'Orange/Braun', emoji: '🟠', keywords: ['warm beige smooth background', 'tan brown minimal smooth', 'warm brown gradient', 'camel beige smooth abstract', 'warm taupe minimal', 'light brown smooth', 'warm sand minimal background', 'khaki smooth abstract'] },
+    yellow:  { label: 'Gelb/Gold', emoji: '🟡', keywords: ['golden hour sky smooth', 'warm sand dunes minimal', 'pale yellow abstract smooth', 'light golden gradient', 'soft yellow bokeh', 'cream yellow background minimal'] },
+    purple:  { label: 'Lila/Violett', emoji: '🟣', keywords: ['dark purple smooth minimal', 'deep violet smooth gradient', 'muted purple abstract', 'soft lavender background', 'violet gradient smooth', 'dark plum minimal'] },
+    cyan:    { label: 'Türkis/Teal', emoji: '🩵', keywords: ['teal smooth gradient minimal', 'dark teal abstract smooth', 'muted teal minimal', 'soft cyan smooth background', 'dark teal smooth', 'muted turquoise minimal'] },
+    pink:    { label: 'Rosa/Pink', emoji: '🩷', keywords: ['blush pink neutral background', 'soft pink gradient minimal', 'pale rose abstract smooth', 'muted pink background', 'dusty rose fabric', 'light pink bokeh soft'] },
+    brown:   { label: 'Braun/Erde', emoji: '🟤', keywords: ['warm earth texture smooth', 'brown soil minimal', 'dark wood smooth', 'warm bark texture', 'coffee brown abstract', 'terracotta smooth minimal'] },
+  }
+
+  const EXTREME_DARK_KEYWORDS = [
+    'pure black background', 'black velvet texture', 'dark night sky stars', 'black coal texture',
+    'black ink abstract', 'dark shadow minimal', 'black marble texture', 'night photography dark',
+    'black fur closeup', 'dark forest night', 'black metal texture', 'very dark abstract',
+    'black leather texture', 'dark void abstract', 'black stone texture', 'deep shadow portrait',
+    'dark navy background', 'midnight black abstract', 'dark charcoal texture', 'black gradient smooth',
+  ]
+
+  const EXTREME_BRIGHT_KEYWORDS = [
+    'pure white background', 'bright white snow', 'overexposed white light', 'white marble texture',
+    'bright white clouds', 'white foam ocean', 'white paper texture bright', 'white flower macro bright',
+    'bright sunlight reflection', 'white sand beach bright', 'white fabric bright', 'white wall bright',
+    'bright white abstract', 'white bokeh bright', 'overexposed portrait', 'white studio background',
+    'light leak bright', 'white mist fog', 'bright sky overexposed', 'snow field bright white',
+  ]
+
+  const getKeywords = (): string[] => {
+    if (activeCategory === 'calm' && selectedColor) {
+      return CALM_MONO_BY_COLOR[selectedColor]?.keywords ?? []
+    }
+    if (activeCategory === 'extreme_dark') return EXTREME_DARK_KEYWORDS
+    if (activeCategory === 'extreme_bright') return EXTREME_BRIGHT_KEYWORDS
+    return []
+  }
+
+  const keywords = getKeywords()
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(keywords.join(', '))
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleInsert = () => {
+    if (keywords.length > 0) onInsertKeywords(keywords.join(', '))
+  }
+
+  return (
+    <div className="mb-4 p-4 bg-violet-50 rounded-xl border border-violet-200">
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="flex items-center gap-2 w-full text-left"
+      >
+        <span className="text-sm font-semibold text-violet-900">✨ Keyword-Generator</span>
+        <span className="text-xs text-violet-600">Generiert optimale Keywords für ruhige, monochrome, extrem helle und dunkle Tiles</span>
+        <span className="ml-auto text-violet-400">{expanded ? '▲' : '▼'}</span>
+      </button>
+
+      {expanded && (
+        <div className="mt-3 space-y-3">
+          {/* Category selector */}
+          <div className="flex gap-2 flex-wrap">
+            {([
+              { id: 'calm', label: '🌫️ Ruhige Monochrome', desc: 'Pro Farbe' },
+              { id: 'extreme_dark', label: '⬛ Extrem Dunkel', desc: 'avg_L < 10' },
+              { id: 'extreme_bright', label: '⬜ Extrem Hell', desc: 'avg_L > 85' },
+            ] as const).map(cat => (
+              <button
+                key={cat.id}
+                onClick={() => { setActiveCategory(cat.id); setSelectedColor(null) }}
+                className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
+                  activeCategory === cat.id
+                    ? 'bg-violet-600 text-white border-violet-600'
+                    : 'bg-white text-violet-700 border-violet-300 hover:bg-violet-100'
+                }`}
+              >
+                {cat.label} <span className="opacity-70">({cat.desc})</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Color picker for calm category */}
+          {activeCategory === 'calm' && (
+            <div>
+              <div className="text-xs text-violet-700 font-medium mb-2">Farbe wählen:</div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(CALM_MONO_BY_COLOR).map(([key, val]) => (
+                  <button
+                    key={key}
+                    onClick={() => setSelectedColor(key)}
+                    className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                      selectedColor === key
+                        ? 'bg-violet-600 text-white border-violet-600'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-violet-50'
+                    }`}
+                  >
+                    <span>{val.emoji}</span> {val.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Generated keywords preview */}
+          {keywords.length > 0 && (
+            <div className="bg-white rounded-lg border border-violet-200 p-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-violet-800">{keywords.length} Keywords generiert:</span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCopy}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
+                  >
+                    {copied ? '✅ Kopiert!' : '📋 Kopieren'}
+                  </button>
+                  <button
+                    onClick={handleInsert}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-700 text-white transition-colors"
+                  >
+                    ↓ In Import einfügen
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {keywords.map((kw, i) => (
+                  <span key={i} className="inline-block bg-violet-100 text-violet-800 rounded px-2 py-0.5 text-xs">{kw}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Quick-generate all calm colors */}
+          {activeCategory === 'calm' && (
+            <button
+              onClick={() => {
+                const all = Object.values(CALM_MONO_BY_COLOR).flatMap(v => v.keywords)
+                onInsertKeywords(all.join(', '))
+              }}
+              className="w-full py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
+            >
+              🎨 Alle Farben auf einmal einfügen ({Object.values(CALM_MONO_BY_COLOR).reduce((s, v) => s + v.keywords.length, 0)} Keywords)
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Component ──────────────────────────────────────────────────────────────
 export default function Admin() {
   // Mark admin as visited in localStorage so Studio shows admin-only buttons
@@ -1409,6 +1572,9 @@ export default function Admin() {
                   </div>
                 )}
               </div>
+
+              {/* ── Keyword-Generator ── */}
+              <KeywordGenerator onInsertKeywords={(kws) => setCustomKeywords(prev => prev ? prev + ', ' + kws : kws)} />
 
               {/* Alle gleichzeitig */}
               <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
