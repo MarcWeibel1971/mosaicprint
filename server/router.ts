@@ -696,6 +696,12 @@ async function getUnderrepresentedColors(targetPerColor = 500): Promise<string[]
 type JobStatus = { running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null; imported: number; total: number };
 const importJobStatuses: Record<string, JobStatus> = {};
 const smartImportJobs: Record<string, JobStatus> = {};
+// targetedImport jobs: keyed by sessionId (client-generated)
+type TargetedJobStatus = JobStatus & { query: string; sourceId: string; report?: Array<{keyword: string; imported: number; rejected: number; total: number}> };
+const targetedImportJobs: Record<string, TargetedJobStatus> = {};
+// Multi-keyword session: groups multiple targetedImport jobs
+type KeywordSession = { sessionId: string; keywords: string[]; source: string; startedAt: string; finishedAt: string | null; results: Array<{keyword: string; imported: number; rejected: number; total: number; status: 'running'|'done'|'error'}>; totalImported: number; totalBefore: number; totalAfter: number };
+const keywordSessions: Record<string, KeywordSession> = {};
 let rebuildJobStatus = { running: false, log: [] as string[], startedAt: null as string | null, finishedAt: null as string | null, error: null as string | null };
 
 function getImportStatus(sourceId: string): JobStatus {
@@ -1869,13 +1875,20 @@ export const appRouter = router({
       sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
       query: z.string().min(1).max(200),
       count: z.number().min(10).max(500).default(100),
+      sessionId: z.string().optional(), // optional: group into a multi-keyword session
     }))
     .mutation(async ({ input }) => {
-      const jobKey = `targeted_${input.sourceId}_${Date.now()}`;
+      const jobKey = `targeted_${input.sourceId}_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
       const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY
         : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
         : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
+      // Init job tracking
+      targetedImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, query: input.query, sourceId: input.sourceId };
+      // Register in session if provided
+      if (input.sessionId && keywordSessions[input.sessionId]) {
+        keywordSessions[input.sessionId].results.push({ keyword: input.query, imported: 0, rejected: 0, total: 0, status: 'running' });
+      }
       // Run in background
       (async () => {
         try {
@@ -1898,7 +1911,6 @@ export const appRouter = router({
             if (res.ok) {
               const data = await res.json() as any;
               photos = (data.hits ?? []).map((p: any) => ({
-                // webformatURL (640px) for tile rendering quality; largeImageURL (1280px) for print
                 sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
                 tile128Url: p.webformatURL || p.previewURL || '',
               })).filter((p: any) => p.tile128Url);
@@ -1913,14 +1925,15 @@ export const appRouter = router({
               photos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb }));
             }
           }
-          // Process photos (same pattern as smartImport)
+          // Process photos and track actual imported count
+          let imported = 0; let rejected = 0;
           const CONCURRENCY = 3;
           for (let i = 0; i < photos.length; i += CONCURRENCY) {
             const batch = photos.slice(i, i + CONCURRENCY);
             await Promise.all(batch.map(async (photo) => {
               try {
                 const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                await db.insertMosaicImage({ ...photo,
+                const result = await db.insertMosaicImage({ ...photo,
                   avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                   tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
                   trL: lab?.trL, trA: lab?.trA, trB: lab?.trB,
@@ -1928,14 +1941,81 @@ export const appRouter = router({
                   brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                   tileType: lab?.tileType,
                 });
-              } catch { /* skip duplicates / errors */ }
+                if (result?.inserted) { imported++; } else { rejected++; }
+              } catch { rejected++; }
             }));
+            targetedImportJobs[jobKey].imported = imported;
+          }
+          targetedImportJobs[jobKey].running = false;
+          targetedImportJobs[jobKey].finishedAt = new Date().toISOString();
+          targetedImportJobs[jobKey].imported = imported;
+          // Update session
+          if (input.sessionId && keywordSessions[input.sessionId]) {
+            const sess = keywordSessions[input.sessionId];
+            const idx = sess.results.findIndex(r => r.keyword === input.query && r.status === 'running');
+            if (idx >= 0) sess.results[idx] = { keyword: input.query, imported, rejected, total: photos.length, status: 'done' };
+            sess.totalImported = sess.results.reduce((s, r) => s + r.imported, 0);
+            const allDone = sess.results.every(r => r.status !== 'running');
+            if (allDone) sess.finishedAt = new Date().toISOString();
           }
         } catch (e) {
           console.error('[targetedImport error]', e);
+          targetedImportJobs[jobKey].running = false;
+          targetedImportJobs[jobKey].error = String(e);
+          if (input.sessionId && keywordSessions[input.sessionId]) {
+            const sess = keywordSessions[input.sessionId];
+            const idx = sess.results.findIndex(r => r.keyword === input.query && r.status === 'running');
+            if (idx >= 0) sess.results[idx].status = 'error';
+          }
         }
       })();
-      return { started: true, query: input.query };
+      return { started: true, query: input.query, jobKey };
+    }),
+
+  // Create a keyword import session (groups multiple targetedImport calls)
+  createKeywordSession: publicProcedure
+    .input(z.object({
+      sessionId: z.string(),
+      keywords: z.array(z.string()),
+      source: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      // Get current tile count before import
+      let totalBefore = 0;
+      try {
+        const _pool = db.getPool();
+        const res = await _pool.query("SELECT COUNT(*) as cnt FROM mosaic_images");
+        totalBefore = Number(res.rows[0]?.cnt ?? 0);
+      } catch {}
+      keywordSessions[input.sessionId] = {
+        sessionId: input.sessionId,
+        keywords: input.keywords,
+        source: input.source,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        results: [],
+        totalImported: 0,
+        totalBefore,
+        totalAfter: 0,
+      };
+      return { ok: true, sessionId: input.sessionId };
+    }),
+
+  // Get keyword session status and results
+  getKeywordSession: publicProcedure
+    .input(z.object({ sessionId: z.string() }))
+    .query(async ({ input }) => {
+      const sess = keywordSessions[input.sessionId];
+      if (!sess) return null;
+      // If all done, get current tile count
+      if (sess.finishedAt && sess.totalAfter === 0) {
+        try {
+          const _pool = db.getPool();
+          const res = await _pool.query("SELECT COUNT(*) as cnt FROM mosaic_images");
+          sess.totalAfter = Number(res.rows[0]?.cnt ?? 0);
+        } catch {}
+      }
+      return sess;
     }),
 
   // Upload tile image
@@ -2023,18 +2103,36 @@ export const appRouter = router({
       brightnessFilter: z.string().optional(),
       colorFilter: z.string().optional(),
       sourceId: z.string().optional(),
-      importedSince: z.string().optional(),
+      importedSince: z.string().optional(), // ISO date string, or 'last-import' for last session
       qualityStatus: z.string().optional(),
       semanticTheme: z.string().optional(),
     }))
     .query(async ({ input }) => {
+      let importedSince = input.importedSince;
+      // Resolve 'last-import' to the startedAt of the most recent keyword session
+      if (importedSince === 'last-import') {
+        const sessions = Object.values(keywordSessions).sort((a, b) =>
+          new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
+        );
+        importedSince = sessions.length > 0 ? sessions[0].startedAt : undefined;
+        // Fallback: if no session, use last 1 hour
+        if (!importedSince) {
+          importedSince = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        }
+      } else if (importedSince === '24h') {
+        importedSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      } else if (importedSince === '7d') {
+        importedSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      } else if (importedSince === '30d') {
+        importedSince = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      }
       return db.getAdminImages({
         page: input.page,
         limit: input.limit,
         brightnessFilter: input.brightnessFilter,
         colorFilter: input.colorFilter,
         sourceId: input.sourceId,
-        importedSince: input.importedSince,
+        importedSince,
         qualityStatus: input.qualityStatus,
         semanticTheme: input.semanticTheme,
       });

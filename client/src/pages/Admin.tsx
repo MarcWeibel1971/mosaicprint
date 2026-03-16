@@ -749,32 +749,145 @@ export default function Admin() {
     if (keywords.length === 0) { setCustomKeywordResult('❌ Bitte mindestens ein Keyword eingeben'); return }
     setCustomKeywordLoading(true)
     setCustomKeywordResult(`⏳ Starte Import für ${keywords.length} Keywords via ${customKeywordSource}...`)
-    setCustomKeywordPreview(keywords.map((q: string) => ({ query: q, count: 0, status: '⏳' })))
-    let totalImported = 0
+    setCustomKeywordPreview(keywords.map((q: string) => ({ query: q, count: 0, status: '⏳ wartet...' })))
+    // Create session on server
+    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2,7)}`
+    try {
+      await fetch('/api/trpc/createKeywordSession', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, keywords, source: customKeywordSource })
+      })
+    } catch { /* non-critical */ }
+    // Fire all imports with sessionId
     for (let i = 0; i < keywords.length; i++) {
       const query = keywords[i]
-      setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '⏳ läuft...' } : p))
+      setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '⏳ gestartet...' } : p))
       try {
         const res = await fetch('/api/trpc/targetedImport', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount, sessionId }),
         })
         const data = await res.json()
-        if (data.result?.data?.started || data.started) {
-          setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `✅ gestartet (~${customKeywordCount} Bilder)` } : p))
-          totalImported += customKeywordCount
-        } else {
+        if (!(data.result?.data?.started || data.started)) {
           setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${data.result?.data?.error ?? 'Fehler'}` } : p))
         }
       } catch {
         setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '❌ Netzwerkfehler' } : p))
       }
-      if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 500))
+      if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 300))
     }
-    setCustomKeywordResult(`✅ Import gestartet: ${keywords.length} Keywords, ca. ${totalImported} Bilder via ${customKeywordSource}`)
-    setCustomKeywordLoading(false)
-    setTimeout(() => fetchStats(), 10000)
+    setCustomKeywordResult(`⏳ Import läuft... Warte auf Ergebnisse (${keywords.length} Keywords via ${customKeywordSource})`)
+    // Poll session until all done (max 10 min)
+    const pollStart = Date.now()
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/trpc/getKeywordSession?input=${encodeURIComponent(JSON.stringify({ sessionId }))}`)
+        const data = await res.json()
+        const sess = data.result?.data ?? data
+        if (!sess) return
+        // Update preview with actual counts
+        setCustomKeywordPreview(keywords.map((q: string) => {
+          const r = sess.results?.find((x: any) => x.keyword === q)
+          if (!r) return { query: q, count: 0, status: '⏳ wartet...' }
+          if (r.status === 'running') return { query: q, count: r.imported, status: `⏳ ${r.imported} importiert...` }
+          if (r.status === 'done') return { query: q, count: r.imported, status: `✅ ${r.imported} importiert (${r.rejected} Duplikate)` }
+          return { query: q, count: 0, status: `❌ Fehler` }
+        }))
+        const allDone = sess.finishedAt || sess.results?.every((r: any) => r.status !== 'running')
+        const timedOut = Date.now() - pollStart > 10 * 60 * 1000
+        if (allDone || timedOut) {
+          clearInterval(pollInterval)
+          const totalImported = sess.totalImported ?? sess.results?.reduce((s: number, r: any) => s + (r.imported ?? 0), 0) ?? 0
+          setCustomKeywordResult(`✅ Import abgeschlossen: ${totalImported} neue Bilder importiert (${keywords.length} Keywords via ${customKeywordSource})`)
+          setCustomKeywordLoading(false)
+          fetchStats()
+          // Generate PDF report
+          generateImportReportPdf(sess, keywords, customKeywordSource, customKeywordCount)
+        }
+      } catch { /* ignore poll errors */ }
+    }, 5000)
+  }
+
+  const generateImportReportPdf = async (sess: any, keywords: string[], source: string, countPerKeyword: number) => {
+    try {
+      const { jsPDF } = await import('jspdf')
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+      const now = new Date()
+      const dateStr = now.toLocaleString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+      // Header
+      doc.setFillColor(30, 30, 50)
+      doc.rect(0, 0, 210, 28, 'F')
+      doc.setTextColor(255, 255, 255)
+      doc.setFontSize(18)
+      doc.setFont('helvetica', 'bold')
+      doc.text('MosaicPrint – Import-Bericht', 14, 12)
+      doc.setFontSize(10)
+      doc.setFont('helvetica', 'normal')
+      doc.text(`Erstellt: ${dateStr}`, 14, 20)
+      doc.text(`Quelle: ${source.toUpperCase()} | Keywords: ${keywords.length} | Max/Keyword: ${countPerKeyword}`, 14, 26)
+      // Summary box
+      const totalImported = sess.totalImported ?? sess.results?.reduce((s: number, r: any) => s + (r.imported ?? 0), 0) ?? 0
+      const totalBefore = sess.totalBefore ?? 0
+      const totalAfter = sess.totalAfter ?? (totalBefore + totalImported)
+      doc.setFillColor(240, 248, 240)
+      doc.roundedRect(14, 32, 182, 22, 3, 3, 'F')
+      doc.setTextColor(30, 100, 30)
+      doc.setFontSize(11)
+      doc.setFont('helvetica', 'bold')
+      doc.text(`Gesamt importiert: ${totalImported} neue Bilder`, 20, 41)
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(9)
+      doc.text(`Pool vorher: ${totalBefore.toLocaleString('de-CH')} Tiles  →  Pool nachher: ${totalAfter.toLocaleString('de-CH')} Tiles`, 20, 49)
+      // Table header
+      let y = 62
+      doc.setFillColor(50, 50, 80)
+      doc.rect(14, y - 5, 182, 8, 'F')
+      doc.setTextColor(255, 255, 255)
+      doc.setFontSize(9)
+      doc.setFont('helvetica', 'bold')
+      doc.text('Keyword', 16, y)
+      doc.text('Gefunden', 120, y, { align: 'right' })
+      doc.text('Importiert', 150, y, { align: 'right' })
+      doc.text('Duplikate', 180, y, { align: 'right' })
+      doc.text('Rate', 196, y, { align: 'right' })
+      y += 6
+      // Table rows
+      doc.setFont('helvetica', 'normal')
+      keywords.forEach((kw, i) => {
+        const r = sess.results?.find((x: any) => x.keyword === kw)
+        const imported = r?.imported ?? 0
+        const rejected = r?.rejected ?? 0
+        const total = r?.total ?? 0
+        const rate = total > 0 ? Math.round((imported / total) * 100) : 0
+        if (y > 270) { doc.addPage(); y = 20 }
+        const bg = i % 2 === 0 ? [248, 248, 252] : [255, 255, 255]
+        doc.setFillColor(bg[0], bg[1], bg[2])
+        doc.rect(14, y - 4, 182, 7, 'F')
+        doc.setTextColor(30, 30, 30)
+        doc.setFontSize(8)
+        // Truncate long keywords
+        const kwDisplay = kw.length > 45 ? kw.slice(0, 42) + '...' : kw
+        doc.text(kwDisplay, 16, y)
+        doc.text(String(total), 120, y, { align: 'right' })
+        doc.setTextColor(imported > 0 ? 0 : 150, imported > 0 ? 120 : 0, 0)
+        doc.text(String(imported), 150, y, { align: 'right' })
+        doc.setTextColor(100, 100, 100)
+        doc.text(String(rejected), 180, y, { align: 'right' })
+        doc.setTextColor(rate > 50 ? 0 : 180, rate > 50 ? 120 : 0, 0)
+        doc.text(`${rate}%`, 196, y, { align: 'right' })
+        y += 7
+      })
+      // Footer
+      doc.setTextColor(150, 150, 150)
+      doc.setFontSize(7)
+      doc.text('MosaicPrint Admin – Import-Bericht', 14, 290)
+      doc.text(`www.mosaicprint.ch`, 196, 290, { align: 'right' })
+      // Download
+      const filename = `mosaicprint-import-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}.pdf`
+      doc.save(filename)
+    } catch (e) {
+      console.error('PDF generation failed:', e)
+    }
   }
 
   const msgColors = {
@@ -2217,12 +2330,12 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       <div className="bg-white rounded-2xl p-4 border border-gray-200 flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Import-Zeitraum:</span>
-          {['alle', '24h', '7d', '30d'].map(v => (
+          {['alle', 'last-import', '24h', '7d', '30d'].map(v => (
             <button key={v} onClick={() => { setImportedSince(v); setPage(1) }}
               className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
                 importedSince === v ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}>
-              {v === 'alle' ? 'Alle' : v === '24h' ? 'Letzte 24h' : v === '7d' ? 'Letzte 7 Tage' : 'Letzte 30 Tage'}
+              {v === 'alle' ? 'Alle' : v === 'last-import' ? '🆕 Letzter Import' : v === '24h' ? 'Letzte 24h' : v === '7d' ? 'Letzte 7 Tage' : 'Letzte 30 Tage'}
             </button>
           ))}
         </div>
@@ -2277,7 +2390,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         )}
         {importedSince !== 'alle' && (
           <span className="flex items-center gap-1 bg-green-100 text-green-700 text-xs px-2 py-1 rounded-full">
-            Import: {importedSince === '24h' ? 'Letzte 24h' : importedSince === '7d' ? 'Letzte 7 Tage' : 'Letzter Import'}
+            Import: {importedSince === '24h' ? 'Letzte 24h' : importedSince === '7d' ? 'Letzte 7 Tage' : importedSince === '30d' ? 'Letzte 30 Tage' : '🆕 Letzter Import'}
             <button onClick={() => setImportedSince('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
