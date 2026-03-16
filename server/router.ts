@@ -253,6 +253,42 @@ const ABSTRACT_LOW_EDGE_KEYWORDS = [
   "smooth silk texture neutral", "gentle blur abstract warm",
 ];
 
+// CALM_MONOCHROME_KEYWORDS: Single-hue, low-texture tiles for backgrounds and clothing
+// These are ruhige Naturbilder with a single dominant color tone — ideal for:
+//   - Dark clothing (navy, charcoal, forest green)
+//   - Light backgrounds (pale blue sky, white wall, light gray)
+//   - Skin-adjacent areas (beige, peach, warm gray)
+// Keywords deliberately avoid busy textures: no leaves, no patterns, no details.
+const CALM_MONOCHROME_KEYWORDS = [
+  // ── Neutral / Gray / White (backgrounds, light clothing) ──
+  "plain white wall minimal", "light gray wall smooth", "white paper background clean",
+  "gray concrete smooth minimal", "pale gray sky overcast", "white mist fog minimal",
+  "light beige wall smooth", "cream white background minimal", "off white texture smooth",
+  "silver gray smooth abstract", "pale neutral background", "soft white light background",
+  // ── Dark / Black (dark jackets, hair, shadows) ──
+  "dark navy blue smooth", "charcoal gray smooth minimal", "dark slate background clean",
+  "black smooth gradient", "dark gray smooth abstract", "deep charcoal minimal",
+  "dark blue smooth background", "very dark gray minimal", "black gradient smooth",
+  // ── Blue (sky, water, cool backgrounds) ──
+  "clear blue sky minimal", "smooth blue gradient abstract", "pale blue background minimal",
+  "deep blue ocean smooth", "navy blue smooth gradient", "blue sky cloudless",
+  "soft blue abstract smooth", "blue gradient minimal", "cornflower blue smooth",
+  // ── Green (nature backgrounds, foliage out of focus) ──
+  "dark green smooth bokeh", "forest green abstract blur", "olive green smooth minimal",
+  "soft green bokeh background", "deep green smooth gradient", "sage green minimal",
+  "muted green abstract smooth", "dark olive smooth", "forest bokeh green blur",
+  // ── Warm / Brown / Beige (clothing, warm backgrounds) ──
+  "warm beige smooth background", "tan brown minimal smooth", "warm brown gradient",
+  "camel beige smooth abstract", "warm taupe minimal", "light brown smooth",
+  "warm sand minimal background", "khaki smooth abstract", "warm neutral smooth",
+  // ── Red / Burgundy (clothing, warm accents) ──
+  "dark burgundy smooth minimal", "deep red smooth gradient", "muted red abstract smooth",
+  "wine red minimal", "dark maroon smooth", "soft red gradient abstract",
+  // ── Teal / Cyan (cool clothing, water backgrounds) ──
+  "teal smooth gradient minimal", "dark teal abstract smooth", "muted teal minimal",
+  "soft cyan smooth background", "dark teal smooth", "muted turquoise minimal",
+];
+
 // PORTRAIT_NATURE_KEYWORDS: Natural gradient tiles ideal for portrait mosaics
 // Sunset, desert, beach, autumn, golden hour, night, fog, fire – smooth gradients
 // that map perfectly to skin tones, hair, shadows and highlights in portraits.
@@ -441,6 +477,23 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       const deficit = Math.round((0.25 - skinPct) * total);
       for (const kw of SKIN_TONE_KEYWORDS) {
         tasks.push({ query: kw, priority: skinPriority, deficit, label: `🧖 Haut-Töne (${Math.round(skinPct*100)}% → Ziel 25%)`, subject: 'skin_tone' });
+      }
+    }
+  }
+
+  // ── Step 2b2: Calm Monochrome tiles ──
+  // Target: 20% of DB. Single-hue, low-texture tiles for backgrounds and clothing.
+  // These reduce graininess in uniform areas (dark jackets, light backgrounds).
+  {
+    const calmCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'calm_monochrome'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const calmPct = calmCnt / total;
+    const calmPriority = Math.max(0, (0.20 - calmPct) / 0.20) * 2.5; // max 2.5
+    if (calmPriority > 0.05) {
+      const deficit = Math.round((0.20 - calmPct) * total);
+      for (const kw of CALM_MONOCHROME_KEYWORDS) {
+        tasks.push({ query: kw, priority: calmPriority, deficit, label: `🎨 Ruhige Einfarbige (${Math.round(calmPct*100)}% → Ziel 20%)`, subject: 'calm_monochrome' });
       }
     }
   }
