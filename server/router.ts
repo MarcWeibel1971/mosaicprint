@@ -3010,7 +3010,7 @@ export const appRouter = router({
           break;
       }
       const res = await pool.query(
-        `SELECT id, tile128_url, thumb_url, source_url, avg_l, avg_a, avg_b,
+        `SELECT id, tile128_url, source_url, avg_l, avg_a, avg_b,
                 tile_type, semantic_theme, quality_score, quality_status,
                 photographer_name, import_query
          FROM mosaic_images
@@ -3022,7 +3022,7 @@ export const appRouter = router({
       return {
         tiles: res.rows.map(r => ({
           id: r.id,
-          thumbUrl: r.tile128_url || r.thumb_url,
+          thumbUrl: r.tile128_url,
           sourceUrl: r.source_url,
           avgL: Number(r.avg_l),
           avgA: Number(r.avg_a),

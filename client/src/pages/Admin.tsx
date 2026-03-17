@@ -5365,13 +5365,17 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     try {
       const res = await fetch('/api/trpc/getCleanupPreview?input=' + encodeURIComponent(JSON.stringify({ category: cat, limit: 100 })))
       const data = await res.json()
-      const tiles: CleanupTile[] = data.result?.data?.json?.tiles ?? data.result?.data?.tiles ?? []
+      // tRPC v11 kann Daten in verschiedenen Strukturen zurückgeben
+      const raw = data.result?.data?.json ?? data.result?.data ?? data
+      const tiles: CleanupTile[] = Array.isArray(raw?.tiles) ? raw.tiles : Array.isArray(raw) ? raw : []
       setPreviewTiles(tiles)
       // Default: alle ausgewählt
       setSelectedIds(new Set(tiles.map(t => t.id)))
-    } catch { /* ignore */ }
+    } catch (e) {
+      onMessage({ text: `Vorschau-Fehler: ${String(e)}`, type: 'error' })
+    }
     finally { setLoadingPreview(false) }
-  }, [])
+  }, [onMessage])
 
   const toggleTile = (id: number) => {
     setSelectedIds(prev => {
