@@ -1601,54 +1601,36 @@ app.get('/api/admin/ai-debug', async (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-// ── Gemini Vision Batch-Analyse (über SSE für Fortschrittsanzeige) ──────────────────────
-// POST /api/admin/ai-analyze-batch
-// Body: { batchSize?: number, forceReanalyze?: boolean }
-// Returns SSE stream: { type: 'progress'|'done'|'error', processed, total, current?, result? }
-app.post('/api/admin/ai-analyze-batch', express.json(), async (req, res) => {
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) return res.status(500).json({ ok: false, error: 'GEMINI_API_KEY not configured' });
+// ── Gemini Vision Batch-Analyse (Background-Job, kein HTTP-Timeout) ──────────────────────
+// Background job state
+const aiJobState = {
+  running: false,
+  processed: 0,
+  total: 0,
+  rejected: 0,
+  errors: 0,
+  startedAt: null as Date | null,
+  finishedAt: null as Date | null,
+  lastError: null as string | null,
+  batchSize: 0,
+};
 
-  const batchSize = Math.min(Number(req.body?.batchSize ?? 50), 2000);
-  const forceReanalyze = req.body?.forceReanalyze === true;
+async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, GEMINI_KEY: string) {
+  const pool = db.getPool();
+  const whereClause = forceReanalyze
+    ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
+    : `r2_url IS NOT NULL AND ai_analyzed_at IS NULL AND quality_status != 'rejected'`;
+  const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
+  const total = Number(countRes.rows[0]?.cnt ?? 0);
+  aiJobState.total = total;
+  aiJobState.processed = 0;
+  aiJobState.rejected = 0;
+  aiJobState.errors = 0;
 
-  // SSE setup
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const CONCURRENCY = 20;
+  const RATE_LIMIT_DELAY_MS = 50;
 
-  try {
-    const pool = db.getPool();
-    // Fetch tiles to analyze: with R2 URL (so we have a stable image URL), not yet analyzed (or force)
-    const whereClause = forceReanalyze
-      ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
-      : `r2_url IS NOT NULL AND ai_analyzed_at IS NULL AND quality_status != 'rejected'`;
-    const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
-    const total = Number(countRes.rows[0]?.cnt ?? 0);
-    send({ type: 'start', total, batchSize });
-
-    if (total === 0) {
-      send({ type: 'done', processed: 0, total: 0, message: 'Alle Tiles bereits analysiert' });
-      return res.end();
-    }
-
-    // Process in batches
-    let processed = 0;
-    let rejected = 0;
-    let errors = 0;
-    const CONCURRENCY = 20; // max 20 parallel Gemini requests
-    const RATE_LIMIT_DELAY_MS = 50; // 50ms between batches = ~400 req/s
-
-    // Fetch all IDs to process
-    const idsRes = await pool.query(
-      `SELECT id, r2_url, tile128_url FROM mosaic_images WHERE ${whereClause} ORDER BY id ASC LIMIT $1`,
-      [batchSize]
-    );
-    const tiles = idsRes.rows;
-
-    const PROMPT = `Analyze this image as a tile for photo mosaic creation. Return ONLY valid JSON:
+  const PROMPT = `Analyze this image as a tile for photo mosaic creation. Return ONLY valid JSON:
 {
   "suitability": "excellent|good|poor|reject",
   "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|low_quality|null",
@@ -1666,14 +1648,32 @@ Rules:
 - content_tags: 2-4 descriptive tags
 Return ONLY the JSON object, no explanation.`;
 
-    // Process tiles with limited concurrency
+  const themeMap: Record<string, string> = {
+    'portrait_face': 'portrait_medium_skin', 'portrait_skin': 'portrait_medium_skin',
+    'nature_forest': 'nature_forest', 'nature_mountain': 'nature_mountain',
+    'nature_ocean': 'nature_ocean', 'nature_sunset': 'nature_sunset',
+    'nature_snow': 'nature_snow', 'city_night': 'city_night',
+    'city_architecture': 'city_architecture', 'animal': 'animal_colorful',
+    'abstract_colorful': 'abstract_colorful', 'abstract_dark': 'city_night',
+    'abstract_light': 'nature_snow', 'food': 'nature_sunset', 'other': 'nature_mountain',
+  };
+
+  // Process in chunks of batchSize
+  let offset = 0;
+  while (aiJobState.running) {
+    const idsRes = await pool.query(
+      `SELECT id, r2_url, tile128_url FROM mosaic_images WHERE ${whereClause} ORDER BY id ASC LIMIT $1 OFFSET $2`,
+      [Math.min(batchSize, 500), offset]
+    );
+    const tiles = idsRes.rows;
+    if (tiles.length === 0) break;
+
     for (let i = 0; i < tiles.length; i += CONCURRENCY) {
+      if (!aiJobState.running) break;
       const chunk = tiles.slice(i, i + CONCURRENCY);
       await Promise.all(chunk.map(async (tile: any) => {
         const imageUrl = tile.r2_url || tile.tile128_url;
         try {
-          // Download image and convert to base64 for Gemini inline_data
-          // (file_uri only works for gs:// URIs, not arbitrary HTTPS URLs)
           let imageBase64: string;
           let mimeType = 'image/jpeg';
           try {
@@ -1684,8 +1684,7 @@ Return ONLY the JSON object, no explanation.`;
             const imgBuf = await imgRes.arrayBuffer();
             imageBase64 = Buffer.from(imgBuf).toString('base64');
           } catch (downloadErr) {
-            console.warn(`[ai-batch] Image download failed for tile ${tile.id}: ${downloadErr}`);
-            errors++;
+            aiJobState.errors++;
             return;
           }
 
@@ -1712,80 +1711,88 @@ Return ONLY the JSON object, no explanation.`;
             try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
           } else {
             const errText = await geminiResp.text();
-            console.warn(`[ai-batch] Gemini error for tile ${tile.id}: ${geminiResp.status} ${errText.substring(0, 100)}`);
-            errors++;
+            console.warn(`[ai-job] Gemini error for tile ${tile.id}: ${geminiResp.status} ${errText.substring(0, 100)}`);
+            aiJobState.errors++;
+            aiJobState.lastError = `Tile ${tile.id}: HTTP ${geminiResp.status}`;
             return;
           }
 
-          // Map AI theme to semantic_theme format for consistency
-          const themeMap: Record<string, string> = {
-            'portrait_face': 'portrait_medium_skin',
-            'portrait_skin': 'portrait_medium_skin',
-            'nature_forest': 'nature_forest',
-            'nature_mountain': 'nature_mountain',
-            'nature_ocean': 'nature_ocean',
-            'nature_sunset': 'nature_sunset',
-            'nature_snow': 'nature_snow',
-            'city_night': 'city_night',
-            'city_architecture': 'city_architecture',
-            'animal': 'animal_colorful',
-            'abstract_colorful': 'abstract_colorful',
-            'abstract_dark': 'city_night',
-            'abstract_light': 'nature_snow',
-            'food': 'nature_sunset',
-            'other': 'nature_mountain',
-          };
           const mappedTheme = themeMap[aiResult.theme] ?? 'nature_mountain';
-
-          // Update DB with AI analysis results
           await pool.query(
             `UPDATE mosaic_images SET
-               ai_suitability = $1,
-               ai_reject_reason = $2,
-               ai_theme = $3,
-               ai_has_face = $4,
-               ai_face_pct = $5,
-               ai_is_calm = $6,
-               ai_content_tags = $7,
-               ai_analyzed_at = NOW(),
-               -- Also update semantic_theme with AI result for consistency
-               semantic_theme = $3
+               ai_suitability = $1, ai_reject_reason = $2, ai_theme = $3,
+               ai_has_face = $4, ai_face_pct = $5, ai_is_calm = $6,
+               ai_content_tags = $7, ai_analyzed_at = NOW(), semantic_theme = $3
              WHERE id = $8`,
             [
               aiResult.suitability ?? 'good',
               aiResult.reject_reason === 'null' ? null : (aiResult.reject_reason ?? null),
-              mappedTheme,
-              aiResult.has_face ?? false,
-              aiResult.face_area_pct ?? 0,
-              aiResult.is_calm ?? false,
-              JSON.stringify(aiResult.content_tags ?? []),
-              tile.id,
+              mappedTheme, aiResult.has_face ?? false, aiResult.face_area_pct ?? 0,
+              aiResult.is_calm ?? false, JSON.stringify(aiResult.content_tags ?? []), tile.id,
             ]
           );
 
-          if (aiResult.suitability === 'reject') rejected++;
-          processed++;
-          send({ type: 'progress', processed, total, tileId: tile.id, suitability: aiResult.suitability, theme: mappedTheme });
+          if (aiResult.suitability === 'reject') aiJobState.rejected++;
+          aiJobState.processed++;
         } catch (err) {
-          errors++;
-          const errMsg = String(err);
-          console.warn(`[ai-batch] Error processing tile ${tile.id}:`, errMsg);
-          send({ type: 'tile_error', tileId: tile.id, error: errMsg.substring(0, 200) });
+          aiJobState.errors++;
+          aiJobState.lastError = String(err).substring(0, 200);
         }
       }));
       await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY_MS));
     }
-
-    // Invalidate tile index cache so next mosaic uses updated data
-    invalidateIndexCache();
-
-    send({ type: 'done', processed, total, rejected, errors, message: `${processed} Tiles analysiert, ${rejected} als ungeeignet markiert` });
-    res.end();
-  } catch (err) {
-    console.error('[ai-batch] Fatal error:', err);
-    send({ type: 'error', message: String(err) });
-    res.end();
+    offset += tiles.length;
+    if (tiles.length < Math.min(batchSize, 500)) break; // last chunk
   }
+
+  invalidateIndexCache();
+  aiJobState.running = false;
+  aiJobState.finishedAt = new Date();
+  console.log(`[ai-job] Done: ${aiJobState.processed} processed, ${aiJobState.rejected} rejected, ${aiJobState.errors} errors`);
+}
+
+// POST /api/admin/ai-analyze-batch
+// Body: { batchSize?: number, forceReanalyze?: boolean }
+// Starts background job, returns immediately with job status
+app.post('/api/admin/ai-analyze-batch', express.json(), async (req, res) => {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_KEY) return res.status(500).json({ ok: false, error: 'GEMINI_API_KEY not configured' });
+
+  if (aiJobState.running) {
+    return res.json({ ok: true, started: false, message: 'Job läuft bereits', state: aiJobState });
+  }
+
+  const batchSize = Math.min(Number(req.body?.batchSize ?? 500), 30000);
+  const forceReanalyze = req.body?.forceReanalyze === true;
+
+  aiJobState.running = true;
+  aiJobState.startedAt = new Date();
+  aiJobState.finishedAt = null;
+  aiJobState.lastError = null;
+  aiJobState.batchSize = batchSize;
+
+  // Start job in background (don't await)
+  runGeminiAnalysisJob(batchSize, forceReanalyze, GEMINI_KEY).catch(err => {
+    console.error('[ai-job] Unhandled error:', err);
+    aiJobState.running = false;
+    aiJobState.lastError = String(err);
+  });
+
+  res.json({ ok: true, started: true, message: `Background-Job gestartet für bis zu ${batchSize} Tiles`, state: aiJobState });
+});
+
+// POST /api/admin/ai-analyze-stop
+// Stops the running background job
+app.post('/api/admin/ai-analyze-stop', (_req, res) => {
+  if (!aiJobState.running) return res.json({ ok: true, message: 'Kein Job läuft' });
+  aiJobState.running = false;
+  res.json({ ok: true, message: 'Job wird gestoppt...' });
+});
+
+// GET /api/admin/ai-analyze-job-status
+// Returns current job state
+app.get('/api/admin/ai-analyze-job-status', (_req, res) => {
+  res.json({ ok: true, state: aiJobState });
 });
 
 // GET /api/admin/ai-analyze-stats
