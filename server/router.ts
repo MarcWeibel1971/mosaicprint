@@ -2848,6 +2848,223 @@ export const appRouter = router({
       );
       return { ok: true, theme };
     }),
+
+  // ── Bereinigungsassistent ──────────────────────────────────────────────────
+
+  /**
+   * Analysiert den Tile-Pool und gibt Kandidaten für jede der 3 Bereinigungsstufen zurück.
+   * Stufe 1: Automatisch löschbar (rejected + URL-Duplikate)
+   * Stufe 2: Bulk-Delete mit Vorschau (grau+busy, fast-weiss, general+low-score)
+   * Stufe 3: Manuelles Review (zu gesättigte Hauttöne, Gesichter als Tiles)
+   */
+  getCleanupCandidates: publicProcedure.query(async () => {
+    const pool = db.getPool();
+
+    // Stufe 1a: quality_status = 'rejected'
+    const rejectedRes = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status = 'rejected'`
+    );
+    const rejectedCount = Number(rejectedRes.rows[0].cnt);
+
+    // Stufe 1b: URL-Duplikate (behalte niedrigste ID)
+    const urlDupRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM mosaic_images GROUP BY source_url
+      )
+    `);
+    const urlDupCount = Number(urlDupRes.rows[0].cnt);
+
+    // Stufe 2a: grau (chroma < 3) UND busy – strukturlos und unruhig
+    const grayBusyRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
+        AND tile_type = 'busy'
+        AND quality_status != 'rejected'
+    `);
+    const grayBusyCount = Number(grayBusyRes.rows[0].cnt);
+
+    // Stufe 2b: fast-weiss (L > 92, chroma < 5) – kein Mehrwert
+    const nearWhiteRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE avg_l > 92
+        AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5
+        AND quality_status != 'rejected'
+    `);
+    const nearWhiteCount = Number(nearWhiteRes.rows[0].cnt);
+
+    // Stufe 2c: semantic_theme = 'general' UND quality_score < 40
+    const generalLowRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE semantic_theme = 'general'
+        AND quality_score < 40
+        AND quality_status != 'rejected'
+    `);
+    const generalLowCount = Number(generalLowRes.rows[0].cnt);
+
+    // Stufe 3a: Hauttöne zu gesättigt (portrait themes + chroma > 35)
+    const oversaturatedSkinRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE semantic_theme LIKE 'portrait%'
+        AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35
+        AND quality_status != 'rejected'
+    `);
+    const oversaturatedSkinCount = Number(oversaturatedSkinRes.rows[0].cnt);
+
+    // Stufe 3b: Gesichter als Tiles (portrait themes + busy)
+    const portraitBusyRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE semantic_theme LIKE 'portrait%'
+        AND tile_type = 'busy'
+        AND quality_status != 'rejected'
+    `);
+    const portraitBusyCount = Number(portraitBusyRes.rows[0].cnt);
+
+    return {
+      stage1: {
+        rejected: rejectedCount,
+        urlDuplicates: urlDupCount,
+        total: rejectedCount + urlDupCount,
+      },
+      stage2: {
+        grayBusy: grayBusyCount,
+        nearWhite: nearWhiteCount,
+        generalLow: generalLowCount,
+        total: grayBusyCount + nearWhiteCount + generalLowCount,
+      },
+      stage3: {
+        oversaturatedSkin: oversaturatedSkinCount,
+        portraitBusy: portraitBusyCount,
+        total: oversaturatedSkinCount + portraitBusyCount,
+      },
+    };
+  }),
+
+  /**
+   * Gibt eine Vorschau (max. 50 Tiles) für eine bestimmte Bereinigungskategorie zurück.
+   */
+  getCleanupPreview: publicProcedure
+    .input(z.object({
+      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'oversaturatedSkin', 'portraitBusy']),
+      limit: z.number().min(1).max(200).default(50),
+    }))
+    .query(async ({ input }) => {
+      const pool = db.getPool();
+      let whereClause = '';
+      switch (input.category) {
+        case 'rejected':
+          whereClause = `quality_status = 'rejected'`;
+          break;
+        case 'urlDuplicates':
+          whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
+          break;
+        case 'grayBusy':
+          whereClause = `SQRT(avg_a*avg_a + avg_b*avg_b) < 3 AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+        case 'nearWhite':
+          whereClause = `avg_l > 92 AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected'`;
+          break;
+        case 'generalLow':
+          whereClause = `semantic_theme = 'general' AND quality_score < 40 AND quality_status != 'rejected'`;
+          break;
+        case 'oversaturatedSkin':
+          whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
+          break;
+        case 'portraitBusy':
+          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+      }
+      const res = await pool.query(
+        `SELECT id, tile128_url, thumb_url, source_url, avg_l, avg_a, avg_b,
+                tile_type, semantic_theme, quality_score, quality_status,
+                photographer_name, import_query
+         FROM mosaic_images
+         WHERE ${whereClause}
+         ORDER BY id ASC
+         LIMIT $1`,
+        [input.limit]
+      );
+      return {
+        tiles: res.rows.map(r => ({
+          id: r.id,
+          thumbUrl: r.tile128_url || r.thumb_url,
+          sourceUrl: r.source_url,
+          avgL: Number(r.avg_l),
+          avgA: Number(r.avg_a),
+          avgB: Number(r.avg_b),
+          chroma: Math.round(Math.sqrt(r.avg_a ** 2 + r.avg_b ** 2)),
+          tileType: r.tile_type,
+          semanticTheme: r.semantic_theme,
+          qualityScore: r.quality_score,
+          qualityStatus: r.quality_status,
+          photographerName: r.photographer_name,
+          importQuery: r.import_query,
+        })),
+      };
+    }),
+
+  /**
+   * Löscht Tiles einer bestimmten Bereinigungskategorie (mit optionaler ID-Liste für selektives Löschen).
+   * Gibt die Anzahl gelöschter Tiles zurück.
+   */
+  bulkDeleteTiles: publicProcedure
+    .input(z.object({
+      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'oversaturatedSkin', 'portraitBusy']),
+      // Wenn ids angegeben: nur diese IDs löschen (selektiv)
+      // Wenn ids leer: alle Kandidaten der Kategorie löschen
+      ids: z.array(z.number()).optional(),
+      dryRun: z.boolean().default(false),
+    }))
+    .mutation(async ({ input }) => {
+      const pool = db.getPool();
+      let whereClause = '';
+      switch (input.category) {
+        case 'rejected':
+          whereClause = `quality_status = 'rejected'`;
+          break;
+        case 'urlDuplicates':
+          whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
+          break;
+        case 'grayBusy':
+          whereClause = `SQRT(avg_a*avg_a + avg_b*avg_b) < 3 AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+        case 'nearWhite':
+          whereClause = `avg_l > 92 AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected'`;
+          break;
+        case 'generalLow':
+          whereClause = `semantic_theme = 'general' AND quality_score < 40 AND quality_status != 'rejected'`;
+          break;
+        case 'oversaturatedSkin':
+          whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
+          break;
+        case 'portraitBusy':
+          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+      }
+
+      // Wenn spezifische IDs angegeben: nur diese löschen (Sicherheitsnetz: müssen auch Kriterium erfüllen)
+      if (input.ids && input.ids.length > 0) {
+        whereClause = `id = ANY($1::int[]) AND (${whereClause})`;
+      }
+
+      if (input.dryRun) {
+        const countRes = await pool.query(
+          input.ids && input.ids.length > 0
+            ? `SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`
+            : `SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`,
+          input.ids && input.ids.length > 0 ? [input.ids] : []
+        );
+        return { deleted: 0, wouldDelete: Number(countRes.rows[0].cnt), dryRun: true };
+      }
+
+      const deleteRes = await pool.query(
+        input.ids && input.ids.length > 0
+          ? `DELETE FROM mosaic_images WHERE ${whereClause} RETURNING id`
+          : `DELETE FROM mosaic_images WHERE ${whereClause} RETURNING id`,
+        input.ids && input.ids.length > 0 ? [input.ids] : []
+      );
+      return { deleted: deleteRes.rowCount ?? 0, wouldDelete: 0, dryRun: false };
+    }),
 });
 
 // ── Quality Check Async Runner ─────────────────────────────────────────────────

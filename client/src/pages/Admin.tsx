@@ -5070,6 +5070,9 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       {/* ── Semantic Auto-Tagger ──────────────────────────────────────────────────────────── */}
       <SemanticTaggerPanel onMessage={onMessage} />
 
+      {/* ── Bereinigungsassistent ──────────────────────────────────────────────────────────── */}
+      <CleanupAssistant onMessage={onMessage} />
+
     </div>
   )
 }
@@ -5211,6 +5214,336 @@ function SemanticTaggerPanel({ onMessage }: { onMessage: (m: { text: string; typ
               Diese Tags ermöglichen thematisches Filtering im Studio und gezielteres Smart-Import.
             </p>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Bereinigungsassistent ────────────────────────────────────────────────
+type CleanupCategory = 'rejected' | 'urlDuplicates' | 'grayBusy' | 'nearWhite' | 'generalLow' | 'oversaturatedSkin' | 'portraitBusy'
+
+interface CleanupTile {
+  id: number
+  thumbUrl: string | null
+  sourceUrl: string | null
+  avgL: number
+  avgA: number
+  avgB: number
+  chroma: number
+  tileType: string | null
+  semanticTheme: string | null
+  qualityScore: number | null
+  qualityStatus: string | null
+  photographerName: string | null
+  importQuery: string | null
+}
+
+interface CleanupCandidates {
+  stage1: { rejected: number; urlDuplicates: number; total: number }
+  stage2: { grayBusy: number; nearWhite: number; generalLow: number; total: number }
+  stage3: { oversaturatedSkin: number; portraitBusy: number; total: number }
+}
+
+function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const [candidates, setCandidates] = useState<CleanupCandidates | null>(null)
+  const [loadingCandidates, setLoadingCandidates] = useState(false)
+  const [previewCategory, setPreviewCategory] = useState<CleanupCategory | null>(null)
+  const [previewTiles, setPreviewTiles] = useState<CleanupTile[]>([])
+  const [loadingPreview, setLoadingPreview] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const [confirmCategory, setConfirmCategory] = useState<CleanupCategory | null>(null)
+
+  const fetchCandidates = useCallback(async () => {
+    setLoadingCandidates(true)
+    try {
+      const res = await fetch('/api/trpc/getCleanupCandidates')
+      const data = await res.json()
+      setCandidates(data.result?.data?.json ?? data.result?.data ?? null)
+    } catch { /* ignore */ }
+    finally { setLoadingCandidates(false) }
+  }, [])
+
+  useEffect(() => { if (expanded) fetchCandidates() }, [expanded, fetchCandidates])
+
+  const fetchPreview = useCallback(async (cat: CleanupCategory) => {
+    setPreviewCategory(cat)
+    setPreviewTiles([])
+    setSelectedIds(new Set())
+    setLoadingPreview(true)
+    try {
+      const res = await fetch('/api/trpc/getCleanupPreview?input=' + encodeURIComponent(JSON.stringify({ category: cat, limit: 100 })))
+      const data = await res.json()
+      const tiles: CleanupTile[] = data.result?.data?.json?.tiles ?? data.result?.data?.tiles ?? []
+      setPreviewTiles(tiles)
+      // Default: alle ausgewählt
+      setSelectedIds(new Set(tiles.map(t => t.id)))
+    } catch { /* ignore */ }
+    finally { setLoadingPreview(false) }
+  }, [])
+
+  const toggleTile = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleDelete = useCallback(async (cat: CleanupCategory, ids?: number[]) => {
+    setDeleting(true)
+    setConfirmCategory(null)
+    try {
+      const body = ids ? { category: cat, ids, dryRun: false } : { category: cat, dryRun: false }
+      const res = await fetch('/api/trpc/bulkDeleteTiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      const deleted: number = data.result?.data?.json?.deleted ?? data.result?.data?.deleted ?? 0
+      onMessage({ text: `🗑️ ${deleted} Tiles gelöscht`, type: 'success' })
+      // Aktualisieren
+      fetchCandidates()
+      if (previewCategory === cat) {
+        setPreviewTiles(prev => prev.filter(t => !selectedIds.has(t.id)))
+        setSelectedIds(new Set())
+      }
+    } catch (e) {
+      onMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
+    }
+    finally { setDeleting(false) }
+  }, [onMessage, fetchCandidates, previewCategory, selectedIds])
+
+  const categoryMeta: Record<CleanupCategory, { label: string; desc: string; stage: 1 | 2 | 3; color: string; icon: string }> = {
+    rejected: { label: 'Abgelehnte Tiles', desc: 'quality_status = rejected – bereits aus Index gefiltert, aber noch in DB', stage: 1, color: 'red', icon: '❌' },
+    urlDuplicates: { label: 'URL-Duplikate', desc: 'Gleiche source_url – nur niedrigste ID wird behalten', stage: 1, color: 'orange', icon: '🔁' },
+    grayBusy: { label: 'Grau + Busy', desc: 'Chroma < 3 UND tile_type = busy – strukturlos und unruhig', stage: 2, color: 'gray', icon: '🌫️' },
+    nearWhite: { label: 'Fast-Weiss', desc: 'L > 92 UND Chroma < 5 – kein Mehrwert für Mosaike', stage: 2, color: 'blue', icon: '⬜' },
+    generalLow: { label: 'Allgemein + Tiefer Score', desc: 'semantic_theme = general UND quality_score < 40', stage: 2, color: 'yellow', icon: '📉' },
+    oversaturatedSkin: { label: 'Übersättigte Hauttöne', desc: 'Portrait-Theme UND Chroma > 35 – zu intensiv für Mosaike', stage: 3, color: 'pink', icon: '🎨' },
+    portraitBusy: { label: 'Gesichter als Tiles', desc: 'Portrait-Theme UND tile_type = busy – stören das Mosaik', stage: 3, color: 'purple', icon: '👤' },
+  }
+
+  const stageColors = { 1: 'bg-red-50 border-red-200', 2: 'bg-amber-50 border-amber-200', 3: 'bg-blue-50 border-blue-200' }
+  const stageTitles = { 1: '🔴 Stufe 1 – Automatisch löschbar', 2: '🟡 Stufe 2 – Bulk-Delete mit Vorschau', 3: '🔵 Stufe 3 – Manuelles Review' }
+
+  const countForCat = (cat: CleanupCategory): number => {
+    if (!candidates) return 0
+    if (cat === 'rejected') return candidates.stage1.rejected
+    if (cat === 'urlDuplicates') return candidates.stage1.urlDuplicates
+    if (cat === 'grayBusy') return candidates.stage2.grayBusy
+    if (cat === 'nearWhite') return candidates.stage2.nearWhite
+    if (cat === 'generalLow') return candidates.stage2.generalLow
+    if (cat === 'oversaturatedSkin') return candidates.stage3.oversaturatedSkin
+    if (cat === 'portraitBusy') return candidates.stage3.portraitBusy
+    return 0
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mt-6">
+      {/* Header */}
+      <div
+        className="flex items-center justify-between p-5 cursor-pointer hover:bg-gray-50 transition-colors"
+        onClick={() => setExpanded(e => !e)}
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center text-xl">🧹</div>
+          <div>
+            <h3 className="font-bold text-gray-900">Bereinigungsassistent</h3>
+            <p className="text-xs text-gray-500">
+              Ungeeignete Tiles gezielt identifizieren und löschen – 3-stufiger Workflow mit Vorschau
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {candidates && (
+            <span className="text-xs font-semibold bg-red-100 text-red-700 px-2 py-1 rounded-full">
+              {candidates.stage1.total + candidates.stage2.total + candidates.stage3.total} Kandidaten
+            </span>
+          )}
+          <span className="text-gray-400 text-sm">{expanded ? '▲ Einklappen' : '▼ Ausklappen'}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-gray-100 p-5 space-y-6">
+          {/* Kandidaten laden */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={fetchCandidates}
+              disabled={loadingCandidates}
+              className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm"
+            >
+              {loadingCandidates ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              Kandidaten analysieren
+            </button>
+            {candidates && (
+              <span className="text-sm text-gray-600">
+                Gesamt: <strong>{candidates.stage1.total + candidates.stage2.total + candidates.stage3.total}</strong> Tiles
+                ({candidates.stage1.total} auto · {candidates.stage2.total} bulk · {candidates.stage3.total} manuell)
+              </span>
+            )}
+          </div>
+
+          {/* Stufen */}
+          {([1, 2, 3] as const).map(stage => {
+            const cats = (Object.entries(categoryMeta) as [CleanupCategory, typeof categoryMeta[CleanupCategory]][])
+              .filter(([, m]) => m.stage === stage)
+            return (
+              <div key={stage} className={`rounded-xl border p-4 ${stageColors[stage]}`}>
+                <h4 className="font-bold text-sm text-gray-800 mb-3">{stageTitles[stage]}</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {cats.map(([cat, meta]) => {
+                    const count = countForCat(cat)
+                    return (
+                      <div key={cat} className="bg-white rounded-xl border border-gray-200 p-3">
+                        <div className="flex items-start justify-between mb-1">
+                          <div>
+                            <span className="font-semibold text-sm text-gray-900">{meta.icon} {meta.label}</span>
+                            <p className="text-xs text-gray-500 mt-0.5">{meta.desc}</p>
+                          </div>
+                          <span className={`text-sm font-bold ml-2 shrink-0 ${count > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            {candidates ? count.toLocaleString() : '–'}
+                          </span>
+                        </div>
+                        {count > 0 && (
+                          <div className="flex gap-2 mt-2">
+                            <button
+                              onClick={() => fetchPreview(cat)}
+                              className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg transition-colors font-medium"
+                            >
+                              👁️ Vorschau ({Math.min(count, 100)})
+                            </button>
+                            {stage === 1 && (
+                              <button
+                                onClick={() => setConfirmCategory(cat)}
+                                disabled={deleting}
+                                className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded-lg transition-colors font-medium"
+                              >
+                                🗑️ Alle löschen
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+
+          {/* Bestätigungs-Dialog */}
+          {confirmCategory && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+                <h3 className="font-bold text-lg text-gray-900 mb-2">Tiles löschen?</h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  <strong>{countForCat(confirmCategory).toLocaleString()} Tiles</strong> der Kategorie
+                  &ldquo;{categoryMeta[confirmCategory].label}&rdquo; werden unwiderruflich gelöscht.
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => handleDelete(confirmCategory)}
+                    disabled={deleting}
+                    className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-2 rounded-xl transition-colors"
+                  >
+                    {deleting ? 'Löschen...' : 'Ja, löschen'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmCategory(null)}
+                    className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2 rounded-xl transition-colors"
+                  >
+                    Abbrechen
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Vorschau-Grid */}
+          {previewCategory && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="bg-gray-50 border-b border-gray-200 px-4 py-3 flex items-center justify-between">
+                <div>
+                  <span className="font-semibold text-sm text-gray-900">
+                    {categoryMeta[previewCategory].icon} {categoryMeta[previewCategory].label}
+                  </span>
+                  <span className="text-xs text-gray-500 ml-2">
+                    {previewTiles.length} Tiles · {selectedIds.size} ausgewählt
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSelectedIds(new Set(previewTiles.map(t => t.id)))}
+                    className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded-lg"
+                  >
+                    Alle wählen
+                  </button>
+                  <button
+                    onClick={() => setSelectedIds(new Set())}
+                    className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded-lg"
+                  >
+                    Keine
+                  </button>
+                  <button
+                    onClick={() => handleDelete(previewCategory, Array.from(selectedIds))}
+                    disabled={deleting || selectedIds.size === 0}
+                    className="text-xs bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white font-semibold px-3 py-1 rounded-lg transition-colors"
+                  >
+                    {deleting ? 'Löschen...' : `🗑️ ${selectedIds.size} löschen`}
+                  </button>
+                  <button
+                    onClick={() => { setPreviewCategory(null); setPreviewTiles([]) }}
+                    className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded-lg"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              {loadingPreview ? (
+                <div className="flex items-center justify-center h-32 text-gray-400">
+                  <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Lade Vorschau...
+                </div>
+              ) : (
+                <div className="p-3 grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-12 gap-1.5 max-h-96 overflow-y-auto">
+                  {previewTiles.map(tile => (
+                    <div
+                      key={tile.id}
+                      onClick={() => toggleTile(tile.id)}
+                      className={`relative cursor-pointer rounded-lg overflow-hidden aspect-square border-2 transition-all ${
+                        selectedIds.has(tile.id) ? 'border-red-500 opacity-100' : 'border-transparent opacity-40'
+                      }`}
+                      title={`ID:${tile.id} | L:${tile.avgL.toFixed(0)} C:${tile.chroma} | ${tile.tileType ?? '–'} | ${tile.semanticTheme ?? '–'} | ${tile.importQuery ?? ''}`}
+                    >
+                      {tile.thumbUrl ? (
+                        <img src={tile.thumbUrl} alt="" className="w-full h-full object-cover" loading="lazy" />
+                      ) : (
+                        <div
+                          className="w-full h-full"
+                          style={{
+                            background: `lab(${tile.avgL}% ${tile.avgA} ${tile.avgB})`,
+                          }}
+                        />
+                      )}
+                      {selectedIds.has(tile.id) && (
+                        <div className="absolute top-0.5 right-0.5 w-3 h-3 bg-red-500 rounded-full" />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {previewTiles.length > 0 && (
+                <div className="bg-gray-50 border-t border-gray-200 px-4 py-2 text-xs text-gray-500">
+                  Klick = auswählen/abwählen · Rot = wird gelöscht · Grau = wird behalten
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
