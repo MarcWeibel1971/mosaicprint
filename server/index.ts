@@ -759,7 +759,7 @@ No explanation, only JSON.`;
     }
 
     const geminiResp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY2}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1563,7 +1563,7 @@ app.get('/api/admin/ai-debug', async (_req, res) => {
           const imgBuf2 = await imgRes2.arrayBuffer();
           const base64 = Buffer.from(imgBuf2).toString('base64');
           const gRes = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1690,7 +1690,7 @@ Return ONLY the JSON object, no explanation.`;
           }
 
           const geminiResp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
