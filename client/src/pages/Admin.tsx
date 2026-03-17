@@ -5308,7 +5308,7 @@ function SemanticTaggerPanel({ onMessage }: { onMessage: (m: { text: string; typ
 }
 
 // ── Bereinigungsassistent ────────────────────────────────────────────────
-type CleanupCategory = 'rejected' | 'urlDuplicates' | 'grayBusy' | 'nearWhite' | 'generalLow' | 'oversaturatedSkin' | 'portraitBusy'
+type CleanupCategory = 'rejected' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore' | 'oversaturatedSkin' | 'portraitBusy'
 
 interface CleanupTile {
   id: number
@@ -5329,8 +5329,8 @@ interface CleanupTile {
 interface CleanupCandidates {
   totalActive: number
   themeDistribution: Array<{ theme: string; count: number; pct: number }>
-  stage1: { rejected: number; urlDuplicates: number; total: number }
-  stage2: { grayBusy: number; nearWhite: number; generalLow: number; total: number }
+  stage1: { rejected: number; urlDuplicates: number; pixabayHotlink: number; total: number }
+  stage2: { grayBusy: number; nearWhite: number; lowScore: number; total: number }
   stage3: { oversaturatedSkin: number; portraitBusy: number; total: number }
 }
 
@@ -5410,9 +5410,10 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
   const categoryMeta: Record<CleanupCategory, { label: string; desc: string; stage: 1 | 2 | 3; color: string; icon: string }> = {
     rejected: { label: 'Abgelehnte Tiles', desc: 'quality_status = rejected – bereits aus Index gefiltert, aber noch in DB', stage: 1, color: 'red', icon: '❌' },
     urlDuplicates: { label: 'URL-Duplikate', desc: 'Gleiche source_url – nur niedrigste ID wird behalten', stage: 1, color: 'orange', icon: '🔁' },
+    pixabayHotlink: { label: 'Pixabay ohne R2', desc: 'Pixabay-Tiles ohne R2-URL – Hotlink-geschützt, nicht mehr nutzbar', stage: 1, color: 'amber', icon: '🔒' },
     grayBusy: { label: 'Grau + Busy', desc: 'Chroma < 3 UND tile_type = busy – strukturlos und unruhig', stage: 2, color: 'gray', icon: '🌫️' },
     nearWhite: { label: 'Fast-Weiss', desc: 'L > 92 UND Chroma < 5 – kein Mehrwert für Mosaike', stage: 2, color: 'blue', icon: '⬜' },
-    generalLow: { label: 'Allgemein + Tiefer Score', desc: 'semantic_theme = general UND quality_score < 40', stage: 2, color: 'yellow', icon: '📉' },
+    lowScore: { label: 'Tiefer Qualitäts-Score', desc: 'quality_score < 40 – schlechte Textur/Farbvielfalt', stage: 2, color: 'yellow', icon: '📉' },
     oversaturatedSkin: { label: 'Übersättigte Hauttöne', desc: 'Portrait-Theme UND Chroma > 35 – zu intensiv für Mosaike', stage: 3, color: 'pink', icon: '🎨' },
     portraitBusy: { label: 'Gesichter als Tiles', desc: 'Portrait-Theme UND tile_type = busy – stören das Mosaik', stage: 3, color: 'purple', icon: '👤' },
   }
@@ -5424,9 +5425,10 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     if (!candidates) return 0
     if (cat === 'rejected') return candidates.stage1.rejected
     if (cat === 'urlDuplicates') return candidates.stage1.urlDuplicates
+    if (cat === 'pixabayHotlink') return candidates.stage1.pixabayHotlink
     if (cat === 'grayBusy') return candidates.stage2.grayBusy
     if (cat === 'nearWhite') return candidates.stage2.nearWhite
-    if (cat === 'generalLow') return candidates.stage2.generalLow
+    if (cat === 'lowScore') return candidates.stage2.lowScore
     if (cat === 'oversaturatedSkin') return candidates.stage3.oversaturatedSkin
     if (cat === 'portraitBusy') return candidates.stage3.portraitBusy
     return 0

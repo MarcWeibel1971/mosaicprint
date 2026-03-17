@@ -2901,76 +2901,46 @@ export const appRouter = router({
   getCleanupCandidates: publicProcedure.query(async () => {
     const pool = db.getPool();
 
-    // Stufe 1a: quality_status = 'rejected'
-    const rejectedRes = await pool.query(
-      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status = 'rejected'`
-    );
-    const rejectedCount = Number(rejectedRes.rows[0].cnt);
-
-    // Stufe 1b: URL-Duplikate (behalte niedrigste ID)
-    const urlDupRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE id NOT IN (
-        SELECT MIN(id) FROM mosaic_images GROUP BY source_url
-      )
+    // Alle Counts in einem einzigen Query (deutlich schneller auf grosser DB)
+    const statsRes = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE quality_status = 'rejected') AS rejected,
+        COUNT(*) FILTER (WHERE id NOT IN (
+          SELECT MIN(id) FROM mosaic_images GROUP BY source_url
+        )) AS url_duplicates,
+        COUNT(*) FILTER (WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
+          AND tile_type = 'busy' AND quality_status != 'rejected') AS gray_busy,
+        COUNT(*) FILTER (WHERE avg_l > 92
+          AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected') AS near_white,
+        COUNT(*) FILTER (WHERE quality_score < 40
+          AND quality_status != 'rejected') AS low_score,
+        COUNT(*) FILTER (WHERE semantic_theme LIKE 'portrait%'
+          AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected') AS oversaturated_skin,
+        COUNT(*) FILTER (WHERE semantic_theme LIKE 'portrait%'
+          AND tile_type = 'busy' AND quality_status != 'rejected') AS portrait_busy,
+        COUNT(*) FILTER (WHERE COALESCE(source_provider, '') = 'pixabay'
+          AND r2_url IS NULL AND quality_status != 'rejected') AS pixabay_hotlink,
+        COUNT(*) FILTER (WHERE quality_status != 'rejected') AS total_active
+      FROM mosaic_images
     `);
-    const urlDupCount = Number(urlDupRes.rows[0].cnt);
+    const s = statsRes.rows[0];
+    const totalActive = Number(s.total_active);
+    const rejectedCount = Number(s.rejected);
+    const urlDupCount = Number(s.url_duplicates);
+    const grayBusyCount = Number(s.gray_busy);
+    const nearWhiteCount = Number(s.near_white);
+    const lowScoreCount = Number(s.low_score);
+    const oversaturatedSkinCount = Number(s.oversaturated_skin);
+    const portraitBusyCount = Number(s.portrait_busy);
+    const pixabayHotlinkCount = Number(s.pixabay_hotlink);
 
-    // Stufe 2a: grau (chroma < 3) UND busy – strukturlos und unruhig
-    const grayBusyRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
-        AND tile_type = 'busy'
-        AND quality_status != 'rejected'
-    `);
-    const grayBusyCount = Number(grayBusyRes.rows[0].cnt);
-
-    // Stufe 2b: fast-weiss (L > 92, chroma < 5) – kein Mehrwert
-    const nearWhiteRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE avg_l > 92
-        AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5
-        AND quality_status != 'rejected'
-    `);
-    const nearWhiteCount = Number(nearWhiteRes.rows[0].cnt);
-
-    // Stufe 2c: semantic_theme = 'general' UND quality_score < 40
-    const generalLowRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE semantic_theme = 'general'
-        AND quality_score < 40
-        AND quality_status != 'rejected'
-    `);
-    const generalLowCount = Number(generalLowRes.rows[0].cnt);
-
-    // Stufe 3a: Hauttöne zu gesättigt (portrait themes + chroma > 35)
-    const oversaturatedSkinRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE semantic_theme LIKE 'portrait%'
-        AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35
-        AND quality_status != 'rejected'
-    `);
-    const oversaturatedSkinCount = Number(oversaturatedSkinRes.rows[0].cnt);
-
-    // Stufe 3b: Gesichter als Tiles (portrait themes + busy)
-    const portraitBusyRes = await pool.query(`
-      SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE semantic_theme LIKE 'portrait%'
-        AND tile_type = 'busy'
-        AND quality_status != 'rejected'
-    `);
-    const portraitBusyCount = Number(portraitBusyRes.rows[0].cnt);
-
-    // Pool-Statistik für Kontext
-    const totalRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status != 'rejected'`);
-    const totalActive = Number(totalRes.rows[0].cnt);
     const themeDistRes = await pool.query(`
       SELECT semantic_theme, COUNT(*) as cnt
       FROM mosaic_images
       WHERE quality_status != 'rejected'
       GROUP BY semantic_theme
       ORDER BY cnt DESC
-      LIMIT 10
+      LIMIT 12
     `);
     const themeDistribution = themeDistRes.rows.map((r: {semantic_theme: string; cnt: string}) => ({
       theme: r.semantic_theme ?? 'null',
@@ -2984,13 +2954,14 @@ export const appRouter = router({
       stage1: {
         rejected: rejectedCount,
         urlDuplicates: urlDupCount,
-        total: rejectedCount + urlDupCount,
+        pixabayHotlink: pixabayHotlinkCount,
+        total: rejectedCount + urlDupCount + pixabayHotlinkCount,
       },
       stage2: {
         grayBusy: grayBusyCount,
         nearWhite: nearWhiteCount,
-        generalLow: generalLowCount,
-        total: grayBusyCount + nearWhiteCount + generalLowCount,
+        lowScore: lowScoreCount,
+        total: grayBusyCount + nearWhiteCount + lowScoreCount,
       },
       stage3: {
         oversaturatedSkin: oversaturatedSkinCount,
@@ -3005,7 +2976,7 @@ export const appRouter = router({
    */
   getCleanupPreview: publicProcedure
     .input(z.object({
-      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'oversaturatedSkin', 'portraitBusy']),
+      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'lowScore', 'generalLow', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       limit: z.number().min(1).max(200).default(50),
     }))
     .query(async ({ input }) => {
@@ -3024,14 +2995,18 @@ export const appRouter = router({
         case 'nearWhite':
           whereClause = `avg_l > 92 AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected'`;
           break;
-        case 'generalLow':
-          whereClause = `semantic_theme = 'general' AND quality_score < 40 AND quality_status != 'rejected'`;
+        case 'lowScore':
+        case 'generalLow': // backward compat
+          whereClause = `quality_score < 40 AND quality_status != 'rejected'`;
           break;
         case 'oversaturatedSkin':
           whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
           break;
         case 'portraitBusy':
           whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+        case 'pixabayHotlink':
+          whereClause = `COALESCE(source_provider, '') = 'pixabay' AND r2_url IS NULL AND quality_status != 'rejected'`;
           break;
       }
       const res = await pool.query(
@@ -3069,7 +3044,7 @@ export const appRouter = router({
    */
   bulkDeleteTiles: publicProcedure
     .input(z.object({
-      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'oversaturatedSkin', 'portraitBusy']),
+      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'lowScore', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       // Wenn ids angegeben: nur diese IDs löschen (selektiv)
       // Wenn ids leer: alle Kandidaten der Kategorie löschen
       ids: z.array(z.number()).optional(),
@@ -3091,14 +3066,18 @@ export const appRouter = router({
         case 'nearWhite':
           whereClause = `avg_l > 92 AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected'`;
           break;
-        case 'generalLow':
-          whereClause = `semantic_theme = 'general' AND quality_score < 40 AND quality_status != 'rejected'`;
+        case 'lowScore':
+        case 'generalLow': // backward compat
+          whereClause = `quality_score < 40 AND quality_status != 'rejected'`;
           break;
         case 'oversaturatedSkin':
           whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
           break;
         case 'portraitBusy':
           whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          break;
+        case 'pixabayHotlink':
+          whereClause = `COALESCE(source_provider, '') = 'pixabay' AND r2_url IS NULL AND quality_status != 'rejected'`;
           break;
       }
 
