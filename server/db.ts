@@ -263,7 +263,28 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS semantic_theme TEXT DEFAULT NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_semantic_theme ON mosaic_images (semantic_theme)`);
 
-  console.log("[DB] Schema ensured (v5 with semantic_theme)");
+  // ── AI Vision Analysis fields (Gemini Vision batch analysis) ─────────────────
+  // ai_suitability: 'excellent' | 'good' | 'poor' | 'reject' – overall mosaic suitability
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_suitability TEXT DEFAULT NULL`);
+  // ai_theme: precise semantic theme from AI (e.g. 'portrait_face', 'nature_forest', 'architecture')
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_theme TEXT DEFAULT NULL`);
+  // ai_has_face: true if tile contains a human face
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_has_face BOOLEAN DEFAULT NULL`);
+  // ai_face_pct: percentage of tile area covered by face(s)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_face_pct REAL DEFAULT NULL`);
+  // ai_reject_reason: reason for rejection if ai_suitability = 'reject'
+  // Values: 'watermark' | 'face_closeup' | 'blurry' | 'logo' | 'text_overlay' | 'low_quality' | null
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_reject_reason TEXT DEFAULT NULL`);
+  // ai_content_tags: JSON array of content tags from AI (e.g. ['sunset', 'mountain', 'warm_tones'])
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_content_tags TEXT DEFAULT NULL`);
+  // ai_is_calm: true if tile is visually calm/uniform (good for skin/background regions)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_is_calm BOOLEAN DEFAULT NULL`);
+  // ai_analyzed_at: timestamp of last AI analysis (NULL = not yet analyzed)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_analyzed_at TIMESTAMPTZ DEFAULT NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_suitability ON mosaic_images (ai_suitability)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_analyzed_at ON mosaic_images (ai_analyzed_at)`);
+
+  console.log("[DB] Schema ensured (v6 with AI Vision fields)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────

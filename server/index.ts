@@ -112,10 +112,13 @@ app.get("/api/tile-lab-index", async (req, res) => {
               bl_l, bl_a, bl_b, br_l, br_a, br_b,
               COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly,
               COALESCE(tile_type, 'medium') as tile_type,
-              edge_energy
+              edge_energy,
+              ai_is_calm,
+              ai_suitability
        FROM mosaic_images
        WHERE avg_l IS NOT NULL
          AND COALESCE(quality_status, 'pending') != 'rejected'
+         AND COALESCE(ai_suitability, 'good') != 'reject'
          AND (r2_url IS NOT NULL OR COALESCE(source_provider, '') != 'pixabay')
          ${themeFilter} ORDER BY id ASC`,
       queryParams
@@ -166,11 +169,16 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
       buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
-      // tileComplexity: direkt aus tile_type-Spalte der DB (calm=0.0, medium=0.5, busy=1.0)
-      // Verwendet den beim Import berechneten Wert aus computeLabFull() – konsistenter als
-      // nachträgliche Berechnung aus Quadranten-Varianz.
-      const tileTypeDb = row.tile_type as string ?? 'medium';
-      const tileComplexity = tileTypeDb === 'calm' ? 0.0 : tileTypeDb === 'busy' ? 1.0 : 0.5;
+      // tileComplexity: Priorität: ai_is_calm (Gemini Vision) > tile_type (LAB-basiert)
+      // ai_is_calm=true → 0.0 (calm), ai_is_calm=false → 0.7 (leicht busy)
+      // Fallback auf tile_type wenn noch nicht KI-analysiert
+      let tileComplexity: number;
+      if (row.ai_is_calm !== null && row.ai_is_calm !== undefined) {
+        tileComplexity = row.ai_is_calm ? 0.0 : 0.7; // KI-basiert: calm oder leicht busy
+      } else {
+        const tileTypeDb = row.tile_type as string ?? 'medium';
+        tileComplexity = tileTypeDb === 'calm' ? 0.0 : tileTypeDb === 'busy' ? 1.0 : 0.5;
+      }
       buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
       buf.writeFloatLE(tileComplexity, offset);   offset += 4;  // [15] tileComplexity (0=calm, 0.5=medium, 1=busy)
     }
@@ -1517,6 +1525,199 @@ app.get('/api/admin/r2-diagnosis', async (_req, res) => {
     res.json({ ok: true, stats: stats.rows[0], byProvider: providerStats.rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Gemini Vision Batch-Analyse (über SSE für Fortschrittsanzeige) ──────────────────────
+// POST /api/admin/ai-analyze-batch
+// Body: { batchSize?: number, forceReanalyze?: boolean }
+// Returns SSE stream: { type: 'progress'|'done'|'error', processed, total, current?, result? }
+app.post('/api/admin/ai-analyze-batch', express.json(), async (req, res) => {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_KEY) return res.status(500).json({ ok: false, error: 'GEMINI_API_KEY not configured' });
+
+  const batchSize = Math.min(Number(req.body?.batchSize ?? 50), 200);
+  const forceReanalyze = req.body?.forceReanalyze === true;
+
+  // SSE setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  try {
+    const pool = db.getPool();
+    // Fetch tiles to analyze: with R2 URL (so we have a stable image URL), not yet analyzed (or force)
+    const whereClause = forceReanalyze
+      ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
+      : `r2_url IS NOT NULL AND ai_analyzed_at IS NULL AND quality_status != 'rejected'`;
+    const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
+    const total = Number(countRes.rows[0]?.cnt ?? 0);
+    send({ type: 'start', total, batchSize });
+
+    if (total === 0) {
+      send({ type: 'done', processed: 0, total: 0, message: 'Alle Tiles bereits analysiert' });
+      return res.end();
+    }
+
+    // Process in batches
+    let processed = 0;
+    let rejected = 0;
+    let errors = 0;
+    const CONCURRENCY = 5; // max 5 parallel Gemini requests
+    const RATE_LIMIT_DELAY_MS = 200; // 200ms between batches = ~25 req/s
+
+    // Fetch all IDs to process
+    const idsRes = await pool.query(
+      `SELECT id, r2_url, tile128_url FROM mosaic_images WHERE ${whereClause} ORDER BY id ASC LIMIT $1`,
+      [batchSize]
+    );
+    const tiles = idsRes.rows;
+
+    const PROMPT = `Analyze this image as a tile for photo mosaic creation. Return ONLY valid JSON:
+{
+  "suitability": "excellent|good|poor|reject",
+  "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|low_quality|null",
+  "theme": "portrait_face|portrait_skin|nature_forest|nature_mountain|nature_ocean|nature_sunset|nature_snow|city_night|city_architecture|animal|abstract_colorful|abstract_dark|abstract_light|food|other",
+  "has_face": true|false,
+  "face_area_pct": 0-100,
+  "is_calm": true|false,
+  "content_tags": ["tag1", "tag2", "tag3"]
+}
+Rules:
+- suitability=reject if: watermark visible, face fills >40% of tile, blurry/noisy, logo/text overlay
+- suitability=poor if: face fills 20-40% of tile, very uniform/boring, or low contrast
+- suitability=excellent if: rich texture, good color variety, no faces, calm or interesting pattern
+- is_calm=true if tile has uniform texture (good for skin/background regions in mosaics)
+- content_tags: 2-4 descriptive tags
+Return ONLY the JSON object, no explanation.`;
+
+    // Process tiles with limited concurrency
+    for (let i = 0; i < tiles.length; i += CONCURRENCY) {
+      const chunk = tiles.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(async (tile: any) => {
+        const imageUrl = tile.r2_url || tile.tile128_url;
+        try {
+          const geminiResp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [
+                  { text: PROMPT },
+                  { inline_data: undefined, file_data: { mime_type: 'image/jpeg', file_uri: imageUrl } }
+                ]}],
+                generationConfig: { responseMimeType: 'application/json', temperature: 0.05, maxOutputTokens: 256 },
+              }),
+              signal: AbortSignal.timeout(20000),
+            }
+          );
+
+          let aiResult: any = {};
+          if (geminiResp.ok) {
+            const geminiData = await geminiResp.json() as any;
+            const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+            try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
+          } else {
+            const errText = await geminiResp.text();
+            console.warn(`[ai-batch] Gemini error for tile ${tile.id}: ${geminiResp.status} ${errText.substring(0, 100)}`);
+            errors++;
+            return;
+          }
+
+          // Map AI theme to semantic_theme format for consistency
+          const themeMap: Record<string, string> = {
+            'portrait_face': 'portrait_medium_skin',
+            'portrait_skin': 'portrait_medium_skin',
+            'nature_forest': 'nature_forest',
+            'nature_mountain': 'nature_mountain',
+            'nature_ocean': 'nature_ocean',
+            'nature_sunset': 'nature_sunset',
+            'nature_snow': 'nature_snow',
+            'city_night': 'city_night',
+            'city_architecture': 'city_architecture',
+            'animal': 'animal_colorful',
+            'abstract_colorful': 'abstract_colorful',
+            'abstract_dark': 'city_night',
+            'abstract_light': 'nature_snow',
+            'food': 'nature_sunset',
+            'other': 'nature_mountain',
+          };
+          const mappedTheme = themeMap[aiResult.theme] ?? 'nature_mountain';
+
+          // Update DB with AI analysis results
+          await pool.query(
+            `UPDATE mosaic_images SET
+               ai_suitability = $1,
+               ai_reject_reason = $2,
+               ai_theme = $3,
+               ai_has_face = $4,
+               ai_face_pct = $5,
+               ai_is_calm = $6,
+               ai_content_tags = $7,
+               ai_analyzed_at = NOW(),
+               -- Also update semantic_theme with AI result for consistency
+               semantic_theme = $3
+             WHERE id = $8`,
+            [
+              aiResult.suitability ?? 'good',
+              aiResult.reject_reason === 'null' ? null : (aiResult.reject_reason ?? null),
+              mappedTheme,
+              aiResult.has_face ?? false,
+              aiResult.face_area_pct ?? 0,
+              aiResult.is_calm ?? false,
+              JSON.stringify(aiResult.content_tags ?? []),
+              tile.id,
+            ]
+          );
+
+          if (aiResult.suitability === 'reject') rejected++;
+          processed++;
+          send({ type: 'progress', processed, total, tileId: tile.id, suitability: aiResult.suitability, theme: mappedTheme });
+        } catch (err) {
+          errors++;
+          console.warn(`[ai-batch] Error processing tile ${tile.id}:`, err);
+        }
+      }));
+      await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY_MS));
+    }
+
+    // Invalidate tile index cache so next mosaic uses updated data
+    invalidateIndexCache();
+
+    send({ type: 'done', processed, total, rejected, errors, message: `${processed} Tiles analysiert, ${rejected} als ungeeignet markiert` });
+    res.end();
+  } catch (err) {
+    console.error('[ai-batch] Fatal error:', err);
+    send({ type: 'error', message: String(err) });
+    res.end();
+  }
+});
+
+// GET /api/admin/ai-analyze-stats
+// Returns statistics about AI analysis progress
+app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) as total,
+        COUNT(ai_analyzed_at) as analyzed,
+        COUNT(*) FILTER (WHERE ai_analyzed_at IS NULL AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
+        COUNT(*) FILTER (WHERE ai_suitability = 'excellent') as excellent,
+        COUNT(*) FILTER (WHERE ai_suitability = 'good') as good,
+        COUNT(*) FILTER (WHERE ai_suitability = 'poor') as poor,
+        COUNT(*) FILTER (WHERE ai_suitability = 'reject') as rejected_ai,
+        COUNT(*) FILTER (WHERE ai_has_face = true) as has_face,
+        COUNT(*) FILTER (WHERE ai_reject_reason = 'watermark') as watermark,
+        COUNT(*) FILTER (WHERE ai_reject_reason = 'face_closeup') as face_closeup
+      FROM mosaic_images
+    `);
+    res.json({ ok: true, stats: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
   }
 });
 

@@ -5154,10 +5154,13 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
-      {/* ── Semantic Auto-Tagger ──────────────────────────────────────────────────────────── */}
+      {/* ── Semantic Auto-Tagger ────────────────────────────────────────────────────── */}
       <SemanticTaggerPanel onMessage={onMessage} />
 
-      {/* ── Bereinigungsassistent ──────────────────────────────────────────────────────────── */}
+      {/* ── KI-Bildanalyse (Gemini Vision Batch) ────────────────────────────────── */}
+      <AiAnalysisPanel onMessage={onMessage} />
+
+      {/* ── Bereinigungsassistent ──────────────────────────────────────────────────── */}
       <CleanupAssistant onMessage={onMessage} />
 
     </div>
@@ -5679,6 +5682,206 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
               )}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── KI-Bildanalyse Panel (Gemini Vision Batch) ───────────────────────────
+function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const [open, setOpen] = useState(true)
+  const [running, setRunning] = useState(false)
+  const [batchSize, setBatchSize] = useState(100)
+  const [forceReanalyze, setForceReanalyze] = useState(false)
+  const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null)
+  const [stats, setStats] = useState<any>(null)
+  const [lastResult, setLastResult] = useState<{ processed: number; rejected: number; errors: number; message: string } | null>(null)
+
+  const fetchStats = async () => {
+    try {
+      const res = await fetch('/api/admin/ai-analyze-stats')
+      const data = await res.json()
+      if (data.ok) setStats(data.stats)
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => { fetchStats() }, [])
+
+  const startAnalysis = async () => {
+    setRunning(true)
+    setProgress({ processed: 0, total: 0 })
+    setLastResult(null)
+    try {
+      const res = await fetch('/api/admin/ai-analyze-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batchSize, forceReanalyze }),
+      })
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const evt = JSON.parse(line.slice(6))
+            if (evt.type === 'start') {
+              setProgress({ processed: 0, total: evt.total })
+            } else if (evt.type === 'progress') {
+              setProgress({ processed: evt.processed, total: evt.total })
+            } else if (evt.type === 'done') {
+              setLastResult({ processed: evt.processed, rejected: evt.rejected, errors: evt.errors, message: evt.message })
+              setProgress(null)
+              onMessage({ text: `✅ KI-Analyse abgeschlossen: ${evt.message}`, type: 'success' })
+              fetchStats()
+            } else if (evt.type === 'error') {
+              onMessage({ text: `❌ KI-Analyse Fehler: ${evt.message}`, type: 'error' })
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    } catch (err) {
+      onMessage({ text: `❌ KI-Analyse fehlgeschlagen: ${String(err)}`, type: 'error' })
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const analyzed = Number(stats?.analyzed ?? 0)
+  const total = Number(stats?.total ?? 0)
+  const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0
+  const pending = Number(stats?.pending_with_r2 ?? 0)
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-4 cursor-pointer" onClick={() => setOpen(o => !o)}>
+        <div className="flex items-center gap-3">
+          <span className="text-xl">🤖</span>
+          <div>
+            <h3 className="font-bold text-gray-900">KI-Bildanalyse – Gemini Vision</h3>
+            <p className="text-sm text-gray-500">
+              Analysiert Tiles mit Google Gemini: Eignung für Mosaike, Gesichtserkennung, Wasserzeichen, präzises Thema.
+              {stats && <span className="ml-2 font-medium text-blue-600">{analyzed.toLocaleString()} / {total.toLocaleString()} analysiert ({pct}%)</span>}
+            </p>
+          </div>
+        </div>
+        <span className="text-gray-400 text-sm">{open ? '▲ Einklappen' : '▼ Ausklappen'}</span>
+      </div>
+
+      {open && (
+        <div className="px-5 pb-5 space-y-4 border-t border-gray-100">
+
+          {/* Fortschrittsbalken */}
+          {progress && (
+            <div className="mt-4">
+              <div className="flex justify-between text-sm text-gray-600 mb-1">
+                <span>Analysiere... {progress.processed} / {progress.total} Tiles</span>
+                <span>{progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-3">
+                <div
+                  className="bg-blue-500 h-3 rounded-full transition-all duration-300"
+                  style={{ width: `${progress.total > 0 ? (progress.processed / progress.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Letztes Ergebnis */}
+          {lastResult && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-800">
+              ✅ {lastResult.message}
+              {lastResult.rejected > 0 && <span className="ml-2 text-red-600">· {lastResult.rejected} als ungeeignet markiert</span>}
+              {lastResult.errors > 0 && <span className="ml-2 text-yellow-600">· {lastResult.errors} Fehler</span>}
+            </div>
+          )}
+
+          {/* Statistik */}
+          {stats && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+              {[
+                { label: 'Analysiert', value: analyzed.toLocaleString(), color: 'blue' },
+                { label: 'Ausstehend (mit R2)', value: pending.toLocaleString(), color: pending > 0 ? 'yellow' : 'green' },
+                { label: '✅ Excellent', value: Number(stats.excellent ?? 0).toLocaleString(), color: 'green' },
+                { label: '👍 Good', value: Number(stats.good ?? 0).toLocaleString(), color: 'blue' },
+                { label: '⚠️ Poor', value: Number(stats.poor ?? 0).toLocaleString(), color: 'yellow' },
+                { label: '❌ Reject', value: Number(stats.rejected_ai ?? 0).toLocaleString(), color: 'red' },
+                { label: '👤 Gesichter', value: Number(stats.has_face ?? 0).toLocaleString(), color: 'purple' },
+                { label: '🔏 Wasserzeichen', value: Number(stats.watermark ?? 0).toLocaleString(), color: 'red' },
+              ].map(({ label, value, color }) => (
+                <div key={label} className={`bg-${color}-50 border border-${color}-200 rounded-lg p-3 text-center`}>
+                  <div className={`text-xl font-bold text-${color}-700`}>{value}</div>
+                  <div className="text-xs text-gray-600 mt-0.5">{label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Analyse-Optionen */}
+          <div className="flex flex-wrap items-center gap-4 mt-3">
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-gray-700 font-medium">Batch-Grösse:</label>
+              <select
+                value={batchSize}
+                onChange={e => setBatchSize(Number(e.target.value))}
+                className="text-sm border border-gray-300 rounded px-2 py-1"
+                disabled={running}
+              >
+                <option value={50}>50 Tiles (~$0.004)</option>
+                <option value={100}>100 Tiles (~$0.008)</option>
+                <option value={200}>200 Tiles (~$0.015)</option>
+                <option value={500}>500 Tiles (~$0.038)</option>
+                <option value={1000}>1'000 Tiles (~$0.075)</option>
+                <option value={5000}>5'000 Tiles (~$0.38)</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={forceReanalyze}
+                onChange={e => setForceReanalyze(e.target.checked)}
+                disabled={running}
+              />
+              Bereits analysierte Tiles neu analysieren
+            </label>
+          </div>
+
+          <div className="flex gap-3 mt-2">
+            <button
+              onClick={startAnalysis}
+              disabled={running}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg text-sm transition-colors"
+            >
+              {running ? (
+                <><span className="animate-spin">⟳</span> Analysiere...</>
+              ) : (
+                <><span>🤖</span> KI-Analyse starten</>
+              )}
+            </button>
+            <button
+              onClick={fetchStats}
+              disabled={running}
+              className="text-sm text-gray-600 hover:text-gray-900 border border-gray-300 px-3 py-2 rounded-lg"
+            >
+              ↻ Statistik aktualisieren
+            </button>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800 mt-2">
+            <strong>Wie es funktioniert:</strong> Gemini Vision 2.0 Flash analysiert jedes Tile-Bild (128px) und bewertet:
+            Mosaic-Eignung (excellent/good/poor/reject), Gesichtserkennung, Wasserzeichen, Thema und ob das Tile ruhig oder unruhig ist.
+            Die Ergebnisse werden in der DB gespeichert und direkt vom Matching-Algorithmus und Bereinigungsassistenten verwendet.
+            Kosten: ~$0.075 pro 1'000 Tiles (Gemini 2.0 Flash).
+          </div>
         </div>
       )}
     </div>
