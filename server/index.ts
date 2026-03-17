@@ -1549,7 +1549,45 @@ app.get('/api/admin/ai-debug', async (_req, res) => {
       size = buf.byteLength;
       if (!imgRes.ok) downloadError = `HTTP ${imgRes.status}`;
     } catch (e) { downloadError = String(e); }
-    res.json({ ok: true, tile: { id: tile.id, r2_url: url?.substring(0, 100) }, download: { ok: downloadOk, contentType, size, error: downloadError } });
+    // Test Gemini call
+    let geminiOk = false;
+    let geminiError = '';
+    let geminiResponse = '';
+    if (downloadOk && size > 0) {
+      try {
+        const GEMINI_KEY = process.env.GEMINI_API_KEY;
+        if (!GEMINI_KEY) { geminiError = 'GEMINI_API_KEY not set'; }
+        else {
+          // Re-download for base64
+          const imgRes2 = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          const imgBuf2 = await imgRes2.arrayBuffer();
+          const base64 = Buffer.from(imgBuf2).toString('base64');
+          const gRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [
+                  { text: 'Describe this image in 5 words.' },
+                  { inline_data: { mime_type: 'image/jpeg', data: base64 } }
+                ]}],
+                generationConfig: { maxOutputTokens: 50 },
+              }),
+              signal: AbortSignal.timeout(20000),
+            }
+          );
+          geminiOk = gRes.ok;
+          const gData = await gRes.json() as any;
+          if (gRes.ok) {
+            geminiResponse = gData.candidates?.[0]?.content?.parts?.[0]?.text ?? JSON.stringify(gData).substring(0, 200);
+          } else {
+            geminiError = JSON.stringify(gData).substring(0, 300);
+          }
+        }
+      } catch (e) { geminiError = String(e); }
+    }
+    res.json({ ok: true, tile: { id: tile.id, r2_url: url?.substring(0, 100) }, download: { ok: downloadOk, contentType, size, error: downloadError }, gemini: { ok: geminiOk, response: geminiResponse, error: geminiError } });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
