@@ -1695,7 +1695,9 @@ Return ONLY the JSON object, no explanation.`;
           send({ type: 'progress', processed, total, tileId: tile.id, suitability: aiResult.suitability, theme: mappedTheme });
         } catch (err) {
           errors++;
-          console.warn(`[ai-batch] Error processing tile ${tile.id}:`, err);
+          const errMsg = String(err);
+          console.warn(`[ai-batch] Error processing tile ${tile.id}:`, errMsg);
+          send({ type: 'tile_error', tileId: tile.id, error: errMsg.substring(0, 200) });
         }
       }));
       await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY_MS));
