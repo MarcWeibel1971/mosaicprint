@@ -1599,6 +1599,23 @@ Return ONLY the JSON object, no explanation.`;
       await Promise.all(chunk.map(async (tile: any) => {
         const imageUrl = tile.r2_url || tile.tile128_url;
         try {
+          // Download image and convert to base64 for Gemini inline_data
+          // (file_uri only works for gs:// URIs, not arbitrary HTTPS URLs)
+          let imageBase64: string;
+          let mimeType = 'image/jpeg';
+          try {
+            const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
+            if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status}`);
+            const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
+            mimeType = contentType.split(';')[0].trim() || 'image/jpeg';
+            const imgBuf = await imgRes.arrayBuffer();
+            imageBase64 = Buffer.from(imgBuf).toString('base64');
+          } catch (downloadErr) {
+            console.warn(`[ai-batch] Image download failed for tile ${tile.id}: ${downloadErr}`);
+            errors++;
+            return;
+          }
+
           const geminiResp = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
             {
@@ -1607,11 +1624,11 @@ Return ONLY the JSON object, no explanation.`;
               body: JSON.stringify({
                 contents: [{ parts: [
                   { text: PROMPT },
-                  { inline_data: undefined, file_data: { mime_type: 'image/jpeg', file_uri: imageUrl } }
+                  { inline_data: { mime_type: mimeType, data: imageBase64 } }
                 ]}],
                 generationConfig: { responseMimeType: 'application/json', temperature: 0.05, maxOutputTokens: 256 },
               }),
-              signal: AbortSignal.timeout(20000),
+              signal: AbortSignal.timeout(30000),
             }
           );
 
