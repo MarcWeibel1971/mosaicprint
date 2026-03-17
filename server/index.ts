@@ -1587,7 +1587,17 @@ app.get('/api/admin/ai-debug', async (_req, res) => {
         }
       } catch (e) { geminiError = String(e); }
     }
-    res.json({ ok: true, tile: { id: tile.id, r2_url: url?.substring(0, 100) }, download: { ok: downloadOk, contentType, size, error: downloadError }, gemini: { ok: geminiOk, response: geminiResponse, error: geminiError } });
+    // Also list available models
+    let availableModels: string[] = [];
+    try {
+      const GEMINI_KEY2 = process.env.GEMINI_API_KEY;
+      if (GEMINI_KEY2) {
+        const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_KEY2}`, { signal: AbortSignal.timeout(10000) });
+        const listData = await listRes.json() as any;
+        availableModels = (listData.models ?? []).filter((m: any) => m.supportedGenerationMethods?.includes('generateContent')).map((m: any) => m.name);
+      }
+    } catch (e) { availableModels = [`error: ${e}`]; }
+    res.json({ ok: true, tile: { id: tile.id, r2_url: url?.substring(0, 100) }, download: { ok: downloadOk, contentType, size, error: downloadError }, gemini: { ok: geminiOk, response: geminiResponse, error: geminiError }, availableModels });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
