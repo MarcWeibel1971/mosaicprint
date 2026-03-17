@@ -302,9 +302,21 @@ const QA_CHECKS = [
 ]
 
 // ── R2 Migration Panel ──────────────────────────────────────────────────────────
+interface R2Status {
+  running: boolean; done: number; total: number; errors: number;
+  skippedHotlink?: number; skippedNoUrl?: number; retried?: number;
+  startedAt: string | null; finishedAt: string | null; lastError?: string;
+}
+interface R2Diagnosis {
+  ok: boolean;
+  stats: { total: string; on_r2: string; pixabay_hotlink: string; no_url: string; migratable: string; missing_r2: string };
+  byProvider: Array<{ source_provider: string; total: string; on_r2: string; missing: string }>;
+}
 function R2MigrationPanel() {
-  const [status, setStatus] = React.useState<{ running: boolean; done: number; total: number; errors: number; startedAt: string | null; finishedAt: string | null } | null>(null);
+  const [status, setStatus] = React.useState<R2Status | null>(null);
+  const [diagnosis, setDiagnosis] = React.useState<R2Diagnosis | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [loadingDiag, setLoadingDiag] = React.useState(false);
 
   const fetchStatus = async () => {
     try {
@@ -314,8 +326,18 @@ function R2MigrationPanel() {
     } catch { /* ignore */ }
   };
 
+  const fetchDiagnosis = async () => {
+    setLoadingDiag(true);
+    try {
+      const r = await fetch('/api/admin/r2-diagnosis');
+      const d = await r.json();
+      setDiagnosis(d);
+    } catch { /* ignore */ } finally { setLoadingDiag(false); }
+  };
+
   React.useEffect(() => {
     fetchStatus();
+    fetchDiagnosis();
     const interval = setInterval(fetchStatus, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -343,17 +365,82 @@ function R2MigrationPanel() {
       <p className="text-sm text-gray-500 mb-4">
         Lädt alle Tile-Bilder zu Cloudflare R2 hoch damit sie dauerhaft verfügbar sind (Pixabay/Unsplash CDN-URLs können ablaufen).
       </p>
+
+      {/* Diagnose-Statistik */}
+      {diagnosis?.ok && (
+        <div className="mb-4 bg-gray-50 rounded-xl p-4 border border-gray-200">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-xs font-bold text-gray-600 uppercase tracking-wider">R2-Status Diagnose</h4>
+            <button onClick={fetchDiagnosis} disabled={loadingDiag} className="text-xs text-blue-600 hover:underline">{loadingDiag ? 'Lade...' : '↺ Aktualisieren'}</button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+            <div className="bg-green-50 rounded-lg p-2 text-center">
+              <div className="font-bold text-green-700 text-base">{Number(diagnosis.stats.on_r2).toLocaleString('de-CH')}</div>
+              <div className="text-green-600">✅ Auf R2</div>
+            </div>
+            <div className="bg-amber-50 rounded-lg p-2 text-center">
+              <div className="font-bold text-amber-700 text-base">{Number(diagnosis.stats.pixabay_hotlink).toLocaleString('de-CH')}</div>
+              <div className="text-amber-600">🔒 Pixabay-Hotlinks</div>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-2 text-center">
+              <div className="font-bold text-blue-700 text-base">{Number(diagnosis.stats.migratable).toLocaleString('de-CH')}</div>
+              <div className="text-blue-600">⏳ Noch migrierbar</div>
+            </div>
+            <div className="bg-red-50 rounded-lg p-2 text-center">
+              <div className="font-bold text-red-700 text-base">{Number(diagnosis.stats.missing_r2).toLocaleString('de-CH')}</div>
+              <div className="text-red-600">❌ Fehlt R2</div>
+            </div>
+            <div className="bg-gray-100 rounded-lg p-2 text-center">
+              <div className="font-bold text-gray-700 text-base">{Number(diagnosis.stats.no_url).toLocaleString('de-CH')}</div>
+              <div className="text-gray-500">Keine URL</div>
+            </div>
+            <div className="bg-gray-100 rounded-lg p-2 text-center">
+              <div className="font-bold text-gray-700 text-base">{Number(diagnosis.stats.total).toLocaleString('de-CH')}</div>
+              <div className="text-gray-500">Total Tiles</div>
+            </div>
+          </div>
+          {diagnosis.byProvider.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs font-semibold text-gray-500 mb-1">Nach Quelle:</p>
+              <div className="space-y-1">
+                {diagnosis.byProvider.map(p => (
+                  <div key={p.source_provider ?? 'unknown'} className="flex items-center gap-2 text-xs">
+                    <span className="w-20 text-gray-600 truncate">{p.source_provider ?? '(unbekannt)'}</span>
+                    <div className="flex-1 bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                      <div className="h-1.5 bg-green-400 rounded-full" style={{ width: `${Number(p.total) > 0 ? Math.round(Number(p.on_r2)/Number(p.total)*100) : 0}%` }} />
+                    </div>
+                    <span className="text-green-600 w-8 text-right">{Number(p.total) > 0 ? Math.round(Number(p.on_r2)/Number(p.total)*100) : 0}%</span>
+                    <span className="text-gray-400 w-20 text-right">{Number(p.on_r2).toLocaleString('de-CH')}/{Number(p.total).toLocaleString('de-CH')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {Number(diagnosis.stats.pixabay_hotlink) > 0 && (
+            <p className="text-xs text-amber-700 mt-2 bg-amber-50 rounded-lg p-2">
+              ⚠️ <strong>{Number(diagnosis.stats.pixabay_hotlink).toLocaleString('de-CH')} Pixabay-Tiles</strong> können nicht zu R2 migriert werden (Hotlink-Schutz).
+              Diese Tiles sollten mit „Kaputte Pixabay-Tiles löschen“ bereinigt und neu importiert werden.
+            </p>
+          )}
+        </div>
+      )}
+
       {status && status.total > 0 && (
         <div className="mb-4">
           <div className="flex justify-between text-xs text-gray-500 mb-1">
-            <span>{status.done.toLocaleString()} / {status.total.toLocaleString()} Tiles migriert</span>
-            <span>{progress}%{status.errors > 0 ? ` · ${status.errors} Fehler` : ''}</span>
+            <span>{status.done.toLocaleString('de-CH')} / {status.total.toLocaleString('de-CH')} verarbeitet</span>
+            <span>{progress}%
+              {status.errors > 0 && <span className="text-red-500 ml-1">· {status.errors} Fehler</span>}
+              {(status.skippedHotlink ?? 0) > 0 && <span className="text-amber-500 ml-1">· {status.skippedHotlink} Hotlinks übersprungen</span>}
+              {(status.retried ?? 0) > 0 && <span className="text-blue-500 ml-1">· {status.retried} Retries</span>}
+            </span>
           </div>
           <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
             <div className={`h-full rounded-full transition-all ${isDone ? 'bg-green-400' : 'bg-orange-400'}`} style={{ width: `${progress}%` }} />
           </div>
-          {isDone && <p className="text-xs text-green-600 mt-1">✅ Migration abgeschlossen – alle Tiles permanent gespeichert</p>}
-          {status.running && <p className="text-xs text-orange-600 mt-1">⏳ Migration läuft... (läuft im Hintergrund, Seite kann geschlossen werden)</p>}
+          {isDone && <p className="text-xs text-green-600 mt-1">✅ Migration abgeschlossen</p>}
+          {status.running && <p className="text-xs text-orange-600 mt-1">⏳ Migration läuft... (läuft im Hintergrund)</p>}
+          {status.lastError && <p className="text-xs text-red-500 mt-1 truncate">⚠️ Letzter Fehler: {status.lastError}</p>}
         </div>
       )}
       <button

@@ -1361,13 +1361,70 @@ app.get('/api/print-download/:token', (req, res) => {
 
 // POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage
 // Runs in background, returns job status via GET /api/admin/migrate-to-r2/status
-const r2MigrationStatus = { running: false, done: 0, total: 0, errors: 0, startedAt: null as string | null, finishedAt: null as string | null };
+const r2MigrationStatus = {
+  running: false, done: 0, total: 0, errors: 0,
+  skippedHotlink: 0, skippedNoUrl: 0, retried: 0,
+  startedAt: null as string | null, finishedAt: null as string | null,
+  lastError: '' as string,
+};
+
+// Helper: is this URL a hotlink-protected URL that cannot be downloaded server-side?
+function isHotlinkProtected(url: string): boolean {
+  if (!url) return false;
+  // Pixabay hotlink-protected download URLs
+  if (url.includes('pixabay.com/get/') || url.includes('pixabay.com/download/')) return true;
+  // Pexels download URLs with auth tokens
+  if (url.includes('pexels.com/photo/') && url.includes('?auto=compress')) return false; // CDN ok
+  if (url.includes('images.pexels.com') && url.includes('cs=tinysrgb')) return false; // CDN ok
+  return false;
+}
+
+// Helper: download with retry on rate-limit (429) or transient errors
+async function downloadWithRetry(tileId: number, url: string, maxRetries = 2): Promise<string | null> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; MosaicPrint/1.0)',
+          'Accept': 'image/webp,image/jpeg,image/*,*/*',
+        },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (resp.status === 429 || resp.status === 503) {
+        // Rate limited – wait and retry
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          r2MigrationStatus.retried++;
+          continue;
+        }
+        return null;
+      }
+      if (!resp.ok) return null;
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length < 500) return null; // too small = error page
+      const { uploadTileToR2 } = await import('./r2.js');
+      return await uploadTileToR2(tileId, buf);
+    } catch {
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
 app.post('/api/admin/migrate-to-r2', async (_req, res) => {
   if (!isR2Configured()) return res.status(400).json({ error: 'R2 not configured' });
   if (r2MigrationStatus.running) return res.json({ started: false, message: 'Already running', status: r2MigrationStatus });
   r2MigrationStatus.running = true;
   r2MigrationStatus.done = 0;
   r2MigrationStatus.errors = 0;
+  r2MigrationStatus.skippedHotlink = 0;
+  r2MigrationStatus.skippedNoUrl = 0;
+  r2MigrationStatus.retried = 0;
+  r2MigrationStatus.lastError = '';
   r2MigrationStatus.startedAt = new Date().toISOString();
   r2MigrationStatus.finishedAt = null;
   res.json({ started: true, message: 'Migration started in background' });
@@ -1375,46 +1432,92 @@ app.post('/api/admin/migrate-to-r2', async (_req, res) => {
   (async () => {
     try {
       const pool = db.getPool();
-      // Get all tiles without R2 URL (or with expired CDN URLs)
+      // Get all tiles without R2 URL
       const result = await pool.query(
-        `SELECT id, source_url, tile128_url FROM mosaic_images WHERE r2_url IS NULL ORDER BY id ASC`
+        `SELECT id, source_url, tile128_url, source_provider FROM mosaic_images WHERE r2_url IS NULL ORDER BY id ASC`
       );
       r2MigrationStatus.total = result.rows.length;
       console.log(`[R2 Migration] Starting migration of ${result.rows.length} tiles`);
-      const CONCURRENCY = 20;
+      // Reduced concurrency to avoid rate limiting
+      const CONCURRENCY = 5;
       for (let i = 0; i < result.rows.length; i += CONCURRENCY) {
         const batch = result.rows.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map(async (row: { id: number; source_url: string; tile128_url: string }) => {
+        await Promise.all(batch.map(async (row: { id: number; source_url: string; tile128_url: string; source_provider: string }) => {
           try {
+            // Prefer tile128_url (smaller, faster), fall back to source_url
             const url = row.tile128_url || row.source_url;
-            if (!url || url.startsWith('data:')) { r2MigrationStatus.done++; return; }
-            const r2Url = await downloadAndUploadToR2(row.id, url);
+            if (!url || url.startsWith('data:')) {
+              r2MigrationStatus.skippedNoUrl++;
+              r2MigrationStatus.done++;
+              return;
+            }
+            // Skip hotlink-protected URLs (Pixabay direct downloads)
+            if (isHotlinkProtected(url)) {
+              r2MigrationStatus.skippedHotlink++;
+              r2MigrationStatus.done++;
+              return;
+            }
+            const r2Url = await downloadWithRetry(row.id, url);
             if (r2Url) {
               await pool.query('UPDATE mosaic_images SET r2_url = $1 WHERE id = $2', [r2Url, row.id]);
-              // Invalidate tile URL cache
               tileUrlCache.delete(row.id);
             } else {
               r2MigrationStatus.errors++;
+              r2MigrationStatus.lastError = `Tile ${row.id}: ${url.substring(0, 80)}`;
             }
             r2MigrationStatus.done++;
-          } catch {
+          } catch (e) {
             r2MigrationStatus.errors++;
+            r2MigrationStatus.lastError = String(e).substring(0, 120);
             r2MigrationStatus.done++;
           }
         }));
-        if (i % 500 === 0) console.log(`[R2 Migration] Progress: ${r2MigrationStatus.done}/${r2MigrationStatus.total}`);
+        // Small delay between batches to avoid rate limiting
+        if (i % 100 === 0 && i > 0) {
+          await new Promise(r => setTimeout(r, 200));
+          console.log(`[R2 Migration] Progress: ${r2MigrationStatus.done}/${r2MigrationStatus.total} (errors: ${r2MigrationStatus.errors}, hotlinks: ${r2MigrationStatus.skippedHotlink})`);
+        }
       }
     } catch (e) {
       console.error('[R2 Migration] Error:', e);
+      r2MigrationStatus.lastError = String(e).substring(0, 200);
     } finally {
       r2MigrationStatus.running = false;
       r2MigrationStatus.finishedAt = new Date().toISOString();
-      console.log(`[R2 Migration] Done: ${r2MigrationStatus.done} tiles, ${r2MigrationStatus.errors} errors`);
+      console.log(`[R2 Migration] Done: ${r2MigrationStatus.done} tiles, ${r2MigrationStatus.errors} errors, ${r2MigrationStatus.skippedHotlink} hotlinks skipped`);
     }
   })();
 });
 app.get('/api/admin/migrate-to-r2/status', (_req, res) => {
   res.json(r2MigrationStatus);
+});
+
+// GET /api/admin/r2-diagnosis – Analysiert wie viele Tiles wirklich auf R2 sind
+app.get('/api/admin/r2-diagnosis', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const stats = await pool.query(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN r2_url IS NOT NULL THEN 1 ELSE 0 END) as on_r2,
+        SUM(CASE WHEN r2_url IS NULL AND (tile128_url LIKE '%pixabay.com/get/%' OR tile128_url LIKE '%pixabay.com/download/%') THEN 1 ELSE 0 END) as pixabay_hotlink,
+        SUM(CASE WHEN r2_url IS NULL AND tile128_url IS NULL AND source_url IS NULL THEN 1 ELSE 0 END) as no_url,
+        SUM(CASE WHEN r2_url IS NULL AND tile128_url IS NOT NULL AND tile128_url NOT LIKE '%pixabay.com/get/%' THEN 1 ELSE 0 END) as migratable,
+        SUM(CASE WHEN r2_url IS NULL THEN 1 ELSE 0 END) as missing_r2
+      FROM mosaic_images
+    `);
+    const providerStats = await pool.query(`
+      SELECT source_provider, COUNT(*) as total,
+        SUM(CASE WHEN r2_url IS NOT NULL THEN 1 ELSE 0 END) as on_r2,
+        SUM(CASE WHEN r2_url IS NULL THEN 1 ELSE 0 END) as missing
+      FROM mosaic_images
+      GROUP BY source_provider
+      ORDER BY total DESC
+    `);
+    res.json({ ok: true, stats: stats.rows[0], byProvider: providerStats.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
 // tRPC API (for Admin panel)
