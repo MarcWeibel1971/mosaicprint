@@ -3003,7 +3003,8 @@ export const appRouter = router({
           whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
           break;
         case 'portraitBusy':
-          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          // Portrait-Tiles die strukturell unruhig UND qualitativ schwach sind
+          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_score < 55 AND quality_status != 'rejected'`;
           break;
         case 'pixabayHotlink':
           whereClause = `COALESCE(source_provider, '') = 'pixabay' AND r2_url IS NULL AND quality_status != 'rejected'`;
@@ -3074,7 +3075,7 @@ export const appRouter = router({
           whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
           break;
         case 'portraitBusy':
-          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_status != 'rejected'`;
+          whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_score < 55 AND quality_status != 'rejected'`;
           break;
         case 'pixabayHotlink':
           whereClause = `COALESCE(source_provider, '') = 'pixabay' AND r2_url IS NULL AND quality_status != 'rejected'`;

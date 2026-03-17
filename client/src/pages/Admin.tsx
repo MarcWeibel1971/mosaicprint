@@ -5419,7 +5419,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     nearWhite: { label: 'Fast-Weiss', desc: 'L > 92 UND Chroma < 5 – kein Mehrwert für Mosaike', stage: 2, color: 'blue', icon: '⬜' },
     lowScore: { label: 'Tiefer Qualitäts-Score', desc: 'quality_score < 40 – schlechte Textur/Farbvielfalt', stage: 2, color: 'yellow', icon: '📉' },
     oversaturatedSkin: { label: 'Übersättigte Hauttöne', desc: 'Portrait-Theme UND Chroma > 35 – zu intensiv für Mosaike', stage: 3, color: 'pink', icon: '🎨' },
-    portraitBusy: { label: 'Gesichter als Tiles', desc: 'Portrait-Theme UND tile_type = busy – stören das Mosaik', stage: 3, color: 'purple', icon: '👤' },
+    portraitBusy: { label: 'Portrait-Tiles schwacher Qualität', desc: 'Portrait-Thema UND tile_type = busy UND quality_score < 55 – unruhig und unterdurchschnittlich', stage: 3, color: 'purple', icon: '🎭' },
   }
 
   const stageColors = { 1: 'bg-red-50 border-red-200', 2: 'bg-amber-50 border-amber-200', 3: 'bg-blue-50 border-blue-200' }
