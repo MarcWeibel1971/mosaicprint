@@ -773,51 +773,76 @@ export function deriveSemanticTheme(tile: {
   const sat = Math.sqrt(a * a + b * b); // LAB chroma (saturation proxy)
   const isSkin = tile.is_skin_friendly ?? false;
   const tileType = tile.tile_type ?? 'medium';
-  const query = (tile.import_query ?? '').toLowerCase();
 
-  // ── 1. Portrait detection ────────────────────────────────────────────────
+  // ── 1. Portrait detection ────────────────────────────────────────────────────
   // Echte Hauttöne: warm (a>2, b>2), mittlere Helligkeit, moderate Sättigung
-  // is_skin_friendly allein reicht nicht – zusätzlich a>2 UND b>2 (warm) nötig
-  const isRealSkin = isSkin && a > 2 && b > 2 && sat >= 5 && sat < 30;
-  if (isRealSkin && L >= 35 && L <= 85) {
-    // Distinguish by brightness + warmth (a-channel)
-    if (L >= 65 && a >= 3 && a <= 18) return 'portrait_light_skin';   // fair/blonde
-    if (L >= 45 && L < 65 && a >= 3 && a <= 22) return 'portrait_medium_skin'; // olive/brown
-    if (L >= 35 && L < 50 && a >= 5) return 'portrait_dark_skin';     // dark skin
-    if (L >= 60 && sat < 15 && a < 4) return 'portrait_grey_hair';    // grey/white hair
-    if (L >= 65 && sat < 18 && a < 4) return 'portrait_child';        // soft pale child skin
-    return 'portrait_medium_skin'; // fallback portrait
+  // Strenger als is_skin_friendly allein: a>2 UND b>2 (warm) + Sättigungsbereich
+  const isRealSkin = isSkin && a > 2 && b > 2 && sat >= 5 && sat < 35;
+  if (isRealSkin && L >= 30 && L <= 88) {
+    if (L >= 70 && sat < 20) return 'portrait_grey_hair';       // graues/weisses Haar
+    if (L >= 65 && a >= 2 && a <= 20) return 'portrait_light_skin';  // helle Haut
+    if (L >= 45 && L < 65 && a >= 2) return 'portrait_medium_skin';  // mittlere Haut
+    if (L >= 30 && L < 50 && a >= 4) return 'portrait_dark_skin';    // dunkle Haut
+    if (L >= 60 && sat < 12) return 'portrait_child';                 // zartes Kinderhaut
+    return 'portrait_medium_skin'; // Fallback Portrait
   }
 
-  // ── 2. Nature ────────────────────────────────────────────────────────────
-  // Sunset / golden hour: warm orange-red tones
-  if (a >= 8 && b >= 12 && L >= 30 && L <= 80) return 'nature_sunset';
-  // Ocean / sea: cyan-blue tones
-  if (a <= -8 && b <= -8 && L >= 25) return 'nature_ocean';
-  // Forest / vegetation: green tones
-  if (a <= -8 && b >= -5 && L >= 25 && L <= 75) return 'nature_forest';
-  // Snow / winter: very bright + low saturation
-  if (L >= 78 && sat < 18) return 'nature_snow';
-  // Mountain / rocky: medium-dark, low saturation, calm texture
-  if (L >= 30 && L <= 65 && sat < 20 && tileType === 'calm') return 'nature_mountain';
+  // ── 2. Natur: Sonnenuntergang / goldene Stunde ───────────────────────────────
+  // Warm-orange-rote Töne (Sonnenuntergang, Feuer, Herbst)
+  if (a >= 6 && b >= 8 && L >= 25 && L <= 85) return 'nature_sunset';
 
-  // ── 3. City ──────────────────────────────────────────────────────────────
-  // Night / skyline: very dark
-  if (L < 25) return 'city_night';
-  // Architecture: medium brightness, low saturation, busy texture (lots of edges)
-  if (L >= 35 && L <= 70 && sat < 22 && tileType === 'busy') return 'city_architecture';
+  // ── 3. Natur: Ozean / Wasser / Himmel ────────────────────────────────────────
+  // Cyan-blaue Töne
+  if (a <= -5 && b <= -5 && L >= 20) return 'nature_ocean';
+  // Reines Blau (Himmel ohne Grün-Anteil)
+  if (b <= -10 && a > -5 && a < 5 && L >= 30) return 'nature_ocean';
 
-  // ── 4. Animal ────────────────────────────────────────────────────────────
-  // Warm earth tones (lion, dog, fox): warm + medium brightness
-  if (a >= 5 && b >= 8 && L >= 35 && L <= 70 && sat >= 15 && sat < 40) return 'animal_warm';
-  // Colorful animals (birds, fish): very vivid
-  if (sat >= 45 && L >= 35 && L <= 75) return 'animal_colorful';
+  // ── 4. Natur: Wald / Vegetation ──────────────────────────────────────────────
+  // Grüne Töne (a negativ = grün)
+  if (a <= -5 && b >= -8 && L >= 20 && L <= 80) return 'nature_forest';
 
-  // ── 5. Abstract ──────────────────────────────────────────────────────────
-  if (sat >= 40) return 'abstract_colorful';
+  // ── 5. Stadt: Nacht / Skyline ────────────────────────────────────────────────
+  // Sehr dunkel (Nacht, Tunnel, Schatten)
+  if (L < 28) return 'city_night';
 
-  // ── 6. Fallback ──────────────────────────────────────────────────────────
-  return 'general';
+  // ── 6. Natur: Schnee / Winter / Hell-Neutral ─────────────────────────────────
+  // Sehr hell + niedrige Sättigung (Schnee, Nebel, weisse Wände, Wolken)
+  if (L >= 80 && sat < 20) return 'nature_snow';
+
+  // ── 7. Natur: Gebirge / Fels / Erde ─────────────────────────────────────────
+  // Mittlere Helligkeit, niedrige Sättigung, ruhige Textur
+  // Auch ohne tileType=calm (viele Gebirgsbilder sind 'medium')
+  if (L >= 28 && L <= 68 && sat < 18 && a >= -4 && a <= 6 && b >= -4 && b <= 10) {
+    return 'nature_mountain';
+  }
+
+  // ── 8. Stadt: Architektur / Gebäude ─────────────────────────────────────────
+  // Mittlere Helligkeit, niedrige Sättigung, busy Textur (viele Kanten)
+  if (L >= 30 && L <= 75 && sat < 25 && tileType === 'busy') return 'city_architecture';
+
+  // ── 9. Tier: Warme Erdtöne (Löwe, Hund, Fuchs) ──────────────────────────────
+  if (a >= 4 && b >= 6 && L >= 30 && L <= 75 && sat >= 12 && sat < 45) return 'animal_warm';
+
+  // ── 10. Tier / Abstrakt: Sehr bunt ──────────────────────────────────────────
+  if (sat >= 38 && L >= 25 && L <= 80) return 'animal_colorful';
+
+  // ── 11. Abstrakt: Hohe Sättigung ────────────────────────────────────────────
+  if (sat >= 30) return 'abstract_colorful';
+
+  // ── 12. Natur: Warm-Neutral (Holz, Sand, Stein, Herbst) ─────────────────────
+  // Leicht warme, mittelhelle Töne die nicht in andere Kategorien passen
+  if (L >= 35 && L <= 75 && b >= 5 && b <= 25 && a >= -2 && a <= 10 && sat >= 6 && sat < 30) {
+    return 'nature_sunset'; // Warm-Natur (Herbst, Sand, Holz) → Sunset-Gruppe
+  }
+
+  // ── 13. Natur: Dunkel-Neutral (Boden, Fels, Schatten) ───────────────────────
+  if (L >= 15 && L <= 45 && sat < 15) return 'nature_mountain';
+
+  // ── 14. Hell-Neutral (Papier, Textil, Himmel tagsüber) ──────────────────────
+  if (L >= 65 && sat < 25) return 'nature_snow';
+
+  // ── 15. Fallback: Alles andere → nature_mountain (neutraler Catch-All) ──────
+  return 'nature_mountain';
 }
 
 // Batch-tag all tiles that have no semantic_theme yet (or force re-tag)
