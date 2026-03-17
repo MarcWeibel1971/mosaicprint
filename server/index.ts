@@ -1569,7 +1569,7 @@ app.get('/api/admin/ai-debug', async (_req, res) => {
           const imgBuf2 = await imgRes2.arrayBuffer();
           const base64 = Buffer.from(imgBuf2).toString('base64');
           const gRes = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1701,7 +1701,7 @@ Return ONLY the JSON object, no explanation, no markdown.`;
           }
 
           const geminiResp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1726,7 +1726,7 @@ Return ONLY the JSON object, no explanation, no markdown.`;
             console.warn(`[ai-job] Rate limit (429) for tile ${tile.id}, waiting 60s...`);
             await new Promise(r => setTimeout(r, 60000));
             const retryResp = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+              `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
