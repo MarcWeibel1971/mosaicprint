@@ -1609,7 +1609,7 @@ app.post('/api/admin/ai-analyze-batch', express.json(), async (req, res) => {
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_KEY) return res.status(500).json({ ok: false, error: 'GEMINI_API_KEY not configured' });
 
-  const batchSize = Math.min(Number(req.body?.batchSize ?? 50), 200);
+  const batchSize = Math.min(Number(req.body?.batchSize ?? 50), 2000);
   const forceReanalyze = req.body?.forceReanalyze === true;
 
   // SSE setup
