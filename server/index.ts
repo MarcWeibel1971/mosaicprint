@@ -1638,8 +1638,8 @@ app.post('/api/admin/ai-analyze-batch', express.json(), async (req, res) => {
     let processed = 0;
     let rejected = 0;
     let errors = 0;
-    const CONCURRENCY = 5; // max 5 parallel Gemini requests
-    const RATE_LIMIT_DELAY_MS = 200; // 200ms between batches = ~25 req/s
+    const CONCURRENCY = 20; // max 20 parallel Gemini requests
+    const RATE_LIMIT_DELAY_MS = 50; // 50ms between batches = ~400 req/s
 
     // Fetch all IDs to process
     const idsRes = await pool.query(
