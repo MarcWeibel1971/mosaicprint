@@ -1634,8 +1634,8 @@ async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, 
   aiJobState.rejected = 0;
   aiJobState.errors = 0;
 
-  const CONCURRENCY = 20;
-  const RATE_LIMIT_DELAY_MS = 50;
+  const CONCURRENCY = 8;           // Reduziert von 20 auf 8 um 429-Fehler zu vermeiden
+  const RATE_LIMIT_DELAY_MS = 500;  // 500ms zwischen Chunks = ~16 req/s gesamt
 
   const PROMPT = `You are evaluating a 128x128 pixel image tile for use in a large photo mosaic (heart shape, Times Square display).
 Return ONLY valid JSON with these exact fields:
@@ -1721,6 +1721,32 @@ Return ONLY the JSON object, no explanation, no markdown.`;
             const geminiData = await geminiResp.json() as any;
             const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
             try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
+          } else if (geminiResp.status === 429) {
+            // Rate limit: wait 60s and retry once
+            console.warn(`[ai-job] Rate limit (429) for tile ${tile.id}, waiting 60s...`);
+            await new Promise(r => setTimeout(r, 60000));
+            const retryResp = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: mimeType, data: imageBase64 } }]}],
+                  generationConfig: { responseMimeType: 'application/json', temperature: 0.05, maxOutputTokens: 300 },
+                }),
+                signal: AbortSignal.timeout(30000),
+              }
+            );
+            if (retryResp.ok) {
+              const retryData = await retryResp.json() as any;
+              const rawText = retryData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+              try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
+            } else {
+              console.warn(`[ai-job] Retry also failed for tile ${tile.id}: ${retryResp.status}`);
+              aiJobState.errors++;
+              aiJobState.lastError = `Tile ${tile.id}: HTTP ${retryResp.status} (retry)`;
+              return;
+            }
           } else {
             const errText = await geminiResp.text();
             console.warn(`[ai-job] Gemini error for tile ${tile.id}: ${geminiResp.status} ${errText.substring(0, 100)}`);
