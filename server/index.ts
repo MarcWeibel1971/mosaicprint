@@ -1528,6 +1528,31 @@ app.get('/api/admin/r2-diagnosis', async (_req, res) => {
   }
 });
 
+// ── Debug: Test first R2 URL ──────────────────────────────────────────────────────────────
+app.get('/api/admin/ai-debug', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const r = await pool.query(`SELECT id, r2_url, tile128_url FROM mosaic_images WHERE r2_url IS NOT NULL LIMIT 1`);
+    if (!r.rows.length) return res.json({ ok: false, error: 'No tiles with r2_url' });
+    const tile = r.rows[0];
+    const url = tile.r2_url;
+    // Test if URL is reachable
+    let downloadOk = false;
+    let downloadError = '';
+    let contentType = '';
+    let size = 0;
+    try {
+      const imgRes = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      downloadOk = imgRes.ok;
+      contentType = imgRes.headers.get('content-type') ?? '';
+      const buf = await imgRes.arrayBuffer();
+      size = buf.byteLength;
+      if (!imgRes.ok) downloadError = `HTTP ${imgRes.status}`;
+    } catch (e) { downloadError = String(e); }
+    res.json({ ok: true, tile: { id: tile.id, r2_url: url?.substring(0, 100) }, download: { ok: downloadOk, contentType, size, error: downloadError } });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 // ── Gemini Vision Batch-Analyse (über SSE für Fortschrittsanzeige) ──────────────────────
 // POST /api/admin/ai-analyze-batch
 // Body: { batchSize?: number, forceReanalyze?: boolean }
