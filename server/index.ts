@@ -105,7 +105,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       ? `AND subject = $1`
       : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
-    // Also fetch quadrant data + is_skin_friendly + edge_energy for richer feature vector
+    // Also fetch quadrant data + is_skin_friendly + edge_energy + AI scores for richer feature vector
     const result = await pool.query(
       `SELECT id, avg_l, avg_a, avg_b,
               tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
@@ -114,7 +114,10 @@ app.get("/api/tile-lab-index", async (req, res) => {
               COALESCE(tile_type, 'medium') as tile_type,
               edge_energy,
               ai_is_calm,
-              ai_suitability
+              ai_suitability,
+              ai_calm_score,
+              ai_mosaic_score,
+              ai_fill_uniformity
        FROM mosaic_images
        WHERE avg_l IS NOT NULL
          AND COALESCE(quality_status, 'pending') != 'rejected'
@@ -169,12 +172,15 @@ app.get("/api/tile-lab-index", async (req, res) => {
       buf.writeFloatLE(brB, offset);              offset += 4;  // [11] BR b
       buf.writeFloatLE(edgeProxy, offset);        offset += 4;  // [12] edge
       buf.writeFloatLE(brightness, offset);       offset += 4;  // [13] brightness
-      // tileComplexity: Priorität: ai_is_calm (Gemini Vision) > tile_type (LAB-basiert)
-      // ai_is_calm=true → 0.0 (calm), ai_is_calm=false → 0.7 (leicht busy)
-      // Fallback auf tile_type wenn noch nicht KI-analysiert
+      // tileComplexity: Priorität: ai_calm_score (0-100, v7) > ai_is_calm (bool, v6) > tile_type (LAB)
+      // ai_calm_score=100 → 0.0 (völlig ruhig), ai_calm_score=0 → 1.0 (chaotisch)
+
       let tileComplexity: number;
-      if (row.ai_is_calm !== null && row.ai_is_calm !== undefined) {
+      if (row.ai_calm_score !== null && row.ai_calm_score !== undefined) {
+        tileComplexity = 1.0 - (Number(row.ai_calm_score) / 100); // 0.0=calm, 1.0=busy
+      } else if (row.ai_is_calm !== null && row.ai_is_calm !== undefined) {
         tileComplexity = row.ai_is_calm ? 0.0 : 0.7; // KI-basiert: calm oder leicht busy
+
       } else {
         const tileTypeDb = row.tile_type as string ?? 'medium';
         tileComplexity = tileTypeDb === 'calm' ? 0.0 : tileTypeDb === 'busy' ? 1.0 : 0.5;
