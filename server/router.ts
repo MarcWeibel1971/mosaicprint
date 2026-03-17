@@ -2676,6 +2676,23 @@ export const appRouter = router({
       (async () => {
         try {
           await addStep('start', 'running', 'Auto-Learn-Zyklus gestartet');
+          // Snapshot: Vorher-Stats
+          const alPool2 = db.getPool();
+          const beforeStats = await alPool2.query(`
+            SELECT COUNT(*) as total,
+              SUM(CASE WHEN quality_status='rejected' THEN 1 ELSE 0 END) as rejected,
+              SUM(CASE WHEN avg_l IS NULL OR (avg_l=50 AND avg_a=0 AND avg_b=0) THEN 1 ELSE 0 END) as unindexed,
+              AVG(quality_score) as avg_quality,
+              SUM(CASE WHEN semantic_theme='portrait_medium_skin' THEN 1 ELSE 0 END) as portrait_medium_skin,
+              SUM(CASE WHEN semantic_theme='city_night' THEN 1 ELSE 0 END) as city_night,
+              SUM(CASE WHEN semantic_theme='nature_forest' THEN 1 ELSE 0 END) as nature_forest,
+              SUM(CASE WHEN semantic_theme='nature_sunset' THEN 1 ELSE 0 END) as nature_sunset
+            FROM mosaic_images
+          `);
+          const bs = beforeStats.rows[0];
+          const beforeTotal = Number(bs.total);
+          await addStep('snapshot-before', 'done',
+            `Vorher: ${beforeTotal.toLocaleString('de-CH')} Tiles | portrait_medium_skin: ${Math.round(Number(bs.portrait_medium_skin)/beforeTotal*100)}% | city_night: ${Math.round(Number(bs.city_night)/beforeTotal*100)}% | Ø Qualität: ${Number(bs.avg_quality).toFixed(1)}`);
           // Step 1: QA pre-check
           await addStep('qa-pre', 'running', 'QA-Vorab-Check (index-integrity + pool-balance)...');
           const qaRunId1 = await db.startQualityRun('index-integrity', 'auto-learn');
@@ -2686,7 +2703,8 @@ export const appRouter = router({
           // Step 2: Analyse gaps
           await addStep('gap-analysis', 'running', 'DB-Luecken analysieren...');
           const alTasks = await analyzeDbGaps(input.targetPerBucket);
-          await addStep('gap-analysis', 'done', `${alTasks.length} Import-Tasks identifiziert`);
+          const gapSummary = alTasks.slice(0, 5).map((t: {label: string; deficit: number}) => `${t.label}(-${t.deficit})`).join(', ');
+          await addStep('gap-analysis', 'done', `${alTasks.length} Import-Tasks | Top-Lücken: ${gapSummary}`);
           // Step 3: Smart Import
           const alSources: Array<'pexels' | 'pixabay' | 'unsplash'> = [];
           if (process.env.PEXELS_API_KEY) alSources.push('pexels');
@@ -2794,8 +2812,31 @@ export const appRouter = router({
           const qaRunId3 = await db.startQualityRun('pool-balance', 'auto-learn');
           await runQualityCheckAsync('pool-balance', qaRunId3);
           await addStep('qa-post', 'done', 'QA-Nachcheck abgeschlossen');
-          await addStep('done', 'done', 'Auto-Learn-Zyklus erfolgreich abgeschlossen');
-          await db.finishAutoLearnRun(runId, 'success', { steps: steps.length });
+          // Snapshot: Nachher-Stats + Vergleich
+          const afterStats = await alPool2.query(`
+            SELECT COUNT(*) as total,
+              SUM(CASE WHEN quality_status='rejected' THEN 1 ELSE 0 END) as rejected,
+              AVG(quality_score) as avg_quality,
+              SUM(CASE WHEN semantic_theme='portrait_medium_skin' THEN 1 ELSE 0 END) as portrait_medium_skin,
+              SUM(CASE WHEN semantic_theme='city_night' THEN 1 ELSE 0 END) as city_night,
+              SUM(CASE WHEN semantic_theme='nature_forest' THEN 1 ELSE 0 END) as nature_forest,
+              SUM(CASE WHEN semantic_theme='nature_sunset' THEN 1 ELSE 0 END) as nature_sunset
+            FROM mosaic_images
+          `);
+          const as2 = afterStats.rows[0];
+          const afterTotal = Number(as2.total);
+          const newTiles = afterTotal - beforeTotal;
+          const qualityDelta = Number(as2.avg_quality) - Number(bs.avg_quality);
+          const skinBefore = Math.round(Number(bs.portrait_medium_skin)/beforeTotal*100);
+          const skinAfter = Math.round(Number(as2.portrait_medium_skin)/afterTotal*100);
+          const cityBefore = Math.round(Number(bs.city_night)/beforeTotal*100);
+          const cityAfter = Math.round(Number(as2.city_night)/afterTotal*100);
+          const forestBefore = Math.round(Number(bs.nature_forest)/beforeTotal*100);
+          const forestAfter = Math.round(Number(as2.nature_forest)/afterTotal*100);
+          await addStep('snapshot-after', 'done',
+            `Nachher: ${afterTotal.toLocaleString('de-CH')} Tiles (+${newTiles}) | portrait_medium_skin: ${skinBefore}%→${skinAfter}% | city_night: ${cityBefore}%→${cityAfter}% | nature_forest: ${forestBefore}%→${forestAfter}% | Ø Qualität: ${Number(as2.avg_quality).toFixed(1)} (${qualityDelta >= 0 ? '+' : ''}${qualityDelta.toFixed(1)})`);
+          await addStep('done', 'done', `Auto-Learn-Zyklus abgeschlossen: +${newTiles} neue Tiles, Pool jetzt ${afterTotal.toLocaleString('de-CH')} Tiles`);
+          await db.finishAutoLearnRun(runId, 'success', { steps: steps.length, newTiles, beforeTotal, afterTotal, skinBefore, skinAfter });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           steps.push({ step: 'error', status: 'error', message: msg, ts: new Date().toISOString() });
@@ -2920,7 +2961,26 @@ export const appRouter = router({
     `);
     const portraitBusyCount = Number(portraitBusyRes.rows[0].cnt);
 
+    // Pool-Statistik für Kontext
+    const totalRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status != 'rejected'`);
+    const totalActive = Number(totalRes.rows[0].cnt);
+    const themeDistRes = await pool.query(`
+      SELECT semantic_theme, COUNT(*) as cnt
+      FROM mosaic_images
+      WHERE quality_status != 'rejected'
+      GROUP BY semantic_theme
+      ORDER BY cnt DESC
+      LIMIT 10
+    `);
+    const themeDistribution = themeDistRes.rows.map((r: {semantic_theme: string; cnt: string}) => ({
+      theme: r.semantic_theme ?? 'null',
+      count: Number(r.cnt),
+      pct: totalActive > 0 ? Math.round(Number(r.cnt) / totalActive * 100) : 0,
+    }));
+
     return {
+      totalActive,
+      themeDistribution,
       stage1: {
         rejected: rejectedCount,
         urlDuplicates: urlDupCount,
@@ -3043,25 +3103,29 @@ export const appRouter = router({
       }
 
       // Wenn spezifische IDs angegeben: nur diese löschen (Sicherheitsnetz: müssen auch Kriterium erfüllen)
-      if (input.ids && input.ids.length > 0) {
-        whereClause = `id = ANY($1::int[]) AND (${whereClause})`;
+      const hasIds = input.ids && input.ids.length > 0;
+      let finalWhere: string;
+      let queryParams: unknown[];
+      if (hasIds) {
+        // ID-Filter kombinieren: nur die angegebenen IDs, die auch das Kriterium erfüllen
+        finalWhere = `id = ANY($1::int[]) AND (${whereClause})`;
+        queryParams = [input.ids];
+      } else {
+        finalWhere = whereClause;
+        queryParams = [];
       }
 
       if (input.dryRun) {
         const countRes = await pool.query(
-          input.ids && input.ids.length > 0
-            ? `SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`
-            : `SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`,
-          input.ids && input.ids.length > 0 ? [input.ids] : []
+          `SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${finalWhere}`,
+          queryParams
         );
         return { deleted: 0, wouldDelete: Number(countRes.rows[0].cnt), dryRun: true };
       }
 
       const deleteRes = await pool.query(
-        input.ids && input.ids.length > 0
-          ? `DELETE FROM mosaic_images WHERE ${whereClause} RETURNING id`
-          : `DELETE FROM mosaic_images WHERE ${whereClause} RETURNING id`,
-        input.ids && input.ids.length > 0 ? [input.ids] : []
+        `DELETE FROM mosaic_images WHERE ${finalWhere} RETURNING id`,
+        queryParams
       );
       return { deleted: deleteRes.rowCount ?? 0, wouldDelete: 0, dryRun: false };
     }),

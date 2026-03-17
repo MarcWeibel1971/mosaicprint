@@ -5240,6 +5240,8 @@ interface CleanupTile {
 }
 
 interface CleanupCandidates {
+  totalActive: number
+  themeDistribution: Array<{ theme: string; count: number; pct: number }>
   stage1: { rejected: number; urlDuplicates: number; total: number }
   stage2: { grayBusy: number; nearWhite: number; generalLow: number; total: number }
   stage3: { oversaturatedSkin: number; portraitBusy: number; total: number }
@@ -5389,6 +5391,35 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
             )}
           </div>
 
+          {/* Pool-Statistik */}
+          {candidates && candidates.themeDistribution && candidates.themeDistribution.length > 0 && (
+            <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
+              <h4 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-3">Pool-Verteilung ({candidates.totalActive.toLocaleString('de-CH')} aktive Tiles)</h4>
+              <div className="space-y-1.5">
+                {candidates.themeDistribution.map(t => (
+                  <div key={t.theme} className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600 w-44 truncate shrink-0">{t.theme ?? '(kein Tag)'}</span>
+                    <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
+                      <div
+                        className={`h-2 rounded-full ${t.pct > 30 ? 'bg-red-400' : t.pct > 15 ? 'bg-amber-400' : 'bg-blue-400'}`}
+                        style={{ width: `${Math.min(t.pct, 100)}%` }}
+                      />
+                    </div>
+                    <span className={`text-xs font-semibold w-10 text-right shrink-0 ${t.pct > 30 ? 'text-red-600' : t.pct > 15 ? 'text-amber-600' : 'text-gray-600'}`}>
+                      {t.pct}%
+                    </span>
+                    <span className="text-xs text-gray-400 w-16 text-right shrink-0">{t.count.toLocaleString('de-CH')}</span>
+                  </div>
+                ))}
+              </div>
+              {candidates.themeDistribution.some(t => t.pct > 30) && (
+                <p className="text-xs text-red-600 mt-2 font-medium">
+                  ⚠️ Dominante Kategorie (&gt;30%) erkannt – Semantic Tagger neu ausführen empfohlen, um Pool-Verteilung zu korrigieren.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Stufen */}
           {([1, 2, 3] as const).map(stage => {
             const cats = (Object.entries(categoryMeta) as [CleanupCategory, typeof categoryMeta[CleanupCategory]][])
@@ -5521,15 +5552,26 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
                       title={`ID:${tile.id} | L:${tile.avgL.toFixed(0)} C:${tile.chroma} | ${tile.tileType ?? '–'} | ${tile.semanticTheme ?? '–'} | ${tile.importQuery ?? ''}`}
                     >
                       {tile.thumbUrl ? (
-                        <img src={tile.thumbUrl} alt="" className="w-full h-full object-cover" loading="lazy" />
-                      ) : (
-                        <div
-                          className="w-full h-full"
-                          style={{
-                            background: `lab(${tile.avgL}% ${tile.avgA} ${tile.avgB})`,
+                        <img
+                          src={tile.thumbUrl}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                          onError={e => {
+                            const el = e.currentTarget;
+                            el.style.display = 'none';
+                            const fb = el.nextElementSibling as HTMLElement | null;
+                            if (fb) fb.style.display = 'block';
                           }}
                         />
-                      )}
+                      ) : null}
+                      <div
+                        className="w-full h-full"
+                        style={{
+                          background: `lab(${tile.avgL}% ${tile.avgA} ${tile.avgB})`,
+                          display: tile.thumbUrl ? 'none' : 'block',
+                        }}
+                      />
                       {selectedIds.has(tile.id) && (
                         <div className="absolute top-0.5 right-0.5 w-3 h-3 bg-red-500 rounded-full" />
                       )}

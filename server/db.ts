@@ -776,13 +776,16 @@ export function deriveSemanticTheme(tile: {
   const query = (tile.import_query ?? '').toLowerCase();
 
   // ── 1. Portrait detection ────────────────────────────────────────────────
-  if (isSkin && L >= 35 && L <= 85) {
+  // Echte Hauttöne: warm (a>2, b>2), mittlere Helligkeit, moderate Sättigung
+  // is_skin_friendly allein reicht nicht – zusätzlich a>2 UND b>2 (warm) nötig
+  const isRealSkin = isSkin && a > 2 && b > 2 && sat >= 5 && sat < 30;
+  if (isRealSkin && L >= 35 && L <= 85) {
     // Distinguish by brightness + warmth (a-channel)
-    if (L >= 65 && a >= 2 && a <= 18) return 'portrait_light_skin';   // fair/blonde
+    if (L >= 65 && a >= 3 && a <= 18) return 'portrait_light_skin';   // fair/blonde
     if (L >= 45 && L < 65 && a >= 3 && a <= 22) return 'portrait_medium_skin'; // olive/brown
     if (L >= 35 && L < 50 && a >= 5) return 'portrait_dark_skin';     // dark skin
-    if (L >= 60 && sat < 15) return 'portrait_grey_hair';              // grey/white hair
-    if (L >= 65 && sat < 20 && a < 5) return 'portrait_child';        // soft pale child skin
+    if (L >= 60 && sat < 15 && a < 4) return 'portrait_grey_hair';    // grey/white hair
+    if (L >= 65 && sat < 18 && a < 4) return 'portrait_child';        // soft pale child skin
     return 'portrait_medium_skin'; // fallback portrait
   }
 
