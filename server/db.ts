@@ -284,7 +284,20 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_suitability ON mosaic_images (ai_suitability)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_analyzed_at ON mosaic_images (ai_analyzed_at)`);
 
-  console.log("[DB] Schema ensured (v6 with AI Vision fields)");
+  // v7: Numerische AI-Scores für präziseres Matching
+  // ai_mosaic_score: 0-100 Gesamteignung als Mosaic-Tile (100=perfekt)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_mosaic_score SMALLINT DEFAULT NULL`);
+  // ai_calm_score: 0-100 Ruhe/Gleichmässigkeit (100=völlig uniform, 0=chaotisch)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_calm_score SMALLINT DEFAULT NULL`);
+  // ai_color_richness: 0-100 Farbvielfalt (100=viele verschiedene Farben, 0=monochrom)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_color_richness SMALLINT DEFAULT NULL`);
+  // ai_fill_uniformity: 0-100 Vollflächigkeit (100=eine durchgehende Szene, 0=fragmentiert/Collage)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_fill_uniformity SMALLINT DEFAULT NULL`);
+  // ai_has_text: true wenn sichtbarer Text/Logo im Bild
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_has_text BOOLEAN DEFAULT NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_mosaic_score ON mosaic_images (ai_mosaic_score)`);
+
+  console.log("[DB] Schema ensured (v7 with extended AI Vision scores)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────

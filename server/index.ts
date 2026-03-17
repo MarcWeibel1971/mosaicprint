@@ -1617,9 +1617,10 @@ const aiJobState = {
 
 async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, GEMINI_KEY: string) {
   const pool = db.getPool();
+  // v7 re-analysis: always re-analyze all tiles since prompt changed significantly
   const whereClause = forceReanalyze
     ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
-    : `r2_url IS NOT NULL AND ai_analyzed_at IS NULL AND quality_status != 'rejected'`;
+    : `r2_url IS NOT NULL AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected'`;
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
   aiJobState.total = total;
@@ -1630,23 +1631,28 @@ async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, 
   const CONCURRENCY = 20;
   const RATE_LIMIT_DELAY_MS = 50;
 
-  const PROMPT = `Analyze this image as a tile for photo mosaic creation. Return ONLY valid JSON:
+  const PROMPT = `You are evaluating a 128x128 pixel image tile for use in a large photo mosaic (heart shape, Times Square display).
+Return ONLY valid JSON with these exact fields:
 {
-  "suitability": "excellent|good|poor|reject",
-  "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|low_quality|null",
-  "theme": "portrait_face|portrait_skin|nature_forest|nature_mountain|nature_ocean|nature_sunset|nature_snow|city_night|city_architecture|animal|abstract_colorful|abstract_dark|abstract_light|food|other",
+  "mosaic_score": 0-100,
+  "calm_score": 0-100,
+  "color_richness": 0-100,
+  "fill_uniformity": 0-100,
   "has_face": true|false,
   "face_area_pct": 0-100,
-  "is_calm": true|false,
+  "has_text": true|false,
+  "reject": true|false,
+  "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|low_quality|null",
+  "theme": "portrait_face|portrait_skin|nature_forest|nature_mountain|nature_ocean|nature_sunset|nature_snow|city_night|city_architecture|animal|abstract_colorful|abstract_dark|abstract_light|food|other",
   "content_tags": ["tag1", "tag2", "tag3"]
 }
-Rules:
-- suitability=reject if: watermark visible, face fills >40% of tile, blurry/noisy, logo/text overlay
-- suitability=poor if: face fills 20-40% of tile, very uniform/boring, or low contrast
-- suitability=excellent if: rich texture, good color variety, no faces, calm or interesting pattern
-- is_calm=true if tile has uniform texture (good for skin/background regions in mosaics)
-- content_tags: 2-4 descriptive tags
-Return ONLY the JSON object, no explanation.`;
+Scoring rules:
+- mosaic_score (0-100): Overall suitability as mosaic tile. 90-100=excellent natural scene/texture, 70-89=good, 40-69=acceptable, 0-39=poor. Penalize: faces >20% area (-30), text/logo (-40), watermarks (-80), heavy noise/blur (-50), pure white/black (-20).
+- calm_score (0-100): Visual uniformity. 90-100=solid color or very smooth gradient (sky, water, wall). 60-89=gentle texture (grass, sand, bokeh). 30-59=moderate detail. 0-29=chaotic/busy (crowd, busy pattern, noise).
+- color_richness (0-100): Color variety. 90-100=many distinct colors. 50-89=moderate variety. 10-49=limited palette. 0-9=near monochrome.
+- fill_uniformity (0-100): How well the image fills the tile as a single coherent scene. 90-100=one clear subject fills entire tile. 50-89=mostly one scene. 0-49=fragmented, collage, or multiple unrelated elements.
+- reject=true ONLY if: visible watermark, face fills >50% of tile, severely blurry/noisy, explicit logo/brand overlay.
+Return ONLY the JSON object, no explanation, no markdown.`;
 
   const themeMap: Record<string, string> = {
     'portrait_face': 'portrait_medium_skin', 'portrait_skin': 'portrait_medium_skin',
@@ -1718,21 +1724,34 @@ Return ONLY the JSON object, no explanation.`;
           }
 
           const mappedTheme = themeMap[aiResult.theme] ?? 'nature_mountain';
+
+          // Derive suitability from mosaic_score for backward compat
+          const mosaicScore = Math.max(0, Math.min(100, Number(aiResult.mosaic_score ?? 70)));
+          const calmScore   = Math.max(0, Math.min(100, Number(aiResult.calm_score ?? 50)));
+          const colorRich   = Math.max(0, Math.min(100, Number(aiResult.color_richness ?? 50)));
+          const fillUnif    = Math.max(0, Math.min(100, Number(aiResult.fill_uniformity ?? 70)));
+          const isReject    = aiResult.reject === true || mosaicScore < 20;
+          const suitability = isReject ? 'reject' : mosaicScore >= 80 ? 'excellent' : mosaicScore >= 55 ? 'good' : 'poor';
+          const isCalm      = calmScore >= 60; // calm_score >= 60 → calm tile
+
           await pool.query(
             `UPDATE mosaic_images SET
                ai_suitability = $1, ai_reject_reason = $2, ai_theme = $3,
                ai_has_face = $4, ai_face_pct = $5, ai_is_calm = $6,
-               ai_content_tags = $7, ai_analyzed_at = NOW(), semantic_theme = $3
+               ai_content_tags = $7, ai_analyzed_at = NOW(), semantic_theme = $3,
+               ai_mosaic_score = $9, ai_calm_score = $10,
+               ai_color_richness = $11, ai_fill_uniformity = $12, ai_has_text = $13
              WHERE id = $8`,
             [
-              aiResult.suitability ?? 'good',
+              suitability,
               aiResult.reject_reason === 'null' ? null : (aiResult.reject_reason ?? null),
               mappedTheme, aiResult.has_face ?? false, aiResult.face_area_pct ?? 0,
-              aiResult.is_calm ?? false, JSON.stringify(aiResult.content_tags ?? []), tile.id,
+              isCalm, JSON.stringify(aiResult.content_tags ?? []), tile.id,
+              mosaicScore, calmScore, colorRich, fillUnif, aiResult.has_text ?? false,
             ]
           );
 
-          if (aiResult.suitability === 'reject') aiJobState.rejected++;
+          if (isReject) aiJobState.rejected++;
           aiJobState.processed++;
         } catch (err) {
           aiJobState.errors++;
@@ -1804,14 +1823,20 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
       SELECT
         COUNT(*) as total,
         COUNT(ai_analyzed_at) as analyzed,
-        COUNT(*) FILTER (WHERE ai_analyzed_at IS NULL AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
+        COUNT(*) FILTER (WHERE ai_mosaic_score IS NOT NULL) as analyzed_v7,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
         COUNT(*) FILTER (WHERE ai_suitability = 'excellent') as excellent,
         COUNT(*) FILTER (WHERE ai_suitability = 'good') as good,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor') as poor,
         COUNT(*) FILTER (WHERE ai_suitability = 'reject') as rejected_ai,
         COUNT(*) FILTER (WHERE ai_has_face = true) as has_face,
+        COUNT(*) FILTER (WHERE ai_has_text = true) as has_text,
         COUNT(*) FILTER (WHERE ai_reject_reason = 'watermark') as watermark,
-        COUNT(*) FILTER (WHERE ai_reject_reason = 'face_closeup') as face_closeup
+        COUNT(*) FILTER (WHERE ai_reject_reason = 'face_closeup') as face_closeup,
+        ROUND(AVG(ai_mosaic_score)) as avg_mosaic_score,
+        ROUND(AVG(ai_calm_score)) as avg_calm_score,
+        ROUND(AVG(ai_color_richness)) as avg_color_richness,
+        ROUND(AVG(ai_fill_uniformity)) as avg_fill_uniformity
       FROM mosaic_images
     `);
     res.json({ ok: true, stats: result.rows[0] });
