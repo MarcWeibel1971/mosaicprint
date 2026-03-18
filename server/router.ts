@@ -1534,8 +1534,9 @@ export const appRouter = router({
           log(`Top-Prioritäten: ${tasks.slice(0, 5).map(t => `${t.label}(${t.deficit})`).join(", ")}`);
 
           let imported = 0;
-          const CONCURRENCY = 3; // parallel LAB computation
-          const perPage = input.sourceId === "pexels" ? 30 : input.sourceId === "pixabay" ? 200 : 20;
+          // Production API limits: Unsplash 5000 req/h, Pexels 200 req/h, Pixabay 100 req/h
+          const CONCURRENCY = input.sourceId === "unsplash" ? 10 : 3; // Unsplash Production: 5000 req/h → 10 parallel
+          const perPage = input.sourceId === "pexels" ? 30 : input.sourceId === "pixabay" ? 200 : 30; // Unsplash max=30 per request
 
           for (const task of tasks) {
             if (imported >= input.count) break;
