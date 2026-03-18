@@ -1158,8 +1158,9 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity)
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity), 17 (17D with mosaicScore)
     const IS_16D = FPT >= 16; // includes tileComplexity
+    const IS_17D = FPT >= 17; // includes mosaicScore (AI quality tiebreaker)
     const USE_2STAGE = labIndex !== null && labIndex.length >= (FPT);
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
@@ -1201,7 +1202,7 @@ export default function Studio() {
       // Gray-penalty: when target cell is colorful (sat > 0.12), penalize gray tiles (sat < 0.08)
       // Stronger penalty for very saturated areas (red, blue, green objects)
       const GRAY_PENALTY = Math.max(0, (targetSat - 0.12) * 400); // Increased from 250 for better color accuracy
-      const heap: Array<{tileId: number; labDist: number}> = [];
+      const heap: Array<{tileId: number; labDist: number; mosaicScore: number}> = [];
       let maxDist = Infinity;
       let worstIdx = 0;
       for (let i = 0; i < labIndex.length; i += (FPT)) {
@@ -1299,8 +1300,10 @@ export default function Studio() {
           // Gray-penalty: penalize gray tiles when target is colorful
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += (GRAY_PENALTY);
         }
+        // Read mosaicScore from index [16] if available (17D)
+        const mosaicScore = IS_17D ? labIndex[i + 16] : 0.68;
         if (heap.length < (TOP_K)) {
-          heap.push({ tileId: id, labDist: dist });
+          heap.push({ tileId: id, labDist: dist, mosaicScore });
           if (heap.length === TOP_K) {
             // Find initial worst
             worstIdx = 0;
@@ -1310,7 +1313,7 @@ export default function Studio() {
             }
           }
         } else if (dist < maxDist) {
-          heap[worstIdx] = { tileId: id, labDist: dist };
+          heap[worstIdx] = { tileId: id, labDist: dist, mosaicScore };
           // Update worst
           worstIdx = 0;
           maxDist = heap[0].labDist;
@@ -1318,6 +1321,19 @@ export default function Studio() {
             if (heap[j].labDist > maxDist) { maxDist = heap[j].labDist; worstIdx = j; }
           }
         }
+      }
+      // Sort by labDist ASC; wenn IS_17D: bei sehr ähnlichem labDist (< 5% Unterschied) nach mosaicScore DESC
+      if (IS_17D) {
+        return heap.sort((a, b) => {
+          const distDiff = a.labDist - b.labDist;
+          // Tiebreaker: wenn labDist-Unterschied < 3% des besten Werts, nach mosaicScore sortieren
+          const bestDist = Math.min(a.labDist, b.labDist);
+          if (bestDist > 0 && Math.abs(distDiff) / bestDist < 0.03) {
+            // Gleich guter LAB-Match: bevorzuge Tile mit höherem mosaicScore
+            return b.mosaicScore - a.mosaicScore;
+          }
+          return distDiff;
+        });
       }
       return heap.sort((a, b) => a.labDist - b.labDist);
     };

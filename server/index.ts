@@ -127,13 +127,14 @@ app.get("/api/tile-lab-index", async (req, res) => {
       queryParams
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity] = 16 floats
+    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity, mosaicScore] = 17 floats
     // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
     // edge: echter Sobel-Kantenwert aus DB (edge_energy), Fallback: L-Varianz-Proxy für ältere Tiles
     // brightness: avg_l / 100
     // isSkinFriendly: 1.0 = skin-friendly tile, 0.0 = not skin-friendly
     // tileComplexity: 0.0=calm, 0.5=medium, 1.0=busy (from tile_type column)
-    const FLOATS_PER_TILE = 16;
+    // mosaicScore: ai_mosaic_score / 100 (0.0-1.0, Tiebreaker: höher = besser)
+    const FLOATS_PER_TILE = 17;
     const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
@@ -187,6 +188,10 @@ app.get("/api/tile-lab-index", async (req, res) => {
       }
       buf.writeFloatLE(isSkinFriendly, offset);   offset += 4;  // [14] isSkinFriendly
       buf.writeFloatLE(tileComplexity, offset);   offset += 4;  // [15] tileComplexity (0=calm, 0.5=medium, 1=busy)
+      // [16] mosaicScore: ai_mosaic_score / 100 (Tiebreaker: höher = besser)
+      // Fallback: 0.68 (Durchschnitt des Pools) für Tiles ohne AI-Score
+      const mosaicScore = row.ai_mosaic_score != null ? Number(row.ai_mosaic_score) / 100 : 0.68;
+      buf.writeFloatLE(mosaicScore, offset);      offset += 4;  // [16] mosaicScore (0=poor, 1=excellent)
     }
     // Cache the result
     indexCacheMap.set(theme, { buf, tileCount: rows.length, builtAt: Date.now(), theme });
