@@ -1306,6 +1306,18 @@ export default function Studio() {
           // Gray-penalty: penalize gray tiles when target is colorful
           if (GRAY_PENALTY > 0 && sat < 0.08) dist += (GRAY_PENALTY);
         }
+        // CRITICAL FIX: Bright tile in dark area penalty (prevents white spots in dark clothing/hair)
+        // Must be OUTSIDE IS_14D/IS_16D blocks so it applies to ALL index types (7D, 14D, 15D, 16D, 17D)
+        // brightness is at [13] for 14D+, [5] for 7D
+        const tileBrightness = IS_7D && !IS_14D ? labIndex[i + 5] : (IS_14D ? labIndex[i + 13] : 0.5);
+        if (targetBrightness < 0.35 && tileBrightness > 0.55) {
+          // Bright tile in dark area: strong penalty to prevent white spots
+          dist += (tileBrightness - 0.55) * (0.35 - targetBrightness) * 3000; // up to +450
+        }
+        // Also penalize dark tiles in very bright areas (symmetric)
+        if (targetBrightness > 0.70 && tileBrightness < 0.15) {
+          dist += (0.15 - tileBrightness) * (targetBrightness - 0.70) * 1000; // up to +150
+        }
         // Read mosaicScore from index [16] if available (17D)
         const mosaicScore = IS_17D ? labIndex[i + 16] : 0.68;
         if (heap.length < (TOP_K)) {
