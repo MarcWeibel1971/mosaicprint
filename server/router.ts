@@ -288,6 +288,23 @@ const CALM_NATURE_KEYWORDS = [
   // Paper and minimal surfaces
   "paper texture minimal white", "blank paper background", "white paper smooth",
   "cream paper texture", "off-white paper minimal", "light paper background",
+  // NEW: additional calm nature keywords for Production API
+  "cumulus clouds blue sky", "cirrus clouds wispy", "stratus clouds gray",
+  "blue sky horizon line", "sky reflection water", "twilight sky gradient",
+  "night sky dark blue", "stormy sky dramatic", "rainbow sky after rain",
+  "arctic sky pale", "tropical sky bright", "mountain sky clear",
+  "sea fog coastal", "valley mist morning", "low cloud cover soft",
+  "rain mist abstract", "steam vapor soft", "smoke abstract minimal",
+  "ocean wave close", "sea foam white", "tide pool reflection",
+  "rain puddle reflection", "dew drops grass", "ice surface smooth",
+  "snow surface minimal", "frozen lake surface", "glacier surface blue",
+  "river current smooth", "stream water clear", "waterfall mist soft",
+  "bokeh city lights night", "bokeh nature green", "bokeh flowers soft",
+  "lens flare soft", "light leak abstract", "sunbeam through trees",
+  "gauze fabric soft", "muslin cloth neutral", "chiffon fabric light",
+  "velvet texture dark", "suede texture warm", "felt texture soft",
+  "clay texture smooth", "plaster wall smooth", "stucco wall texture",
+  "concrete floor smooth", "stone surface flat", "slate surface dark",
 ];
 
 // CALM_MONOCHROME_KEYWORDS: Single-hue, low-texture tiles for backgrounds and clothing
@@ -324,6 +341,17 @@ const CALM_MONOCHROME_KEYWORDS = [
   // ── Teal / Cyan (cool clothing, water backgrounds) ──
   "teal smooth gradient minimal", "dark teal abstract smooth", "muted teal minimal",
   "soft cyan smooth background", "dark teal smooth", "muted turquoise minimal",
+  // ── NEW: additional monochrome tones ──
+  "lavender purple smooth", "mauve purple minimal", "dusty rose smooth",
+  "blush pink minimal", "salmon pink smooth", "peach tone minimal",
+  "terracotta smooth abstract", "rust brown minimal", "sienna warm smooth",
+  "forest green dark smooth", "hunter green minimal", "moss green smooth",
+  "cobalt blue smooth", "royal blue minimal", "slate blue smooth",
+  "midnight blue dark", "indigo smooth abstract", "violet purple smooth",
+  "gold yellow smooth", "amber warm minimal", "honey tone smooth",
+  "cream ivory minimal", "ecru neutral smooth", "linen beige minimal",
+  "graphite gray smooth", "pewter gray minimal", "ash gray smooth",
+  "espresso dark brown", "chocolate brown smooth", "walnut dark minimal",
 ];
 
 // PORTRAIT_NATURE_KEYWORDS: Natural gradient tiles ideal for portrait mosaics
