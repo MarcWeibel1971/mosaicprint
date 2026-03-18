@@ -1877,6 +1877,87 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
   }
 });
 
+// ── AI Cleanup: Rejects und Poor-Tiles entfernen ─────────────────────────────
+app.post('/api/admin/ai-cleanup-rejects', async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { deletePoor = false, mosaicScoreThreshold = 30 } = req.body || {};
+
+    // 1. Rejects löschen (ai_suitability = 'reject')
+    const rejectResult = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE ai_suitability = 'reject'
+      RETURNING id
+    `);
+    const deletedRejects = rejectResult.rowCount ?? 0;
+
+    // 2. Tiles mit sehr niedrigem mosaic_score löschen (< threshold)
+    const lowScoreResult = await pool.query(`
+      DELETE FROM mosaic_images
+      WHERE ai_mosaic_score IS NOT NULL AND ai_mosaic_score < $1
+      RETURNING id
+    `, [mosaicScoreThreshold]);
+    const deletedLowScore = lowScoreResult.rowCount ?? 0;
+
+    // 3. Optional: Poor-Tiles löschen (ai_suitability = 'poor')
+    let deletedPoor = 0;
+    if (deletePoor) {
+      const poorResult = await pool.query(`
+        DELETE FROM mosaic_images
+        WHERE ai_suitability = 'poor'
+        RETURNING id
+      `);
+      deletedPoor = poorResult.rowCount ?? 0;
+    }
+
+    // Verbleibende Stats
+    const statsResult = await pool.query(`
+      SELECT COUNT(*) as remaining FROM mosaic_images
+    `);
+
+    res.json({
+      ok: true,
+      deleted: {
+        rejects: deletedRejects,
+        lowScore: deletedLowScore,
+        poor: deletedPoor,
+        total: deletedRejects + deletedLowScore + deletedPoor
+      },
+      remaining: parseInt(statsResult.rows[0].remaining)
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// ── AI Pool-Statistik: Score-Verteilung ──────────────────────────────────────
+app.get('/api/admin/ai-pool-quality', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE ai_mosaic_score >= 80) as excellent_count,
+        COUNT(*) FILTER (WHERE ai_mosaic_score >= 60 AND ai_mosaic_score < 80) as good_count,
+        COUNT(*) FILTER (WHERE ai_mosaic_score >= 40 AND ai_mosaic_score < 60) as fair_count,
+        COUNT(*) FILTER (WHERE ai_mosaic_score < 40 AND ai_mosaic_score IS NOT NULL) as poor_count,
+        COUNT(*) FILTER (WHERE ai_suitability = 'reject') as rejected_count,
+        COUNT(*) FILTER (WHERE ai_mosaic_score IS NULL) as not_analyzed,
+        ROUND(AVG(ai_mosaic_score)) as avg_mosaic,
+        ROUND(AVG(ai_calm_score)) as avg_calm,
+        ROUND(AVG(ai_color_richness)) as avg_color,
+        ROUND(AVG(ai_fill_uniformity)) as avg_fill,
+        ROUND(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY ai_mosaic_score)) as p25_mosaic,
+        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ai_mosaic_score)) as p50_mosaic,
+        ROUND(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY ai_mosaic_score)) as p75_mosaic
+      FROM mosaic_images
+    `);
+    res.json({ ok: true, quality: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
 // tRPC API (for Admin panel)
 app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
 
