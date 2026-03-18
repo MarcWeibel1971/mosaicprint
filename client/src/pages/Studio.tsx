@@ -2724,7 +2724,12 @@ export default function Studio() {
         // Luminance scale factor: how much brighter/darker target is vs tile
         // Wide clamp 0.15-4.0 to allow strong darkening/brightening for portrait visibility
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
-        const clampedLumScale = Math.max(0.15, Math.min(4.0, rawLumScale));
+        // CRITICAL FIX: In dark target areas (tL < 40), cap lumScale to 1.0
+        // This prevents bright tiles from being scaled UP in dark areas (white spots in dark shirt/beard)
+        // A tile that is already darker than the target can still be scaled up slightly,
+        // but a tile that is brighter than the target must be scaled DOWN (never up)
+        const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
+        const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
         const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
         // Step 2: Apply per-pixel luminance scale + moderate AB transfer
         // In shadow zones: also apply local contrast stretch to spread the tile's
