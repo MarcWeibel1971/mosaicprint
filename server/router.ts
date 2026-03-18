@@ -1573,36 +1573,44 @@ export const appRouter = router({
                   const data = await res.json() as any;
                   photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
                 } else {
-                  const res = await fetch(
-                    `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&orientation=squarish`,
-                    { headers: { Authorization: `Client-ID ${apiKey}` } }
-                  );
-                  if (!res.ok) {
-                    log(`⚠️ Unsplash API error ${res.status} for "${task.query}"`);
-                    if (res.status === 403 || res.status === 429) {
-                      unsplashRateLimited = true;
-                      log(`⚠️ Unsplash rate limit reached – switching to Pexels fallback for remaining keywords`);
-                      // Retry this keyword with Pexels immediately
-                      if (process.env.PEXELS_API_KEY) {
-                        const r2 = await fetch(
-                          `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=30&orientation=square`,
-                          { headers: { Authorization: process.env.PEXELS_API_KEY } }
-                        );
-                        if (r2.ok) {
-                          const d2 = await r2.json() as any;
-                          photos = (d2.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
+                  // Production API: fetch multiple pages (1-5) per keyword to get more variety
+                  const maxPages = 5; // 5 pages × 30 = 150 photos per keyword
+                  for (let pg = 1; pg <= maxPages && !unsplashRateLimited; pg++) {
+                    const res = await fetch(
+                      `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&page=${pg}&orientation=squarish`,
+                      { headers: { Authorization: `Client-ID ${apiKey}` } }
+                    );
+                    if (!res.ok) {
+                      log(`⚠️ Unsplash API error ${res.status} for "${task.query}" p${pg}`);
+                      if (res.status === 403 || res.status === 429) {
+                        unsplashRateLimited = true;
+                        log(`⚠️ Unsplash rate limit reached – switching to Pexels fallback for remaining keywords`);
+                        // Retry this keyword with Pexels immediately
+                        if (process.env.PEXELS_API_KEY) {
+                          const r2 = await fetch(
+                            `https://api.pexels.com/v1/search?query=${encodeURIComponent(task.query)}&per_page=30&orientation=square`,
+                            { headers: { Authorization: process.env.PEXELS_API_KEY } }
+                          );
+                          if (r2.ok) {
+                            const d2 = await r2.json() as any;
+                            photos.push(...(d2.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small })));
+                          }
                         }
                       }
-                    } else { continue; }
-                  } else {
-                    const data = await res.json() as any;
-                    photos = (data.results ?? []).map((p: any) => ({
-                      sourceUrl: p.urls.regular,
-                      tile128Url: p.urls.thumb,
-                      photographerName: p.user?.name ?? null,
-                      photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
-                      downloadLocation: p.links?.download_location ?? null,
-                    }));
+                      break;
+                    } else {
+                      const data = await res.json() as any;
+                      const pagePhotos = (data.results ?? []).map((p: any) => ({
+                        sourceUrl: p.urls.regular,
+                        tile128Url: p.urls.thumb,
+                        photographerName: p.user?.name ?? null,
+                        photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
+                        downloadLocation: p.links?.download_location ?? null,
+                      }));
+                      photos.push(...pagePhotos);
+                      // Stop if last page returned fewer results than requested
+                      if (pagePhotos.length < perPage) break;
+                    }
                   }
                 }
               }
