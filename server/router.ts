@@ -1800,14 +1800,35 @@ export const appRouter = router({
               : src === 'pixabay' ? process.env.PIXABAY_API_KEY!
               : process.env.UNSPLASH_ACCESS_KEY!;
             let imported = 0;
-            const allKeywords = [...SUBJECT_KEYWORDS, ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat())];
-            const shuffled = allKeywords.sort(() => Math.random() - 0.5);
+            // Build comprehensive keyword list from ALL available keyword arrays
+            const allKeywords = [
+              ...SUBJECT_KEYWORDS,
+              ...Object.values(COLOR_BRIGHTNESS_KEYWORDS).flatMap(b => Object.values(b).flat()),
+              ...CALM_NATURE_KEYWORDS,
+              ...CALM_MONOCHROME_KEYWORDS,
+              ...ABSTRACT_LOW_EDGE_KEYWORDS,
+              ...SKIN_TONE_KEYWORDS,
+              ...HIGH_SAT_KEYWORDS,
+              ...LOW_SAT_KEYWORDS,
+              ...COOL_KEYWORDS,
+              ...EXTREME_DARK_KEYWORDS,
+              ...EXTREME_BRIGHT_KEYWORDS,
+              ...MEDIUM_SAT_KEYWORDS,
+            ];
+            // Deduplicate keywords
+            const uniqueKeywords = [...new Set(allKeywords)];
+            const shuffled = uniqueKeywords.sort(() => Math.random() - 0.5);
             const perPage = src === 'pexels' ? 80 : src === 'pixabay' ? 200 : 30;
-            const CONCURRENCY = 5;
+            // For Unsplash Production API (5000 req/h): systematically iterate pages 1-10
+            // This ensures we get ALL available images, not just random pages
+            const maxPages = src === 'unsplash' ? 10 : 5;
+            const CONCURRENCY = src === 'unsplash' ? 10 : 5;
             let kwIdx = 0;
-            while (imported < input.count && kwIdx < shuffled.length) {
+            outerLoop: while (imported < input.count && kwIdx < shuffled.length) {
               const keyword = shuffled[kwIdx++];
-              const page = Math.floor(Math.random() * 5) + 1;
+              // Iterate all pages systematically instead of random page
+              for (let page = 1; page <= maxPages; page++) {
+                if (imported >= input.count) break outerLoop;
               try {
                 let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
                 if (src === 'pexels') {
@@ -1865,8 +1886,11 @@ export const appRouter = router({
                   }));
                 }
                 if (batchNew > 0) log(`[${src}] "${keyword}" p${page}: +${batchNew} (${imported}/${input.count})`);
-              } catch { /* skip keyword */ }
-            }
+                // If page returned 0 new results, stop paginating this keyword early
+                if (batchNew === 0 && page >= 2) break;
+              } catch { /* skip page */ }
+              } // end for page loop
+            } // end outerLoop
             log(`✅ [${src}] Fertig: ${imported} neue Bilder`);
             status.finishedAt = new Date().toISOString();
           } catch (e: unknown) {
