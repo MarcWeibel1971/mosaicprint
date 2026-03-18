@@ -611,7 +611,7 @@ export default function Studio() {
             const whiteHairPreset = {
               baseTiles: 100,           // fewer cols: larger tiles = less noise on bright skin
               tilePx: 9,               // larger tiles: smoother appearance for light areas
-              maxReuse: 6,
+              maxReuse: 12,
               rotation: false,
               neighborRadius: 5,
               neighborPenalty: 160,     // lower: less aggressive anti-repetition for bright tiles
@@ -637,10 +637,10 @@ export default function Studio() {
             const portraitPreset = {
               baseTiles: 120,         // 120 cols: more tiles = sharper facial features
                tilePx: 7,              // 7px tiles: finer detail for eyes/nose/mouth
-               maxReuse: 4,            // reduced: prevents forced bad matches (was 6)
+               maxReuse: 8,            // increased: allows more reuse for smoother result (was 4)
                rotation: false,        // no rotation: keeps tile orientation consistent
                neighborRadius: 6,      // wider radius: more anti-repetition (was 5)
-               neighborPenalty: 400,   // VERSCHÄRFT: less tile repetition = more detail (was 280)
+               neighborPenalty: 200,   // reduced: allow more reuse for smoother result (was 400)
               contrastBoost: 1.35,    // stronger contrast for crisp edges
               histogramBlend: 0.09,   // slightly more blend for smoother skin tones
               baseOverlay: 0.22,      // stronger overlay for clearer mosaic structure
@@ -744,10 +744,10 @@ export default function Studio() {
                 if (falHasFace && imageType !== 'portrait') {
                   // fal.ai found a face but heuristic missed it
                   // Use Gemini algo recommendations if available
-                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 420;
+                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 200;
                   const neighborRadius = geminiAlgo?.neighborRadius ?? 6;
                   const tileComplexityThreshold = geminiAlgo?.tileComplexityThreshold ?? 0.22;
-                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 4, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
+                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 8, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
                   localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
                   localStorage.removeItem('mosaicprint_selected_theme');
                   setAutoPresetApplied('Portrait');
@@ -1953,8 +1953,8 @@ export default function Studio() {
     const poolSize = filteredValidImgs.length;
     // Globales MAX_REUSE (Basis)
     const MAX_REUSE_GLOBAL = poolSize >= (TOTAL_TILES) * 3
-      ? 1  : poolSize >= (TOTAL_TILES) * 1.5
-        ? 2  : Math.max(3, Math.ceil((TOTAL_TILES * 1.5) / Math.max(1, poolSize)));
+      ? 3  : poolSize >= (TOTAL_TILES) * 1.5
+        ? 5  : Math.max(8, Math.ceil((TOTAL_TILES * 2.5) / Math.max(1, poolSize)));
     // Pool-Diversität: Zähle Tiles pro Helligkeitsbereich
     const poolBuckets = { vd: 0, dk: 0, md: 0, br: 0, vb: 0 };
     for (const mf of filteredImgFeatures) {
@@ -1977,7 +1977,7 @@ export default function Studio() {
     const calcMR = (p: number, c: number): number => {
       if (c === 0) return MAX_REUSE_GLOBAL;
       const r = p / c;
-      return r >= 3.0 ? 1 : r >= 1.5 ? 2 : r >= 0.8 ? 3 : r >= 0.4 ? 5 : 8;
+      return r >= 3.0 ? 3 : r >= 1.5 ? 5 : r >= 0.8 ? 8 : r >= 0.4 ? 12 : 20;
     };
     const MR_BUCKET = {
       vd: calcMR(poolBuckets.vd, cellBuckets.vd),
@@ -2092,7 +2092,7 @@ export default function Studio() {
           : NEIGHBOR_PENALTY;
         const neighborPenalty = neighborIds.has(j) ? effectiveNeighborPenalty : 0;
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        const reusePenalty = useCount[j] >= cellMaxReuse ? 150 * (useCount[j] - cellMaxReuse + 1) : 0;
+        const reusePenalty = useCount[j] >= cellMaxReuse ? 25 * (useCount[j] - cellMaxReuse + 1) : 0;
 
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
@@ -2142,10 +2142,10 @@ export default function Studio() {
           const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0-1
           // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
           const wSatBase = savedSettings.saturationWeight ?? 0.25;
-          // Repetition penalty: exponential growth to strongly discourage reuse
-          // 1st reuse: +80, 2nd: +320, 3rd: +1280, 4th+: +5120 (effectively banned)
+          // Repetition penalty: gentle growth to allow more reuse (reduces graininess)
+          // 1st reuse: +15, 2nd: +40, 3rd: +80, 4th+: +150
           const rc = useCount[j] || 0;
-          const repPenalty = rc === 0 ? 0 : rc === 1 ? 80 : rc === 2 ? 320 : rc === 3 ? 1280 : 5120;
+          const repPenalty = rc === 0 ? 0 : rc === 1 ? 15 : rc === 2 ? 40 : rc === 3 ? 80 : 150;
           // Face region: per-subregion weights for sharper eye/nose/mouth/cheek/forehead
           if (inFace) {
             // Per-subregion weight multipliers (MediaPipe Face Mesh)
