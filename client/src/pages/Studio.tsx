@@ -2707,6 +2707,8 @@ export default function Studio() {
         // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
         // Solution: in shadow zones, increase L_BLEND and apply local contrast stretch
         // so that subtle luminance differences between tiles become visible again.
+        // NOTE: stretchFactor must stay LOW to avoid amplifying bright pixels within tiles
+        // (e.g. a tile with white sky at top would create white spots in dark shirt/beard)
         const isShadowZone = tL < 40;  // extended shadow zone threshold (was 35)
         const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0; // 0-1, strongest at tL=0
         const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50); // stronger boost in shadows (was 0.40)
@@ -2734,10 +2736,17 @@ export default function Studio() {
           let newL = Math.max(0, Math.min(100, pl * lumScale));
           // Shadow contrast stretch: expand internal contrast around target L
           // This makes tile texture (edges, details) visible even in dark zones
+          // REDUCED stretchFactor: was 1.2x (up to 2.2x total) → now 0.4x (up to 1.4x)
+          // Reason: high stretch amplifies bright pixels within tiles → white spots in dark shirt/beard
           if (isShadowZone && shadowBoost > 0.05) {
             const deviation = pl - avgL;  // how much this pixel deviates from tile average
-            const stretchFactor = 1.0 + shadowBoost * 1.2;  // up to 2.2x stretch at deepest shadow (was 1.8x)
+            const stretchFactor = 1.0 + shadowBoost * 0.4;  // up to 1.4x stretch (was 2.2x)
             newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+          }
+          // CRITICAL: In dark target areas, cap tile pixel brightness to prevent white spots
+          // Even after stretch, no pixel should be much brighter than the target cell
+          if (isShadowZone && newL > tL + 25) {
+            newL = tL + 25 + (newL - tL - 25) * 0.2; // soft cap: allow max tL+25, compress beyond
           }
           // Color: gentle shift toward target a/b, clamped to MAX_COLOR_SHIFT
           const rawDeltaA = (tA - pa) * AB_BLEND;
