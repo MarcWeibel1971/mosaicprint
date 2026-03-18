@@ -1230,6 +1230,12 @@ export default function Studio() {
             const darkPenalty = (0.15 - brightness) * (targetBrightness - 0.65) * 300;
             dist += darkPenalty; // up to +45 for very dark tile in very bright area
           }
+          // CRITICAL FIX: Bright tile in dark area penalty (prevents white spots in dark clothing/hair)
+          // A bright tile (brightness>0.55) in a dark area (targetBrightness<0.35) is almost never correct
+          if (targetBrightness < 0.35 && brightness > 0.55) {
+            const brightInDarkPenalty = (brightness - 0.55) * (0.35 - targetBrightness) * 2000;
+            dist += brightInDarkPenalty; // up to +300 for very bright tile in very dark area
+          }
           // ── Color-Mismatch-Penalty (konsolidiert aus: Gray-, Skin-, Green-, Blue-Penalty) ──
           // Alle Farb-Mismatch-Penalties sind hier zusammengefasst, um Überlappungen zu vermeiden.
           const sat = Math.min(1, Math.sqrt(a*a + b*b) / 60); // Tile-Sättigung 0-1
@@ -2083,14 +2089,9 @@ export default function Studio() {
       for (const j of candidateIndices) {
         const mf = filteredImgFeatures[j];
         // Base penalties (rotation-independent)
-        // For bright neutral tiles (gray hair, white background) reduce neighbor penalty
-        // so they can be reused more often instead of falling back to yellow/warm tiles
-        // IMPORTANT: Only truly neutral tiles (LAB b < 10) get the reduction - yellow tiles (b >= 10) are excluded
-        const isBrightNeutralTile = mf.brightness > 60 && mf.saturation < 20 && (mf.lab?.[2] ?? 99) < 10;
-        const effectiveNeighborPenalty = (isBrightNeutralTile && !inFace)
-          ? Math.round(NEIGHBOR_PENALTY * 0.30)  // 30% of normal penalty for truly neutral bright tiles (was 45%)
-          : NEIGHBOR_PENALTY;
-        const neighborPenalty = neighborIds.has(j) ? effectiveNeighborPenalty : 0;
+        // neighborPenalty applied uniformly - no special reduction for bright tiles
+        // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
+        const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
         const reusePenalty = useCount[j] >= cellMaxReuse ? 25 * (useCount[j] - cellMaxReuse + 1) : 0;
 
@@ -2251,6 +2252,10 @@ export default function Studio() {
                 dist += (50 - mf.lab[0]) * 3; // up to +150 for very dark tile in very bright area
               }
             }
+            // CRITICAL FIX: Bright tile in dark face area (prevents white spots in dark beard/hair/clothing)
+            if (tf.brightness < 35 && mf.brightness > 60) {
+              dist += (mf.brightness - 60) * (35 - tf.brightness) * 1.5; // up to ~900 for bright tile in dark face area
+            }
             dist += neighborPenalty + reusePenalty + repPenalty;
             if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
             continue;
@@ -2385,8 +2390,9 @@ export default function Studio() {
               dist += (tileEdgeEnergy - 0.60) * 400; // up to +160 for very busy tile in dark area
             }
             // Also penalize tiles that are much brighter than the target (creates bright spots in dark areas)
-            if (tileBr > targetBr + 40) {
-              dist += (tileBr - targetBr - 40) * 3; // up to ~180 for very bright tile in dark area
+            // CRITICAL FIX: Strong penalty for bright tiles in dark areas (prevents white spots in dark clothing)
+            if (tileBr > targetBr + 25) {
+              dist += (tileBr - targetBr - 25) * 20; // up to ~1100 for very bright tile in dark area (was *3)
             }
           }
 
