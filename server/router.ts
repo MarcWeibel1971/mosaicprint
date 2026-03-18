@@ -1398,12 +1398,32 @@ export const appRouter = router({
             orderedKeywords = [...gapKeywords, ...extra];
           }
           const perPage = input.source === "pexels" ? 80 : input.source === "pixabay" ? 200 : 30;
-          const CONCURRENCY = 5;
+          // Unsplash Production API: use ALL keyword arrays for maximum coverage
+          if (input.source === "unsplash" && !input.category) {
+            const allExtendedKeywords = [
+              ...orderedKeywords,
+              ...CALM_NATURE_KEYWORDS,
+              ...CALM_MONOCHROME_KEYWORDS,
+              ...ABSTRACT_LOW_EDGE_KEYWORDS,
+              ...SKIN_TONE_KEYWORDS,
+              ...HIGH_SAT_KEYWORDS,
+              ...LOW_SAT_KEYWORDS,
+              ...COOL_KEYWORDS,
+              ...EXTREME_DARK_KEYWORDS,
+              ...EXTREME_BRIGHT_KEYWORDS,
+              ...MEDIUM_SAT_KEYWORDS,
+            ];
+            orderedKeywords = [...new Set(allExtendedKeywords)];
+          }
+          const CONCURRENCY = input.source === "unsplash" ? 10 : 5;
+          // Unsplash Production: iterate pages 1-10 systematically; others: random page 1-5
+          const maxPages = input.source === "unsplash" ? 10 : 1;
           let kwIdx = 0;
-          while (imported < input.count && kwIdx < orderedKeywords.length) {
+          outerImport: while (imported < input.count && kwIdx < orderedKeywords.length) {
             const keyword = orderedKeywords[kwIdx++];
-            // Random page offset (1-5) to avoid always getting the same first results
-            const page = Math.floor(Math.random() * 5) + 1;
+            for (let pageLoop = 1; pageLoop <= maxPages; pageLoop++) {
+            if (imported >= input.count) break outerImport;
+            const page = input.source === "unsplash" ? pageLoop : (Math.floor(Math.random() * 5) + 1);
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.source === "pexels") {
@@ -1470,8 +1490,11 @@ export const appRouter = router({
                 }));
               }
               if (batchNew > 0) log(`"${keyword}" p${page}: +${batchNew} neu (${imported}/${input.count})`);
-            } catch (e) { log(`"${keyword}" error: ${e}`); }
-          }
+              // Early exit: if page returned 0 new results and we're past page 1, stop paginating
+              if (batchNew === 0 && pageLoop >= 2) break;
+            } catch (e) { log(`"${keyword}" p${pageLoop} error: ${e}`); }
+            } // end for pageLoop
+          } // end outerImport
           log(`✅ Import fertig: ${imported} neue Bilder`);
           status.finishedAt = new Date().toISOString();
         } catch (e: unknown) {
