@@ -1573,8 +1573,8 @@ export const appRouter = router({
                   const data = await res.json() as any;
                   photos = (data.photos ?? []).map((p: any) => ({ sourceUrl: p.src.large, tile128Url: p.src.small }));
                 } else {
-                  // Production API: fetch multiple pages (1-5) per keyword to get more variety
-                  const maxPages = 5; // 5 pages × 30 = 150 photos per keyword
+                  // Production API: fetch multiple pages (1-10) per keyword to get more variety
+                  const maxPages = 10; // 10 pages × 30 = 300 photos per keyword (5000 req/h Production API)
                   for (let pg = 1; pg <= maxPages && !unsplashRateLimited; pg++) {
                     const res = await fetch(
                       `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${perPage}&page=${pg}&orientation=squarish`,
