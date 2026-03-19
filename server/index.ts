@@ -1639,8 +1639,8 @@ async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, 
   aiJobState.rejected = 0;
   aiJobState.errors = 0;
 
-  const CONCURRENCY = 8;           // Reduziert von 20 auf 8 um 429-Fehler zu vermeiden
-  const RATE_LIMIT_DELAY_MS = 500;  // 500ms zwischen Chunks = ~16 req/s gesamt
+  const CONCURRENCY = 15;           // Erhöht auf 15 für ~5000/h Durchsatz
+  const RATE_LIMIT_DELAY_MS = 200;  // 200ms zwischen Chunks = ~75 req/s gesamt
 
   const PROMPT = `You are a strict quality evaluator for photo mosaic tiles. Each tile is a 128x128px image used as one pixel in a large portrait mosaic (like the "redhead" mosaic style where thousands of photos form a face).
 
@@ -1759,30 +1759,40 @@ Return ONLY the JSON object, no explanation, no markdown.`;
             const geminiData = await geminiResp.json() as any;
             const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
             try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
-          } else if (geminiResp.status === 429) {
-            // Rate limit: wait 60s and retry once
-            console.warn(`[ai-job] Rate limit (429) for tile ${tile.id}, waiting 60s...`);
-            await new Promise(r => setTimeout(r, 60000));
-            const retryResp = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: mimeType, data: imageBase64 } }]}],
-                  generationConfig: { responseMimeType: 'application/json', temperature: 0.05, maxOutputTokens: 300 },
-                }),
-                signal: AbortSignal.timeout(30000),
+          } else if (geminiResp.status === 429 || geminiResp.status === 503) {
+            // Rate limit (429) or overload (503): exponential backoff, retry up to 3x
+            const baseDelay = geminiResp.status === 429 ? 30000 : 5000;
+            let retrySuccess = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              const waitMs = baseDelay * attempt;
+              console.warn(`[ai-job] HTTP ${geminiResp.status} for tile ${tile.id}, attempt ${attempt}/3, waiting ${waitMs}ms...`);
+              await new Promise(r => setTimeout(r, waitMs));
+              const retryResp = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: mimeType, data: imageBase64 } }]}],
+                    generationConfig: { responseMimeType: 'application/json', temperature: 0.05, maxOutputTokens: 256 },
+                  }),
+                  signal: AbortSignal.timeout(30000),
+                }
+              );
+              if (retryResp.ok) {
+                const retryData = await retryResp.json() as any;
+                const rawText = retryData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+                try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
+                retrySuccess = true;
+                break;
+              } else if (retryResp.status !== 429 && retryResp.status !== 503) {
+                break; // Non-retryable error
               }
-            );
-            if (retryResp.ok) {
-              const retryData = await retryResp.json() as any;
-              const rawText = retryData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
-              try { aiResult = JSON.parse(rawText); } catch { aiResult = {}; }
-            } else {
-              console.warn(`[ai-job] Retry also failed for tile ${tile.id}: ${retryResp.status}`);
+            }
+            if (!retrySuccess) {
+              console.warn(`[ai-job] All retries failed for tile ${tile.id}`);
               aiJobState.errors++;
-              aiJobState.lastError = `Tile ${tile.id}: HTTP ${retryResp.status} (retry)`;
+              aiJobState.lastError = `Tile ${tile.id}: HTTP ${geminiResp.status} (all retries failed)`;
               return;
             }
           } else {
@@ -2035,7 +2045,7 @@ db.ensureSchema()
 // Runs every hour, uses gap-based analysis to fill most-needed color buckets first
 // Uses Pexels as primary source (25k req/month), Pixabay as fallback
 const CRON_TILE_TARGET = 100_000;
-const CRON_IMPORT_PER_RUN = 300;  // max tiles per hourly run
+const CRON_IMPORT_PER_RUN = 5000;  // max tiles per hourly run (Unsplash Production: 5000 req/h)
 const CRON_INTERVAL_MS_LOCAL = 60 * 60 * 1000; // 1 hour
 
 async function runAutoImportCron() {
@@ -2062,8 +2072,9 @@ async function runAutoImportCron() {
     const keywords = gapTasks.slice(0, 20).map((t: any) => t.query);
     console.log(`[cron] Top gaps: ${keywords.slice(0, 5).join(', ')}...`);
 
-    // Try Pexels first, Pixabay as fallback
+    // Unsplash (primary, 5000 req/h Production), Pexels + Pixabay as fallback
     const sources = [
+      { name: 'unsplash', key: process.env.UNSPLASH_ACCESS_KEY, perPage: 30, baseUrl: 'https://api.unsplash.com/search/photos' },
       { name: 'pexels', key: process.env.PEXELS_API_KEY, perPage: 80, baseUrl: 'https://api.pexels.com/v1/search' },
       { name: 'pixabay', key: process.env.PIXABAY_API_KEY, perPage: 100, baseUrl: 'https://pixabay.com/api/' },
     ];
@@ -2079,7 +2090,25 @@ async function runAutoImportCron() {
           const page = Math.floor(Math.random() * 5) + 1;
           let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
 
-          if (source.name === 'pexels') {
+          if (source.name === 'unsplash') {
+            // Unsplash Production API: 5000 req/h, iterate up to 10 pages per keyword
+            const maxPages = Math.min(10, Math.ceil((CRON_IMPORT_PER_RUN / keywords.length) / source.perPage));
+            for (let pg = 1; pg <= maxPages; pg++) {
+              if (totalImported >= CRON_IMPORT_PER_RUN) break;
+              const res = await fetch(
+                `${source.baseUrl}?query=${encodeURIComponent(keyword)}&per_page=${source.perPage}&page=${pg}&orientation=squarish`,
+                { headers: { Authorization: `Client-ID ${source.key}` } }
+              );
+              if (!res.ok) { console.log(`[cron] Unsplash ${res.status} for "${keyword}" p${pg}`); break; }
+              const data = await res.json() as any;
+              const pagePhotos = (data.results ?? []).map((p: any) => ({
+                sourceUrl: p.urls?.full || p.urls?.regular || '',
+                tile128Url: p.urls?.small || p.urls?.thumb || '',
+              })).filter((p: any) => p.tile128Url);
+              photos.push(...pagePhotos);
+              if (pagePhotos.length < source.perPage) break;
+            }
+          } else if (source.name === 'pexels') {
             const res = await fetch(
               `${source.baseUrl}?query=${encodeURIComponent(keyword)}&per_page=${source.perPage}&page=${page}&orientation=square`,
               { headers: { Authorization: source.key } }
