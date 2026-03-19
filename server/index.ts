@@ -2038,8 +2038,9 @@ app.get('/api/admin/test-flickr-import', async (_req, res) => {
     const data = await resp.json() as any;
     const photos = (data.photos?.photo ?? []).slice(0, 3).map((p: any) => ({
       id: p.id, url_m: p.url_m, url_l: p.url_l, url_z: p.url_z,
+      keys: Object.keys(p),
     }));
-    res.json({ ok: true, total: data.photos?.total, photos });
+    res.json({ ok: true, total: data.photos?.total, pages: data.photos?.pages, perpage: data.photos?.perpage, stat: data.stat, rawSample: (data.photos?.photo ?? []).slice(0,1), photos });
   } catch (e) {
     res.json({ ok: false, error: String(e) });
   }
