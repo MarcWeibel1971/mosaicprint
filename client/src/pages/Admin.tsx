@@ -658,6 +658,9 @@ export default function Admin() {
   const [analysisImportRunningMain, setAnalysisImportRunningMain] = useState(false)
   const [analysisImportSourceMain, setAnalysisImportSourceMain] = useState<'pexels' | 'unsplash' | 'pixabay'>('pexels')
   const [recsExpanded, setRecsExpanded] = useState(false)
+  // Mirror Tiles
+  const [mirrorBatch, setMirrorBatch] = useState(500)
+  const [mirrorResult, setMirrorResult] = useState<string>('')
 
   const fetchCronStatus = useCallback(async () => {
     try {
@@ -1022,6 +1025,36 @@ export default function Admin() {
     } finally { setActiveJob(null) }
   }
 
+  const handleMirrorDryRun = async () => {
+    setMirrorResult('⏳ Zähle...')
+    try {
+      const res = await fetch('/api/trpc/mirrorTiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batchSize: mirrorBatch, dryRun: true }),
+      })
+      const data = await res.json()
+      const parsed = data.result?.data?.json ?? data.result?.data ?? data
+      setMirrorResult(`${(parsed?.eligible ?? 0).toLocaleString()} Tiles könnten gespiegelt werden → Pool würde auf ${((parsed?.eligible ?? 0) * 2).toLocaleString()} wachsen`)
+    } catch { setMirrorResult('❌ Fehler beim Zählen') }
+  }
+
+  const handleMirrorTiles = async () => {
+    if (activeJob) return
+    setActiveJob('mirror')
+    setMirrorResult('⏳ Spiegeln läuft...')
+    try {
+      const res = await fetch('/api/trpc/mirrorTiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batchSize: mirrorBatch, dryRun: false }),
+      })
+      const data = await res.json()
+      const parsed = data.result?.data?.json ?? data.result?.data ?? data
+      setMirrorResult(`✅ ${(parsed?.inserted ?? 0).toLocaleString()} gespiegelt, ${(parsed?.skipped ?? 0)} bereits vorhanden. Gesamt-Mirrors: ${(parsed?.existingMirrors ?? 0).toLocaleString()}`)
+      fetchStats()
+    } catch { setMirrorResult('❌ Fehler beim Spiegeln') }
+    finally { setActiveJob(null) }
+  }
+
   const runCustomKeywordImport = async () => {
     const keywords = customKeywords.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0)
     if (keywords.length === 0) { setCustomKeywordResult('❌ Bitte mindestens ein Keyword eingeben'); return }
@@ -1182,14 +1215,22 @@ export default function Admin() {
           <h1 className="text-3xl font-bold mb-1">Admin-Panel</h1>
           <p className="text-gray-400 text-sm">Verwaltung der Bild-Datenbank und Systemeinstellungen</p>
           {/* Quick Stats */}
-          <div className="flex gap-6 mt-4">
+          <div className="flex flex-wrap gap-6 mt-4">
             <div className="text-center">
               <div className="text-2xl font-bold">{(stats?.total ?? 0).toLocaleString()}</div>
-              <div className="text-xs text-gray-400">Bilder gesamt</div>
+              <div className="text-xs text-gray-400">Tiles gesamt</div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-green-400">{(stats?.labIndexed ?? 0).toLocaleString()}</div>
               <div className="text-xs text-gray-400">LAB-indexiert</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-cyan-400">{((stats as any)?.r2Count ?? 0).toLocaleString()}</div>
+              <div className="text-xs text-gray-400">Auf R2</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-violet-400">{((stats as any)?.mirrorCount ?? 0).toLocaleString()}</div>
+              <div className="text-xs text-gray-400">Gespiegelt</div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-orange-400">{((stats?.total ?? 0) - (stats?.labIndexed ?? 0)).toLocaleString()}</div>
@@ -1726,7 +1767,7 @@ export default function Admin() {
             </div>
 
             {/* LAB + Seed */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div className="bg-white rounded-2xl p-6 border border-green-300">
                 <h3 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
                   <Database className="w-5 h-5 text-green-600" />
@@ -1777,6 +1818,37 @@ export default function Admin() {
                   {activeJob === 'seed' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   Seed exportieren ({(stats?.total ?? 0).toLocaleString()} Bilder)
                 </button>
+              </div>
+
+              {/* Mirror Tiles Card */}
+              <div className="bg-white rounded-2xl p-6 border border-cyan-300">
+                <h3 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
+                  <span className="text-cyan-600 text-lg">⟺</span>
+                  Tiles spiegeln
+                  <span className="text-xs font-normal bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded-full">Neu</span>
+                </h3>
+                <p className="text-gray-600 text-sm mb-2">
+                  Erstellt <strong>horizontal gespiegelte Kopien</strong> aller Tiles.
+                  Verdoppelt den Pool effektiv ohne neue Downloads – LAB-Quadranten werden korrekt getauscht (TL↔TR, BL↔BR).
+                </p>
+                {mirrorResult && (
+                  <div className="mb-3 text-xs bg-cyan-50 border border-cyan-200 rounded-lg px-3 py-2 text-cyan-800">
+                    {mirrorResult}
+                  </div>
+                )}
+                <div className="flex items-center gap-2 mb-3">
+                  <label className="text-xs text-gray-500">Batch:</label>
+                  <input type="number" value={mirrorBatch} onChange={e => setMirrorBatch(Math.max(100, Math.min(2000, Number(e.target.value))))} className="w-20 text-sm border border-gray-200 rounded-lg px-2 py-1 text-center" min={100} max={2000} disabled={!!activeJob} />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={handleMirrorDryRun} disabled={!!activeJob} className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-50 text-gray-700 font-medium px-3 py-2 rounded-xl transition-colors text-xs">
+                    Zählen
+                  </button>
+                  <button onClick={handleMirrorTiles} disabled={!!activeJob} className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-600 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm">
+                    {activeJob === 'mirror' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>⟺</span>}
+                    {activeJob === 'mirror' ? 'Spiegeln...' : `${mirrorBatch} spiegeln`}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

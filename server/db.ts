@@ -491,6 +491,8 @@ export async function insertMosaicImage(data: {
   importQuery?: string;    // keyword used to find this tile
   tileType?: string;       // 'calm' | 'medium' | 'busy' – texture complexity
   edgeEnergy?: number;     // 0.0-1.0 Sobel-basierter Kantenwert aus computeLabFull
+  pHash?: string | null;    // 16-char hex perceptual hash for duplicate detection
+  blurScore?: number | null; // Laplacian Variance (< 100 = blurry)
   photographerName?: string;   // Unsplash: user.name (for attribution)
   photographerUrl?: string;    // Unsplash: user.links.html (for attribution link)
   downloadLocation?: string;   // Unsplash: links.download_location (for download tracking)
@@ -525,8 +527,8 @@ export async function insertMosaicImage(data: {
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
         subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy,
-        photographer_name, photographer_url, download_location)
-     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28)
+        photographer_name, photographer_url, download_location, phash)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28,$29)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -540,7 +542,8 @@ export async function insertMosaicImage(data: {
       data.edgeEnergy ?? null,     // $25
       data.photographerName ?? null, // $26
       data.photographerUrl ?? null,  // $27
-      data.downloadLocation ?? null  // $28
+      data.downloadLocation ?? null, // $28
+      data.pHash ?? null,            // $29
     ]
   );
   const insertedId: number | null = res.rows[0]?.id ?? null;

@@ -998,6 +998,8 @@ async function computeLabFull(url: string): Promise<{
   brL: number; brA: number; brB: number;
   tileType: 'calm' | 'medium' | 'busy';
   edgeDensity: number; // 0-1 echter Sobel-basierter Kantenwert
+  blurScore: number;   // Laplacian Variance (< 100 = unscharf)
+  pHash: string | null; // 16-char hex perceptual hash
 } | null> {
   try {
     const { Jimp } = await import("jimp");
@@ -1124,6 +1126,35 @@ async function computeLabFull(url: string): Promise<{
     const varianceA = quadrantAs.reduce((s, v) => s + (v - meanA) ** 2, 0) / 4;
     const varianceB = quadrantBs.reduce((s, v) => s + (v - meanB) ** 2, 0) / 4;
     void varianceA; void varianceB; // used in legacy code paths only
+
+    // ── Step 8: Blur-Score via Laplacian Variance on 16x16 grayscale ──
+    // Laplacian kernel: [0,1,0,1,-4,1,0,1,0]
+    // Low variance = blurry (< 100), high = sharp
+    let lapSum = 0; let lapCount = 0;
+    for (let y = 1; y < 15; y++) {
+      for (let x = 1; x < 15; x++) {
+        const idx = (r: number, c: number) => gray16[r * 16 + c];
+        const lap = idx(y-1,x) + idx(y+1,x) + idx(y,x-1) + idx(y,x+1) - 4 * idx(y,x);
+        lapSum += lap * lap;
+        lapCount++;
+      }
+    }
+    const blurScore = lapCount > 0 ? lapSum / lapCount : 0; // Laplacian Variance (< 100 = blurry)
+
+    // ── Step 9: pHash (8x8 DCT-like average hash) ──
+    // Uses 8x8 downscale of gray16 (take every other pixel)
+    const gray8: number[] = [];
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        gray8.push(gray16[(y*2)*16 + (x*2)]);
+      }
+    }
+    const meanGray = gray8.reduce((s, v) => s + v, 0) / 64;
+    let hashBits = '';
+    for (const g of gray8) hashBits += g > meanGray ? '1' : '0';
+    let pHash = '';
+    for (let i = 0; i < 64; i += 4) pHash += parseInt(hashBits.slice(i, i+4), 2).toString(16);
+
     return {
       L: global.L, a: global.a, b: global.b,
       tlL: tl.L, tlA: tl.a, tlB: tl.b,
@@ -1132,6 +1163,8 @@ async function computeLabFull(url: string): Promise<{
       brL: br.L, brA: br.a, brB: br.b,
       tileType,
       edgeDensity, // echter Sobel-basierter Kantenwert (0-1)
+      blurScore,   // Laplacian Variance (< 100 = unscharf)
+      pHash,       // 16-char hex perceptual hash
     };
   } catch {
     return null;
@@ -1270,12 +1303,16 @@ export const appRouter = router({
       const quadRes = await pool.query(
         "SELECT COUNT(*) FROM mosaic_images WHERE NOT (tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)"
       );
+      const r2Res = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE r2_url IS NOT NULL");
+      const mirrorRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE source_url LIKE '%#mirror'");
       const total = Number(totalRes.rows[0].count);
       const labIndexed = Number(labRes.rows[0].count);
       const quadrantIndexed = Number(quadRes.rows[0].count);
-      return { total, labIndexed, notIndexed: total - labIndexed, quadrantIndexed, quadrantMissing: total - quadrantIndexed };
+      const r2Count = Number(r2Res.rows[0].count);
+      const mirrorCount = Number(mirrorRes.rows[0].count);
+      return { total, labIndexed, notIndexed: total - labIndexed, quadrantIndexed, quadrantMissing: total - quadrantIndexed, r2Count, mirrorCount };
     } catch {
-      return { total: 0, labIndexed: 0, notIndexed: 0, quadrantIndexed: 0, quadrantMissing: 0 };
+      return { total: 0, labIndexed: 0, notIndexed: 0, quadrantIndexed: 0, quadrantMissing: 0, r2Count: 0, mirrorCount: 0 };
     }
   }),
 
@@ -1580,6 +1617,8 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                    // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
+                    if (lab && lab.blurScore < 80) { return; }
                     const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -1590,6 +1629,7 @@ export const appRouter = router({
                       importQuery: keyword,
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
+                      pHash: lab?.pHash,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
                     if (result.inserted && (photo as any).downloadLocation && apiKey) {
@@ -1811,6 +1851,8 @@ export const appRouter = router({
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
                     // Upload to R2 for permanent storage (avoids expiring CDN URLs)
+                    // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
+                    if (lab && lab.blurScore < 80) { batchRejected++; return; }
                     // R2 upload is handled automatically by insertMosaicImage (fire-and-forget)
                     const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
@@ -1824,6 +1866,7 @@ export const appRouter = router({
                       importQuery: task.query,
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
+                      pHash: lab?.pHash,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
                     if (result.inserted && (photo as any).downloadLocation && smartApiKey) {
@@ -2470,6 +2513,8 @@ export const appRouter = router({
                 if (!lab) {
                   console.warn(`[targetedImport] computeLabFull null for ${labUrl.slice(0,100)}`);
                 }
+                // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
+                if (lab && lab.blurScore < 80) { rejected++; return; }
                 const result = await db.insertMosaicImage({ ...photo,
                   avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                   tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -2478,6 +2523,7 @@ export const appRouter = router({
                   brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                   tileType: lab?.tileType,
                   edgeEnergy: lab?.edgeDensity,
+                  pHash: lab?.pHash,
                   sourceProvider: input.sourceId, // explicitly set provider
                   importQuery: input.query,
                 });
@@ -2585,8 +2631,88 @@ export const appRouter = router({
         sourceProvider: 'upload',
         tileType: lab?.tileType,
         edgeEnergy: lab?.edgeDensity,
+        pHash: lab?.pHash,
       });
       return { ok: true };
+    }),
+
+  // ── Mirror Tiles: create horizontally flipped copies of all tiles ──────────
+  // This effectively doubles the tile pool without downloading new images.
+  // Mirrored tiles get swapped quadrant LAB values (TL↔TR, BL↔BR).
+  mirrorTiles: publicProcedure
+    .input(z.object({
+      batchSize: z.number().default(500),  // tiles per batch
+      dryRun: z.boolean().default(false),  // if true, only count without inserting
+    }))
+    .mutation(async ({ input }) => {
+      const pool = db.getPool();
+      // Get tiles that don't have a mirrored version yet
+      // Mirrored tiles are identified by source_url ending with '#mirror'
+      const countRes = await pool.query(`
+        SELECT COUNT(*) as total FROM mosaic_images
+        WHERE source_url NOT LIKE '%#mirror'
+        AND avg_l IS NOT NULL
+      `);
+      const total = Number(countRes.rows[0].total);
+      if (input.dryRun) {
+        return { dryRun: true, eligible: total, wouldCreate: total };
+      }
+      // Check how many mirrors already exist
+      const existingRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE source_url LIKE '%#mirror'`);
+      const existingMirrors = Number(existingRes.rows[0].cnt);
+      // Process in batches
+      let inserted = 0; let skipped = 0;
+      const limit = Math.min(input.batchSize, 2000);
+      const rows = await pool.query(`
+        SELECT id, source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
+          tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
+          bl_l, bl_a, bl_b, br_l, br_a, br_b,
+          theme, source_provider, import_query, tile_type, edge_energy, phash
+        FROM mosaic_images
+        WHERE source_url NOT LIKE '%#mirror'
+        AND avg_l IS NOT NULL
+        ORDER BY id ASC
+        LIMIT $1
+      `, [limit]);
+      for (const row of rows.rows) {
+        const mirrorUrl = row.source_url + '#mirror';
+        // Swap TL↔TR and BL↔BR for horizontal mirror
+        const mirrorPhash = row.phash ? row.phash + 'm' : null; // distinguish from original
+        try {
+          const res = await pool.query(
+            `INSERT INTO mosaic_images
+               (source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
+                tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
+                bl_l, bl_a, bl_b, br_l, br_a, br_b,
+                subject, theme, source_provider, import_query, url_hash,
+                imported_at, tile_type, edge_energy, phash)
+             VALUES ($1,$2,$3,$4,$5,$6,
+                $9,$10,$11, $6,$7,$8,
+                $15,$16,$17, $12,$13,$14,
+                $18,$18,$19,$20,MD5($1),NOW(),$21,$22,$23)
+             ON CONFLICT (source_url) DO NOTHING
+             RETURNING id`,
+            [
+              mirrorUrl,                    // $1 source_url
+              row.tile128_url,              // $2 tile128_url (same – we don't flip the actual image, just LAB)
+              row.r2_url,                   // $3 r2_url
+              row.avg_l, row.avg_a, row.avg_b, // $4,$5,$6 global LAB unchanged
+              row.tr_a, row.tr_b,           // $7,$8 → used as TL a/b (swapped)
+              row.tl_l, row.tl_a, row.tl_b, // $9,$10,$11 → used as TR (original TL)
+              row.br_l, row.br_a, row.br_b, // $12,$13,$14 → used as BL (original BR)
+              row.bl_l, row.bl_a, row.bl_b, // $15,$16,$17 → used as BR (original BL)
+              row.theme,                    // $18 subject/theme
+              row.source_provider,          // $19
+              row.import_query,             // $20
+              row.tile_type,                // $21
+              row.edge_energy,              // $22
+              mirrorPhash,                  // $23
+            ]
+          );
+          if ((res.rowCount ?? 0) > 0) inserted++; else skipped++;
+        } catch { skipped++; }
+      }
+      return { inserted, skipped, existingMirrors, eligible: total, processed: rows.rows.length };
     }),
 
   // ── QA: Run quality check ──────────────────────────────────────────────────
@@ -3008,6 +3134,8 @@ export const appRouter = router({
                           const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl, task.subject);
                           if (quality.rejected) return;
                           const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                          // Blur-Filter: skip blurry tiles
+                          if (lab && lab.blurScore < 80) { return; }
                           const ins = await db.insertMosaicImage({ ...photo,
                             avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                             tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -3020,6 +3148,7 @@ export const appRouter = router({
                             importQuery: task.query,
                             tileType: lab?.tileType,
                             edgeEnergy: lab?.edgeDensity,
+                            pHash: lab?.pHash,
                           });
                           if (ins.inserted) { alImported++; alBatchImported++; smartImportJobs[jobKey].imported = alImported; totalImported++; }
                         } catch { /* skip */ }
