@@ -2383,19 +2383,28 @@ export const appRouter = router({
               })).filter((p: any) => p.tile128Url);
             }
           } else {
-            const res = await fetch(
-              `https://api.unsplash.com/search/photos?query=${encodeURIComponent(input.query)}&per_page=${perPage}&orientation=squarish`,
-              { headers: { Authorization: `Client-ID ${apiKey}` } }
-            );
-            if (res.ok) {
+            // Unsplash: fetch multiple pages to reach requested count (max 30/page)
+            const unsplashPerPage = 30;
+            const maxPages = Math.ceil(input.count / unsplashPerPage);
+            for (let pg = 1; pg <= maxPages && photos.length < input.count; pg++) {
+              const res = await fetch(
+                `https://api.unsplash.com/search/photos?query=${encodeURIComponent(input.query)}&per_page=${unsplashPerPage}&page=${pg}&orientation=squarish`,
+                { headers: { Authorization: `Client-ID ${apiKey}` } }
+              );
+              if (!res.ok) {
+                if (res.status === 403 || res.status === 429) break; // rate limit
+                break;
+              }
               const data = await res.json() as any;
-              photos = (data.results ?? []).map((p: any) => ({
+              const pagePhotos = (data.results ?? []).map((p: any) => ({
                 sourceUrl: p.urls.regular,
                 tile128Url: p.urls.thumb,
                 photographerName: p.user?.name ?? null,
                 photographerUrl: p.user?.links?.html ? `${p.user.links.html}?utm_source=mosaicprint&utm_medium=referral` : null,
                 downloadLocation: p.links?.download_location ?? null,
               }));
+              photos.push(...pagePhotos);
+              if (pagePhotos.length < unsplashPerPage) break; // last page
             }
           }
           // Process photos and track actual imported count
