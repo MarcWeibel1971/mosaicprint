@@ -282,7 +282,7 @@ const CALM_NATURE_KEYWORDS = [
   "ocean surface calm minimal", "sea water texture smooth", "deep ocean blue minimal",
   "mediterranean sea calm", "tropical ocean surface", "ocean horizon line minimal",
   "sea surface reflection", "calm ocean blue abstract", "open sea minimal",
-  "ocean water color gradient", "sea gradient blue smooth", "meer ruhig minimal",
+  "ocean water color gradient", "sea gradient blue smooth", "sea calm minimal",
   // Bokeh backgrounds (most useful for portrait mosaics)
   "bokeh background soft blur", "out of focus background neutral", "defocused background warm",
   "blurred background abstract", "bokeh lights soft", "soft focus background",
@@ -326,8 +326,8 @@ const CALM_NATURE_KEYWORDS = [
   "concrete floor smooth", "stone surface flat", "slate surface dark",
   // NEW: high-volume keywords (100k+ Unsplash results)
   "sand", "sand texture", "sand dunes", "sand beach", "sand pattern",
-  "meer", "meer wasser", "meer horizont", "meer ruhe", "meer blau",
-  "blue sky", "blue sky minimal", "himmel blau", "blauer himmel", "sky blue gradient",
+  "sea", "sea water", "sea horizon", "sea calm", "sea blue",
+  "blue sky", "blue sky minimal", "sky blue", "clear blue sky", "sky blue gradient",
   "sky blue cloudless", "sky blue clear", "sky blue horizon", "sky blue calm",
   "northern lights", "aurora borealis", "aurora sky", "northern lights green",
   "northern lights purple", "aurora borealis sky", "aurora night sky",
