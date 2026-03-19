@@ -2013,6 +2013,38 @@ app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext 
 // When running via tsx (dev): __dirname = .../server -> ../client/dist
 // When running via node dist/server/index.js (prod): __dirname = .../dist/server -> ../../client/dist
 const isCompiledBuild = __dirname.includes("/dist/server") || __dirname.includes("\\dist\\server");
+// ── Debug: Test Flickr URL reachability ────────────────────────────────────────────────────
+app.get('/api/admin/test-flickr', async (_req, res) => {
+  const testUrl = 'https://live.staticflickr.com/7277/7616838636_5b2164f5a4.jpg';
+  try {
+    const resp = await fetch(testUrl, { signal: AbortSignal.timeout(8000) });
+    const buf = Buffer.from(await resp.arrayBuffer());
+    res.json({ ok: resp.ok, status: resp.status, size: buf.length, contentType: resp.headers.get('content-type') });
+  } catch (e) {
+    res.json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Debug: Test Flickr import manually ─────────────────────────────────────────────────────
+app.get('/api/admin/test-flickr-import', async (_req, res) => {
+  const apiKey = process.env.FLICKR_API_KEY;
+  if (!apiKey) return res.json({ ok: false, error: 'FLICKR_API_KEY not set' });
+  try {
+    const resp = await fetch(
+      `https://api.flickr.com/services/rest/?method=flickr.photos.search&api_key=${encodeURIComponent(apiKey)}&text=sand&per_page=5&page=1&format=json&nojsoncallback=1&license=1,2,4,5,7,9,10&sort=relevance&content_type=1&safe_search=1&extras=url_m,url_l,url_z`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!resp.ok) return res.json({ ok: false, status: resp.status });
+    const data = await resp.json() as any;
+    const photos = (data.photos?.photo ?? []).slice(0, 3).map((p: any) => ({
+      id: p.id, url_m: p.url_m, url_l: p.url_l, url_z: p.url_z,
+    }));
+    res.json({ ok: true, total: data.photos?.total, photos });
+  } catch (e) {
+    res.json({ ok: false, error: String(e) });
+  }
+});
+
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");
