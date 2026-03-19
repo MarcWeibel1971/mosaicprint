@@ -1592,8 +1592,8 @@ export const appRouter = router({
                       edgeEnergy: lab?.edgeDensity,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
-                    if (result.inserted && photo.downloadLocation && apiKey) {
-                      fetch(photo.downloadLocation, { headers: { Authorization: `Client-ID ${apiKey}` } }).catch(() => {});
+                    if (result.inserted && (photo as any).downloadLocation && apiKey) {
+                      fetch((photo as any).downloadLocation, { headers: { Authorization: `Client-ID ${apiKey}` } }).catch(() => {});
                     }
                     if (result.inserted) { imported++; batchNew++; status.imported = imported; }
                   } catch { /* duplicate or error – skip */ }
@@ -1723,6 +1723,24 @@ export const appRouter = router({
                   sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
                   tile128Url: p.webformatURL || p.previewURL || '',
                 })).filter((p: any) => p.tile128Url);
+              } else if (input.sourceId === "flickr") {
+                // Flickr: CC-licensed photos, multi-page, best resolution
+                const flickrPerPage = 100;
+                const flickrMaxPages = Math.ceil(Math.min(input.count, 500) / flickrPerPage);
+                for (let pg = 1; pg <= flickrMaxPages && photos.length < input.count; pg++) {
+                  const res = await fetch(
+                    `https://api.flickr.com/services/rest/?method=flickr.photos.search&api_key=${encodeURIComponent(apiKey)}&text=${encodeURIComponent(task.query)}&per_page=${flickrPerPage}&page=${pg}&format=json&nojsoncallback=1&license=1,2,4,5,7,9,10&sort=relevance&content_type=1&safe_search=1&extras=url_m,url_l,url_z`
+                  );
+                  if (!res.ok) { log(`⚠️ Flickr API error ${res.status} for "${task.query}" p${pg}`); break; }
+                  const data = await res.json() as any;
+                  const pagePhotos = (data.photos?.photo ?? []).map((p: any) => ({
+                    sourceUrl: p.url_l || p.url_z || p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_b.jpg`,
+                    tile128Url: p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_m.jpg`,
+                  })).filter((p: any) => p.tile128Url);
+                  photos.push(...pagePhotos);
+                  log(`📸 Flickr p${pg}: ${pagePhotos.length} Fotos für "${task.query}"`);
+                  if (pagePhotos.length < flickrPerPage) break;
+                }
               } else {
                 // Unsplash: if rate-limited, fall back to Pexels automatically
                 if (unsplashRateLimited && process.env.PEXELS_API_KEY) {
@@ -2442,11 +2460,16 @@ export const appRouter = router({
           let imported = 0; let rejected = 0;
           const CONCURRENCY = 3;
           const targetedApiKey = process.env.UNSPLASH_ACCESS_KEY;
+          console.log(`[targetedImport] Processing ${photos.length} photos from ${input.sourceId} (query: ${input.query})`);
           for (let i = 0; i < photos.length; i += CONCURRENCY) {
             const batch = photos.slice(i, i + CONCURRENCY);
             await Promise.all(batch.map(async (photo) => {
               try {
-                const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
+                const labUrl = photo.tile128Url ?? photo.sourceUrl;
+                const lab = await computeLabFull(labUrl);
+                if (!lab) {
+                  console.warn(`[targetedImport] computeLabFull null for ${labUrl.slice(0,100)}`);
+                }
                 const result = await db.insertMosaicImage({ ...photo,
                   avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                   tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -2455,13 +2478,18 @@ export const appRouter = router({
                   brL: lab?.brL, brA: lab?.brA, brB: lab?.brB,
                   tileType: lab?.tileType,
                   edgeEnergy: lab?.edgeDensity,
+                  sourceProvider: input.sourceId, // explicitly set provider
+                  importQuery: input.query,
                 });
                 // Unsplash: trigger download tracking
                 if (result?.inserted && (photo as any).downloadLocation && targetedApiKey) {
                   fetch((photo as any).downloadLocation, { headers: { Authorization: `Client-ID ${targetedApiKey}` } }).catch(() => {});
                 }
                 if (result?.inserted) { imported++; } else { rejected++; }
-              } catch { rejected++; }
+              } catch (err) {
+                console.error(`[targetedImport] error processing photo from ${input.sourceId}:`, String(err).slice(0,200));
+                rejected++;
+              }
             }));
             targetedImportJobs[jobKey].imported = imported;
           }

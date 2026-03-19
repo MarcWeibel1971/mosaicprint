@@ -506,6 +506,7 @@ export async function insertMosaicImage(data: {
     normalizedUrl.includes('pexels') ? 'pexels' :
     normalizedUrl.includes('unsplash') ? 'unsplash' :
     normalizedUrl.includes('pixabay') ? 'pixabay' :
+    normalizedUrl.includes('flickr') || normalizedUrl.includes('staticflickr') ? 'flickr' :
     normalizedUrl.includes('picsum') || normalizedUrl.includes('lorempixel') ? 'picsum' : 'other'
   );
   // Derive semantic_theme from LAB features at insert time
@@ -547,7 +548,8 @@ export async function insertMosaicImage(data: {
 
   // Auto-upload to R2 after insert (if no r2Url provided and R2 is configured)
   if (wasInserted && insertedId && !data.r2Url && isR2Configured()) {
-    const urlForR2 = data.tile128Url ?? data.sourceUrl;
+    // Use sourceUrl (best resolution) for R2 storage, fallback to tile128Url
+    const urlForR2 = data.sourceUrl ?? data.tile128Url;
     // Skip data URLs and Pixabay hotlink-protected URLs
     const isPixabay = urlForR2.includes('pixabay.com/get/');
     if (!urlForR2.startsWith('data:') && !isPixabay) {
