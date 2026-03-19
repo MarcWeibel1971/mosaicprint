@@ -263,6 +263,11 @@ const CALM_NATURE_KEYWORDS = [
   "sunrise sky gradient soft", "sunset sky gradient orange pink", "golden hour sky smooth",
   "blue sky cloudless minimal", "white sky overcast soft", "dawn sky gradient pale",
   "dusk sky gradient purple", "hazy sky minimal", "morning sky soft light",
+  // Sky color variants (user-requested)
+  "red sky sunset dramatic", "crimson sky dusk gradient", "orange red sky horizon",
+  "deep blue sky clear minimal", "bright blue sky cloudless", "azure blue sky smooth",
+  "white sky bright overcast", "pale white sky minimal", "milky white sky soft",
+  "green sky aurora borealis", "teal green sky abstract", "emerald sky gradient soft",
   // Fog and mist (maps to pale skin, highlights, soft backgrounds)
   "fog mist minimal soft", "morning fog landscape", "misty forest soft",
   "haze soft minimal", "foggy morning field", "mist water reflection",
@@ -273,11 +278,21 @@ const CALM_NATURE_KEYWORDS = [
   "smooth water abstract", "blue water surface minimal", "water reflection soft",
   "calm sea surface", "lake water smooth", "river reflection calm",
   "water texture smooth blue", "ocean calm minimal", "still water abstract",
+  // Meer / Ocean (user-requested)
+  "ocean surface calm minimal", "sea water texture smooth", "deep ocean blue minimal",
+  "mediterranean sea calm", "tropical ocean surface", "ocean horizon line minimal",
+  "sea surface reflection", "calm ocean blue abstract", "open sea minimal",
+  "ocean water color gradient", "sea gradient blue smooth", "meer ruhig minimal",
   // Bokeh backgrounds (most useful for portrait mosaics)
   "bokeh background soft blur", "out of focus background neutral", "defocused background warm",
   "blurred background abstract", "bokeh lights soft", "soft focus background",
   "warm bokeh blur", "cool bokeh blur", "neutral bokeh background",
   "defocused green bokeh", "blurred warm bokeh", "soft bokeh minimal",
+  // Bokeh & Radiant (user-requested)
+  "bokeh radiant light abstract", "radiant bokeh soft glow", "glowing bokeh light",
+  "radiant light abstract minimal", "luminous bokeh background", "radiant glow soft",
+  "bokeh radiant warm light", "radiant bokeh cool blue", "soft radiant light bokeh",
+  "glowing radiant abstract smooth", "radiant light gradient soft", "bokeh glow smooth warm",
   // Fabric and textile (maps to clothing areas)
   "fabric texture smooth minimal", "linen texture neutral", "cotton fabric smooth",
   "silk texture smooth", "wool texture soft", "canvas texture neutral",
@@ -285,6 +300,10 @@ const CALM_NATURE_KEYWORDS = [
   // Sand and earth (maps to warm skin tones)
   "sand texture smooth minimal", "beach sand closeup", "fine sand texture",
   "sandy beach smooth", "desert sand minimal", "warm sand abstract",
+  // Sand variants (user-requested)
+  "sand dunes smooth gradient", "golden sand beach minimal", "white sand beach smooth",
+  "sand pattern abstract warm", "fine sand texture closeup", "beach sand gradient warm",
+  "desert sand warm minimal", "sand color abstract smooth", "sandy texture warm soft",
   // Paper and minimal surfaces
   "paper texture minimal white", "blank paper background", "white paper smooth",
   "cream paper texture", "off-white paper minimal", "light paper background",
