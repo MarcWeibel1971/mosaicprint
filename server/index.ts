@@ -2040,7 +2040,7 @@ app.get('/api/admin/test-flickr-import', async (_req, res) => {
       id: p.id, url_m: p.url_m, url_l: p.url_l, url_z: p.url_z,
       keys: Object.keys(p),
     }));
-    res.json({ ok: true, total: data.photos?.total, pages: data.photos?.pages, perpage: data.photos?.perpage, stat: data.stat, rawSample: (data.photos?.photo ?? []).slice(0,1), photos });
+    res.json({ ok: true, total: data.photos?.total, pages: data.photos?.pages, perpage: data.photos?.perpage, stat: data.stat, message: data.message, code: data.code, rawSample: (data.photos?.photo ?? []).slice(0,1), photos, apiKeySet: !!apiKey, apiKeyLen: apiKey?.length });
   } catch (e) {
     res.json({ ok: false, error: String(e) });
   }
