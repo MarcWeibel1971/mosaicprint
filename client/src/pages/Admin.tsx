@@ -1285,6 +1285,7 @@ export default function Admin() {
                     <option value="pexels">Pexels</option>
                     <option value="unsplash">Unsplash</option>
                     <option value="pixabay">Pixabay</option>
+                    <option value="flickr">Flickr</option>
                   </select>
                   <button
                     onClick={startAnalysisImportMain}
@@ -1641,6 +1642,7 @@ export default function Admin() {
                     <option value="pixabay">🟠 Pixabay (200/Keyword, empfohlen)</option>
                     <option value="pexels">🟢 Pexels (80/Keyword)</option>
                     <option value="unsplash">🟣 Unsplash (bis 5000/Keyword)</option>
+                    <option value="flickr">🔵 Flickr (bis 5000/Keyword, CC-Lizenz)</option>
                   </select>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-emerald-700">Bilder/Keyword:</span>
@@ -1719,6 +1721,7 @@ export default function Admin() {
                 <ImportCard title="Pexels" description="Bis zu 80 Bilder/Keyword, diverse Suche. Empfohlen für große Batches." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={500} maxBatch={2000} />
                 <ImportCard title="Unsplash" description="Bis zu 30 Bilder/Keyword, hochwertige Fotos. Ergänzt Pexels gut." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={300} maxBatch={1000} />
                 <ImportCard title="Pixabay" description="Bis zu 200 Bilder/Keyword, lizenzfreie CC0-Fotos ohne Wasserzeichen. Ideal für Portraits & Hauttöne." icon={<Camera className="w-5 h-5 text-orange-600" />} color="orange" available={!!apiKeys?.pixabay} job={importProgress['pixabay']} isActive={activeJob === 'pixabay'} onImport={(n) => startImport('pixabay', n)} defaultBatch={300} maxBatch={1000} />
+                <ImportCard title="Flickr" description="Bis zu 100 Bilder/Seite, CC-lizenzierte Fotos. Millionen Bilder für Sand, Himmel, Natur & mehr." icon={<Camera className="w-5 h-5 text-blue-600" />} color="blue" available={!!apiKeys?.flickr} job={importProgress['flickr']} isActive={activeJob === 'flickr'} onImport={(n) => startImport('flickr', n)} defaultBatch={500} maxBatch={5000} />
               </div>
             </div>
 
@@ -4849,6 +4852,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                     <option value="pexels">Pexels</option>
                     <option value="unsplash">Unsplash</option>
                     <option value="pixabay">Pixabay</option>
+                    <option value="flickr">Flickr</option>
                   </select>
                 </div>
                 <p className="text-xs text-violet-600 mb-3">

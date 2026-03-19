@@ -1286,6 +1286,7 @@ export const appRouter = router({
       unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
       pexels: !!process.env.PEXELS_API_KEY,
       pixabay: !!process.env.PIXABAY_API_KEY,
+      flickr: !!process.env.FLICKR_API_KEY,
     };
   }),
 
@@ -1464,7 +1465,7 @@ export const appRouter = router({
 
   // Admin: Import from source (Pexels/Unsplash/Pixabay)
   importFromSource: publicProcedure
-    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay"]), count: z.number().min(1).max(5000).default(500), category: z.string().optional() }))
+    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay", "flickr"]), count: z.number().min(1).max(5000).default(500), category: z.string().optional() }))
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
       if (status.running) return { started: false, message: "Import läuft bereits" };
@@ -1474,6 +1475,7 @@ export const appRouter = router({
         try {
           const apiKey = input.source === "pexels" ? process.env.PEXELS_API_KEY
             : input.source === "unsplash" ? process.env.UNSPLASH_ACCESS_KEY
+            : input.source === "flickr" ? process.env.FLICKR_API_KEY
             : process.env.PIXABAY_API_KEY;
           if (!apiKey) { status.error = `${input.source} API key missing`; return; }
           let imported = 0;
@@ -1495,7 +1497,7 @@ export const appRouter = router({
             const extra = allKeywords.filter(k => !gapKeywords.includes(k)).sort(() => Math.random() - 0.5);
             orderedKeywords = [...gapKeywords, ...extra];
           }
-          const perPage = input.source === "pexels" ? 80 : input.source === "pixabay" ? 200 : 30;
+          const perPage = input.source === "pexels" ? 80 : input.source === "pixabay" ? 200 : input.source === "flickr" ? 100 : 30;
           // Unsplash Production API: use ALL keyword arrays for maximum coverage
           if (input.source === "unsplash" && !input.category) {
             const allExtendedKeywords = [
@@ -1513,15 +1515,15 @@ export const appRouter = router({
             ];
             orderedKeywords = [...new Set(allExtendedKeywords)];
           }
-          const CONCURRENCY = input.source === "unsplash" ? 10 : 5;
-          // Unsplash Production: iterate pages 1-10 systematically; others: random page 1-5
-          const maxPages = input.source === "unsplash" ? 10 : 1;
+          const CONCURRENCY = input.source === "unsplash" ? 10 : input.source === "flickr" ? 10 : 5;
+          // Unsplash/Flickr Production: iterate pages 1-10 systematically; others: random page 1-5
+          const maxPages = input.source === "unsplash" ? 10 : input.source === "flickr" ? 10 : 1;
           let kwIdx = 0;
           outerImport: while (imported < input.count && kwIdx < orderedKeywords.length) {
             const keyword = orderedKeywords[kwIdx++];
             for (let pageLoop = 1; pageLoop <= maxPages; pageLoop++) {
             if (imported >= input.count) break outerImport;
-            const page = input.source === "unsplash" ? pageLoop : (Math.floor(Math.random() * 5) + 1);
+            const page = (input.source === "unsplash" || input.source === "flickr") ? pageLoop : (Math.floor(Math.random() * 5) + 1);
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.source === "pexels") {
@@ -1545,6 +1547,16 @@ export const appRouter = router({
                   // largeImageURL (1280px) used as sourceUrl for print-quality output
                   sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
                   tile128Url: p.webformatURL || p.previewURL || '',
+                })).filter((p: any) => p.tile128Url);
+              } else if (input.source === "flickr") {
+                const res = await fetch(
+                  `https://api.flickr.com/services/rest/?method=flickr.photos.search&api_key=${encodeURIComponent(apiKey)}&text=${encodeURIComponent(keyword)}&per_page=${perPage}&page=${page}&format=json&nojsoncallback=1&license=1,2,4,5,7,9,10&sort=relevance&content_type=1&safe_search=1&extras=url_m,url_l,url_z`
+                );
+                if (!res.ok) { log(`⚠️ Flickr ${res.status} for "${keyword}"`); continue; }
+                const data = await res.json() as any;
+                photos = (data.photos?.photo ?? []).map((p: any) => ({
+                  sourceUrl: p.url_l || p.url_z || p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_b.jpg`,
+                  tile128Url: p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_m.jpg`,
                 })).filter((p: any) => p.tile128Url);
               } else {
                 const res = await fetch(
@@ -1606,13 +1618,13 @@ export const appRouter = router({
 
   // Admin: Import status
   getImportStatus: publicProcedure
-    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay"]).default("pexels") }))
+    .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay", "flickr"]).default("pexels") }))
     .query(({ input }) => getImportStatus(input.source)),
 
   // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
   smartImport: publicProcedure
     .input(z.object({
-      sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
+      sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"),
       count: z.number().min(1).max(5000).default(500),
       targetPerBucket: z.number().min(100).max(2000).default(400),
       // Optional: specific keywords from image analysis (bypasses DB gap analysis)
@@ -1628,6 +1640,7 @@ export const appRouter = router({
         try {
           const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY
             : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
+            : input.sourceId === "flickr" ? process.env.FLICKR_API_KEY
             : process.env.UNSPLASH_ACCESS_KEY;
           if (!apiKey) { smartImportJobs[jobKey].error = "API key missing"; return; }
           // Track if Unsplash is rate-limited → fall back to Pexels automatically
@@ -1851,7 +1864,7 @@ export const appRouter = router({
 
   // Admin: Smart Import status
   getSmartImportStatus: publicProcedure
-    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"), isAnalysis: z.boolean().optional() }))
+    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
       const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       const job = smartImportJobs[jobKey] ?? { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
@@ -1860,7 +1873,7 @@ export const appRouter = router({
 
   // Admin: Get last import report (JSON download)
   getLastImportReport: publicProcedure
-    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"), isAnalysis: z.boolean().optional() }))
+    .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
       const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       const job = smartImportJobs[jobKey];
@@ -2339,7 +2352,7 @@ export const appRouter = router({
   // Targeted import: import images for a specific search query
   targetedImport: publicProcedure
     .input(z.object({
-      sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
+      sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"),
       query: z.string().min(1).max(200),
       count: z.number().min(10).max(5000).default(100),
       sessionId: z.string().optional(), // optional: group into a multi-keyword session
@@ -2348,6 +2361,7 @@ export const appRouter = router({
       const jobKey = `targeted_${input.sourceId}_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
       const apiKey = input.sourceId === "pexels" ? process.env.PEXELS_API_KEY
         : input.sourceId === "pixabay" ? process.env.PIXABAY_API_KEY
+        : input.sourceId === "flickr" ? process.env.FLICKR_API_KEY
         : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
       // Init job tracking
@@ -2359,7 +2373,7 @@ export const appRouter = router({
       // Run in background
       (async () => {
         try {
-          const perPage = Math.min(input.count, input.sourceId === "pexels" ? 80 : input.sourceId === "pixabay" ? 200 : 30);
+          const perPage = Math.min(input.count, input.sourceId === "pexels" ? 80 : input.sourceId === "pixabay" ? 200 : input.sourceId === "flickr" ? 100 : 30);
           let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
           if (input.sourceId === "pexels") {
             const res = await fetch(
@@ -2381,6 +2395,23 @@ export const appRouter = router({
                 sourceUrl: p.largeImageURL || p.webformatURL || p.previewURL || '',
                 tile128Url: p.webformatURL || p.previewURL || '',
               })).filter((p: any) => p.tile128Url);
+            }
+          } else if (input.sourceId === "flickr") {
+            // Flickr: 100/page, CC-licensed photos only, multi-page
+            const flickrPerPage = 100;
+            const flickrMaxPages = Math.ceil(input.count / flickrPerPage);
+            for (let pg = 1; pg <= flickrMaxPages && photos.length < input.count; pg++) {
+              const res = await fetch(
+                `https://api.flickr.com/services/rest/?method=flickr.photos.search&api_key=${encodeURIComponent(apiKey!)}&text=${encodeURIComponent(input.query)}&per_page=${flickrPerPage}&page=${pg}&format=json&nojsoncallback=1&license=1,2,4,5,7,9,10&sort=relevance&content_type=1&safe_search=1&extras=url_m,url_l,url_z`
+              );
+              if (!res.ok) break;
+              const data = await res.json() as any;
+              const pagePhotos = (data.photos?.photo ?? []).map((p: any) => ({
+                sourceUrl: p.url_l || p.url_z || p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_b.jpg`,
+                tile128Url: p.url_m || `https://live.staticflickr.com/${p.server}/${p.id}_${p.secret}_m.jpg`,
+              })).filter((p: any) => p.tile128Url);
+              photos.push(...pagePhotos);
+              if (pagePhotos.length < flickrPerPage) break;
             }
           } else {
             // Unsplash: fetch multiple pages to reach requested count (max 30/page)
