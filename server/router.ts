@@ -474,13 +474,22 @@ function getColorCategory(avgL: number, avgA: number, avgB: number): string {
   if (avgL < 25) return "black";
   if (avgL > 80) return "white";
   if (Math.abs(avgA) < 8 && Math.abs(avgB) < 8) return "neutral";
-  if (avgA > 20) return "red";
-  if (avgA > 10 && avgB > 10) return "orange";
-  if (avgB > 20) return "yellow";
-  if (avgA < -10) return "green";
-  if (avgB < -15) return "blue";
-  if (avgA > 10 && avgB < 0) return "purple";
-  if (avgA > 10) return "pink";
+  // Determine dominant channel: whichever of |a| or |b| is larger wins
+  const absA = Math.abs(avgA);
+  const absB = Math.abs(avgB);
+  if (absB >= absA) {
+    // b-channel dominates
+    if (avgB < -15) return "blue";
+    if (avgB > 20) return "yellow";
+    if (avgA < -10 && avgB < -5) return "cyan";
+    if (avgA < -10) return "green";
+  } else {
+    // a-channel dominates
+    if (avgA > 20) return "red";
+    if (avgA > 10 && avgB < 0) return "purple";
+    if (avgA > 10 && avgB > 10) return "orange";
+    if (avgA > 10) return "pink";
+  }
   return "neutral";
 }
 
@@ -666,51 +675,110 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
-  // ── Step 2d: New theme gaps (animals, flowers, space) ──
-  // Target: at least 1000 tiles per new theme (min 3.5% of DB)
-  const NEW_THEME_TARGETS: Array<{subject: string; label: string; emoji: string; queries: string[]}> = [
+  // ── Step 2d: Mosaic-optimierte Kategorien (KEINE Tiere/Blumen/Space als Einzelobjekte) ──
+  // Ziel: Bilder die als Mosaic-Tiles funktionieren: monochrom/zweifarbig, kein dominantes Einzelobjekt
+  const MOSAIC_THEME_TARGETS: Array<{subject: string; label: string; emoji: string; queries: string[]; targetPct: number; maxPriority: number}> = [
     {
-      subject: 'animals',
-      label: '🐾 Tiere/Pets',
-      emoji: '🐾',
+      subject: 'bokeh_gradient',
+      label: '✨ Bokeh & Gradienten',
+      emoji: '✨',
+      targetPct: 0.12, maxPriority: 3.0,
       queries: [
-        'cute dog portrait', 'cat closeup face', 'wild lion portrait', 'bird colorful feathers',
-        'horse running field', 'fox wildlife', 'elephant wildlife', 'deer forest',
-        'owl closeup', 'butterfly macro', 'tiger portrait', 'wolf wildlife',
-        'puppy cute', 'kitten closeup', 'bear wildlife', 'eagle flying',
+        'bokeh lights warm background', 'bokeh lights cool background', 'soft bokeh abstract',
+        'blurred lights background', 'defocused lights warm', 'bokeh circle lights',
+        'smooth color gradient abstract', 'gradient sky abstract', 'color wash gradient',
+        'soft light bokeh neutral', 'warm bokeh background photography', 'cool bokeh night',
+        'blurred background warm tones', 'smooth pastel gradient', 'bokeh photography abstract',
+        'light leak bokeh warm', 'golden bokeh background', 'blue bokeh abstract',
       ],
     },
     {
-      subject: 'flowers',
-      label: '🌸 Blumen/Flowers',
-      emoji: '🌸',
+      subject: 'pure_sky',
+      label: '☁️ Reiner Himmel',
+      emoji: '☁️',
+      targetPct: 0.10, maxPriority: 3.0,
       queries: [
-        'rose closeup macro', 'sunflower bright', 'tulip field colorful', 'cherry blossom pink',
-        'lavender purple field', 'daisy white flower', 'orchid exotic', 'poppy red field',
-        'wildflowers meadow', 'flower bouquet colorful', 'lotus flower water', 'magnolia blossom',
-        'peony pink flower', 'iris purple flower', 'cosmos flower pink', 'dahlia colorful',
+        'clear blue sky minimal', 'blue sky no clouds', 'sky gradient blue',
+        'overcast grey sky', 'dramatic sky clouds', 'sunset sky orange',
+        'pink sky sunset minimal', 'purple sky dusk', 'golden hour sky',
+        'blue sky horizon minimal', 'cloudy sky texture', 'sky abstract minimal',
+        'dawn sky pastel', 'twilight sky gradient', 'sky photography minimal',
+        'stormy sky dark', 'sky blue gradient photography', 'sunrise sky warm',
       ],
     },
     {
-      subject: 'space',
-      label: '🌌 Space/Galaxy',
-      emoji: '🌌',
+      subject: 'water_surface',
+      label: '🌊 Wasseroberflächen',
+      emoji: '🌊',
+      targetPct: 0.10, maxPriority: 2.8,
       queries: [
-        'milky way galaxy night', 'nebula colorful space', 'stars night sky dark', 'aurora borealis night',
-        'galaxy deep space', 'moon closeup night', 'comet night sky', 'space abstract dark',
-        'starry night sky', 'cosmic dust nebula', 'dark sky stars', 'purple blue nebula',
-        'night sky long exposure', 'space galaxy colorful', 'astronomy night', 'dark cosmos abstract',
+        'calm water surface abstract', 'ocean water texture', 'sea surface minimal',
+        'water reflection abstract', 'lake surface calm', 'water ripple abstract',
+        'ocean blue surface', 'turquoise water surface', 'dark water surface',
+        'water texture photography', 'sea foam abstract', 'calm lake reflection',
+        'water color abstract blue', 'ocean horizon minimal', 'water abstract photography',
+        'rain water surface', 'pool water surface', 'river water abstract',
+      ],
+    },
+    {
+      subject: 'sand_earth',
+      label: '🏜️ Sand & Erde',
+      emoji: '🏜️',
+      targetPct: 0.08, maxPriority: 2.5,
+      queries: [
+        'sand texture closeup minimal', 'desert sand dunes', 'sand dunes abstract',
+        'sandy beach texture', 'dry earth texture', 'soil texture abstract',
+        'desert landscape minimal', 'sand pattern abstract', 'golden sand texture',
+        'beach sand minimal', 'earth texture brown', 'dry desert abstract',
+        'sand ripple pattern', 'warm sand texture photography', 'desert abstract warm',
+        'clay earth texture', 'sandy ground texture', 'brown earth minimal',
+      ],
+    },
+    {
+      subject: 'fog_mist',
+      label: '🌫️ Nebel & Dunst',
+      emoji: '🌫️',
+      targetPct: 0.06, maxPriority: 2.5,
+      queries: [
+        'fog landscape minimal', 'misty morning abstract', 'foggy forest minimal',
+        'mist abstract photography', 'foggy mountain minimal', 'morning mist landscape',
+        'haze abstract minimal', 'foggy valley landscape', 'soft mist photography',
+        'fog abstract grey', 'misty water surface', 'fog light abstract',
+      ],
+    },
+    {
+      subject: 'autumn_carpet',
+      label: '🍂 Herbst-Teppich',
+      emoji: '🍂',
+      targetPct: 0.06, maxPriority: 2.2,
+      queries: [
+        'autumn leaves carpet ground', 'fallen leaves texture', 'autumn leaves background',
+        'orange leaves ground texture', 'red autumn leaves carpet', 'autumn foliage abstract',
+        'colorful autumn leaves background', 'fall leaves texture photography', 'autumn ground abstract',
+        'maple leaves carpet', 'autumn colors abstract', 'fall foliage background',
+      ],
+    },
+    {
+      subject: 'snow_ice',
+      label: '❄️ Schnee & Eis',
+      emoji: '❄️',
+      targetPct: 0.06, maxPriority: 2.2,
+      queries: [
+        'snow field minimal', 'white snow abstract', 'snow texture closeup',
+        'snow landscape minimal', 'ice texture abstract', 'frozen surface abstract',
+        'snow ground texture', 'winter white abstract', 'snow abstract photography',
+        'blizzard abstract white', 'snow drift minimal', 'ice crystal abstract',
       ],
     },
   ];
-  for (const themeTarget of NEW_THEME_TARGETS) {
+  for (const themeTarget of MOSAIC_THEME_TARGETS) {
     const themeCnt = await pool.query(
       `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = $1`, [themeTarget.subject]
     ).then(r => Number(r.rows[0]?.cnt ?? 0));
-    const targetCnt = Math.max(1000, Math.round(total * 0.04)); // min 1000 or 4% of DB
+    const targetCnt = Math.round(total * themeTarget.targetPct);
     const deficit = Math.max(0, targetCnt - themeCnt);
     if (deficit > 0) {
-      const priority = Math.min(1.5, (deficit / targetCnt) * 1.5); // max 1.5
+      const priority = Math.min(themeTarget.maxPriority, (deficit / Math.max(1, targetCnt)) * themeTarget.maxPriority);
       for (const kw of themeTarget.queries) {
         tasks.push({ query: kw, priority, deficit, label: `${themeTarget.emoji} ${themeTarget.label} (${themeCnt} → Ziel ${targetCnt})`, subject: themeTarget.subject });
       }
@@ -788,14 +856,14 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
         WHEN avg_l < 25 THEN 'black'
         WHEN avg_l > 80 THEN 'white'
         WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'neutral'
-        WHEN avg_a > 20 THEN 'red'
+        WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b < -15 THEN 'blue'
+        WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b > 20 THEN 'yellow'
+        WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 AND avg_b < -5 THEN 'cyan'
+        WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 THEN 'green'
+        WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 20 THEN 'red'
+        WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 AND avg_b < 0 THEN 'purple'
+        WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 THEN 'pink'
         WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
-        WHEN avg_b > 20 THEN 'yellow'
-        WHEN avg_a < -10 AND avg_b < -5 THEN 'cyan'
-        WHEN avg_a < -10 THEN 'green'
-        WHEN avg_b < -15 THEN 'blue'
-        WHEN avg_a > 10 AND avg_b < 0 THEN 'purple'
-        WHEN avg_a > 10 THEN 'pink'
         ELSE 'neutral'
       END as color_cat,
       CASE
@@ -1228,14 +1296,14 @@ export const appRouter = router({
             WHEN avg_l < 25 THEN 'schwarz'
             WHEN avg_l > 80 THEN 'weiss'
             WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'grau'
-            WHEN avg_a > 20 THEN 'rot'
+            WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b < -15 THEN 'blau'
+            WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b > 20 THEN 'gelb'
+            WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 AND avg_b < -5 THEN 'cyan'
+            WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 THEN 'gruen'
+            WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 20 THEN 'rot'
+            WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 AND avg_b < 0 THEN 'violett'
+            WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 THEN 'pink'
             WHEN avg_a > 10 AND avg_b > 10 THEN 'orange'
-            WHEN avg_b > 20 THEN 'gelb'
-            WHEN avg_a < -10 AND avg_b < -5 THEN 'cyan'
-            WHEN avg_a < -10 THEN 'gruen'
-            WHEN avg_b < -15 THEN 'blau'
-            WHEN avg_a > 10 AND avg_b < 0 THEN 'violett'
-            WHEN avg_a > 10 THEN 'pink'
             ELSE 'grau'
           END as color,
           COUNT(*) as cnt

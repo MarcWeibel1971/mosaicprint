@@ -1318,8 +1318,18 @@ export default function Studio() {
         if (targetBrightness > 0.70 && tileBrightness < 0.15) {
           dist += (0.15 - tileBrightness) * (targetBrightness - 0.70) * 1000; // up to +150
         }
-        // Read mosaicScore from index [16] if available (17D)
+        // mosaicScore as REAL penalty (not just tiebreaker): low-quality tiles get penalized
+        // mosaicScore=1.0 (excellent) → 0 penalty
+        // mosaicScore=0.7 (good)      → +90 penalty
+        // mosaicScore=0.5 (fair)      → +210 penalty
+        // mosaicScore=0.3 (poor)      → +330 penalty
+        // mosaicScore=0.0 (reject)    → +450 penalty
+        // This ensures high-quality tiles (gradients, bokeh, calm landscapes) beat
+        // low-quality tiles (animals, single objects, busy scenes) even at same LAB distance
         const mosaicScore = IS_17D ? labIndex[i + 16] : 0.68;
+        if (IS_17D && mosaicScore < 1.0) {
+          dist += (1.0 - mosaicScore) * 450; // max +450 for score=0
+        }
         if (heap.length < (TOP_K)) {
           heap.push({ tileId: id, labDist: dist, mosaicScore });
           if (heap.length === TOP_K) {
@@ -1340,19 +1350,7 @@ export default function Studio() {
           }
         }
       }
-      // Sort by labDist ASC; wenn IS_17D: bei sehr ähnlichem labDist (< 5% Unterschied) nach mosaicScore DESC
-      if (IS_17D) {
-        return heap.sort((a, b) => {
-          const distDiff = a.labDist - b.labDist;
-          // Tiebreaker: wenn labDist-Unterschied < 3% des besten Werts, nach mosaicScore sortieren
-          const bestDist = Math.min(a.labDist, b.labDist);
-          if (bestDist > 0 && Math.abs(distDiff) / bestDist < 0.03) {
-            // Gleich guter LAB-Match: bevorzuge Tile mit höherem mosaicScore
-            return b.mosaicScore - a.mosaicScore;
-          }
-          return distDiff;
-        });
-      }
+      // Sort by combined score (labDist already includes mosaicScore penalty)
       return heap.sort((a, b) => a.labDist - b.labDist);
     };
 

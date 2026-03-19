@@ -100,7 +100,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       res.setHeader('X-Cache', 'HIT');
       return res.send(cached.buf);
     }
-    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space','bokeh_gradient','pure_sky','water_surface','sand_earth','fog_mist','autumn_carpet','snow_ice','calm_nature','calm_monochrome','skin_tone','texture','architecture'];
     const themeFilter = (theme && VALID_THEMES.includes(theme))
       ? `AND subject = $1`
       : ``;
@@ -360,7 +360,7 @@ app.get("/api/tile-url-index", async (req, res) => {
       return res.send(cached.json);
     }
     const pool = db.getPool();
-    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space','bokeh_gradient','pure_sky','water_surface','sand_earth','fog_mist','autumn_carpet','snow_ice','calm_nature','calm_monochrome','skin_tone','texture','architecture'];
     const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `AND subject = $1` : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
     const result = await pool.query(
@@ -1081,7 +1081,7 @@ app.get('/api/tile-atlas', async (req, res) => {
     console.log(`[atlas] Building atlas: theme=${theme || 'all'}, tileSize=${tileSize}, maxTiles=${maxTiles}`);
 
     const pool = db.getPool();
-    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space'];
+    const VALID_THEMES = ['sunset','ocean','nature','winter','urban','portrait','abstract','food','travel','general','animals','flowers','space','bokeh_gradient','pure_sky','water_surface','sand_earth','fog_mist','autumn_carpet','snow_ice','calm_nature','calm_monochrome','skin_tone','texture','architecture'];
     const themeFilter = (theme && VALID_THEMES.includes(theme)) ? `AND subject = $1` : ``;
     const queryParams = (theme && VALID_THEMES.includes(theme)) ? [theme] : [];
 
@@ -1642,7 +1642,16 @@ async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, 
   const CONCURRENCY = 8;           // Reduziert von 20 auf 8 um 429-Fehler zu vermeiden
   const RATE_LIMIT_DELAY_MS = 500;  // 500ms zwischen Chunks = ~16 req/s gesamt
 
-  const PROMPT = `You are evaluating a 128x128 pixel image tile for use in a large photo mosaic (heart shape, Times Square display).
+  const PROMPT = `You are a strict quality evaluator for photo mosaic tiles. Each tile is a 128x128px image used as one pixel in a large portrait mosaic (like the "redhead" mosaic style where thousands of photos form a face).
+
+The IDEAL tile for a portrait mosaic:
+- Is monochromatic or at most two-toned (e.g. blue sky, orange sunset, beige sand, green meadow)
+- Has NO dominant single object (no single animal, single flower, single person, single building)
+- Fills the entire frame with color/texture (landscape, sky, water, bokeh, abstract gradient, sand, fog)
+- Is visually calm and smooth – the color is the message, not the subject
+- Examples of EXCELLENT tiles: clear blue sky, orange sunset horizon, sandy beach, foggy mountain, bokeh lights, smooth water surface, autumn leaves carpet, snow field, desert sand dunes
+- Examples of POOR tiles: a single elephant, a single flower, a single bird, a single building, a logo, a face
+
 Return ONLY valid JSON with these exact fields:
 {
   "mosaic_score": 0-100,
@@ -1653,19 +1662,43 @@ Return ONLY valid JSON with these exact fields:
   "face_area_pct": 0-100,
   "has_text": true|false,
   "reject": true|false,
-  "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|low_quality|null",
-  "theme": "portrait_face|portrait_skin|nature_forest|nature_mountain|nature_ocean|nature_sunset|nature_snow|city_night|city_architecture|animal|abstract_colorful|abstract_dark|abstract_light|food|other",
+  "reject_reason": "watermark|face_closeup|blurry|logo|text_overlay|single_object|low_quality|null",
+  "theme": "sky_blue|sky_cloudy|sunset_orange|sunset_red|sunset_pink|water_ocean|water_lake|water_river|sand_desert|sand_beach|snow_field|fog_mist|forest_green|meadow_grass|autumn_leaves|bokeh_warm|bokeh_cool|bokeh_neutral|abstract_gradient|abstract_texture|rock_stone|urban_texture|portrait_skin_light|portrait_skin_medium|portrait_skin_dark|other",
   "content_tags": ["tag1", "tag2", "tag3"]
 }
-Scoring rules:
-- mosaic_score (0-100): Overall suitability as mosaic tile. 90-100=excellent natural scene/texture, 70-89=good, 40-69=acceptable, 0-39=poor. Penalize: faces >20% area (-30), text/logo (-40), watermarks (-80), heavy noise/blur (-50), pure white/black (-20).
-- calm_score (0-100): Visual uniformity. 90-100=solid color or very smooth gradient (sky, water, wall). 60-89=gentle texture (grass, sand, bokeh). 30-59=moderate detail. 0-29=chaotic/busy (crowd, busy pattern, noise).
-- color_richness (0-100): Color variety. 90-100=many distinct colors. 50-89=moderate variety. 10-49=limited palette. 0-9=near monochrome.
-- fill_uniformity (0-100): How well the image fills the tile as a single coherent scene. 90-100=one clear subject fills entire tile. 50-89=mostly one scene. 0-49=fragmented, collage, or multiple unrelated elements.
+
+Scoring rules (BE STRICT – only 20-30% of tiles should score ≥80):
+- mosaic_score (0-100): Suitability as mosaic tile for portrait creation.
+  * 85-100: EXCELLENT – monochrome/two-tone, no dominant object, fills frame with pure color/texture (sky, sunset, water, sand, bokeh, snow, fog, gradient)
+  * 65-84: GOOD – mostly one color zone, minimal objects, landscape with clear horizon
+  * 40-64: ACCEPTABLE – some texture variety, small objects in background
+  * 0-39: POOR – dominant single object (animal, flower, building, person), busy pattern, logo, text
+  STRONG PENALTIES: single animal visible (-45), single flower/plant as main subject (-40), single building/architecture as main subject (-35), person/face visible (-30), logo/brand (-50), watermark (-80), text overlay (-40), heavy noise/blur (-30), multiple unrelated objects (-25)
+  BONUSES: pure sky +15, smooth water +15, bokeh background +15, sand/desert +10, snow field +10, fog/mist +10, smooth gradient +10
+- calm_score (0-100): Visual smoothness and uniformity.
+  * 85-100: Solid color, very smooth gradient, pure sky, calm water surface
+  * 60-84: Gentle texture (grass, sand, bokeh), soft clouds
+  * 30-59: Moderate detail, some texture variation
+  * 0-29: Chaotic, busy, many details, animals, crowds
+- color_richness (0-100): Number of distinct color zones. 0-20=monochrome, 21-50=two-tone, 51-80=moderate, 81-100=many colors
+- fill_uniformity (0-100): Does the image fill the entire frame with one coherent scene? 90-100=yes, perfectly. 50-89=mostly. 0-49=fragmented or subject isolated on background.
 - reject=true ONLY if: visible watermark, face fills >50% of tile, severely blurry/noisy, explicit logo/brand overlay.
 Return ONLY the JSON object, no explanation, no markdown.`;
 
   const themeMap: Record<string, string> = {
+    // New precise themes
+    'sky_blue': 'nature_sky', 'sky_cloudy': 'nature_sky',
+    'sunset_orange': 'nature_sunset', 'sunset_red': 'nature_sunset', 'sunset_pink': 'nature_sunset',
+    'water_ocean': 'nature_ocean', 'water_lake': 'nature_ocean', 'water_river': 'nature_ocean',
+    'sand_desert': 'nature_desert', 'sand_beach': 'nature_beach',
+    'snow_field': 'nature_snow', 'fog_mist': 'nature_fog',
+    'forest_green': 'nature_forest', 'meadow_grass': 'nature_meadow',
+    'autumn_leaves': 'nature_autumn',
+    'bokeh_warm': 'abstract_bokeh', 'bokeh_cool': 'abstract_bokeh', 'bokeh_neutral': 'abstract_bokeh',
+    'abstract_gradient': 'abstract_gradient', 'abstract_texture': 'abstract_texture',
+    'rock_stone': 'nature_rock', 'urban_texture': 'city_texture',
+    'portrait_skin_light': 'portrait_light_skin', 'portrait_skin_medium': 'portrait_medium_skin', 'portrait_skin_dark': 'portrait_dark_skin',
+    // Legacy themes (backward compat)
     'portrait_face': 'portrait_medium_skin', 'portrait_skin': 'portrait_medium_skin',
     'nature_forest': 'nature_forest', 'nature_mountain': 'nature_mountain',
     'nature_ocean': 'nature_ocean', 'nature_sunset': 'nature_sunset',
