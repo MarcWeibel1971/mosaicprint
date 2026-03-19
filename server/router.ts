@@ -324,6 +324,16 @@ const CALM_NATURE_KEYWORDS = [
   "velvet texture dark", "suede texture warm", "felt texture soft",
   "clay texture smooth", "plaster wall smooth", "stucco wall texture",
   "concrete floor smooth", "stone surface flat", "slate surface dark",
+  // NEW: high-volume keywords (100k+ Unsplash results)
+  "sand", "sand texture", "sand dunes", "sand beach", "sand pattern",
+  "meer", "meer wasser", "meer horizont", "meer ruhe", "meer blau",
+  "blue sky", "blue sky minimal", "himmel blau", "blauer himmel", "sky blue gradient",
+  "sky blue cloudless", "sky blue clear", "sky blue horizon", "sky blue calm",
+  "northern lights", "aurora borealis", "aurora sky", "northern lights green",
+  "northern lights purple", "aurora borealis sky", "aurora night sky",
+  "ocean surface", "ocean water", "ocean blue", "ocean calm", "ocean horizon",
+  "ocean waves aerial", "ocean texture", "sea surface", "sea water blue",
+  "radiant light", "radiant bokeh", "radiant glow soft", "radiant sky",
 ];
 
 // CALM_MONOCHROME_KEYWORDS: Single-hue, low-texture tiles for backgrounds and clothing
@@ -1228,8 +1238,9 @@ async function checkTileQuality(url: string, subject?: string): Promise<QualityR
     // Use very lenient thresholds to avoid over-filtering these critical tiles
     const isCalmSubject = subject === 'calm_nature' || subject === 'calm_monochrome' ||
       subject === 'abstract_smooth' || subject === 'skin_tone';
-    const satThreshold = isPortraitSubject ? 0.75 : isCalmSubject ? 0.70 : 0.65;
-    const edgeThreshold = isPortraitSubject ? 0.85 : isCalmSubject ? 0.75 : 0.60;  // calm tiles: lenient
+    // Relaxed thresholds: Gemini does the real quality check, pre-filter only for obvious junk
+    const satThreshold = isPortraitSubject ? 0.90 : isCalmSubject ? 0.90 : 0.85;
+    const edgeThreshold = isPortraitSubject ? 0.95 : isCalmSubject ? 0.90 : 0.80;  // much more lenient – let Gemini decide
     const reasons: string[] = [];
     if (saturation > satThreshold) reasons.push(`sat=${saturation.toFixed(2)}>${satThreshold}`);
     if (edgeEnergy  > edgeThreshold) reasons.push(`edge=${edgeEnergy.toFixed(2)}>${edgeThreshold}`);
@@ -1673,7 +1684,7 @@ export const appRouter = router({
 
           let imported = 0;
           // Production API limits: Unsplash 5000 req/h, Pexels 200 req/h, Pixabay 100 req/h
-          const CONCURRENCY = input.sourceId === "unsplash" ? 10 : 3; // Unsplash Production: 5000 req/h → 10 parallel
+          const CONCURRENCY = input.sourceId === "unsplash" ? 20 : 5; // Unsplash Production: 5000 req/h → 20 parallel für maximalen Durchsatz
           const perPage = input.sourceId === "pexels" ? 30 : input.sourceId === "pixabay" ? 200 : 30; // Unsplash max=30 per request
 
           for (const task of tasks) {
