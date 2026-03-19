@@ -5708,50 +5708,47 @@ function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: '
 
   useEffect(() => { fetchStats() }, [])
 
+  const pollJobStatus = (intervalRef: { id: ReturnType<typeof setInterval> | null }) => {
+    intervalRef.id = setInterval(async () => {
+      try {
+        const res = await fetch('/api/admin/ai-analyze-job-status')
+        const data = await res.json()
+        const state = data.state
+        if (state) {
+          setProgress({ processed: state.processed ?? 0, total: state.total ?? 0 })
+          if (!state.running) {
+            if (intervalRef.id) clearInterval(intervalRef.id)
+            setProgress(null)
+            setRunning(false)
+            fetchStats()
+            onMessage({ text: `✅ KI-Analyse abgeschlossen: ${state.processed ?? 0} analysiert, ${state.rejected ?? 0} rejected`, type: 'success' })
+          }
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+  }
   const startAnalysis = async () => {
     setRunning(true)
     setProgress({ processed: 0, total: 0 })
     setLastResult(null)
+    const intervalRef: { id: ReturnType<typeof setInterval> | null } = { id: null }
     try {
       const res = await fetch('/api/admin/ai-analyze-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ batchSize, forceReanalyze }),
       })
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const evt = JSON.parse(line.slice(6))
-            if (evt.type === 'start') {
-              setProgress({ processed: 0, total: evt.total })
-            } else if (evt.type === 'progress') {
-              setProgress({ processed: evt.processed, total: evt.total })
-            } else if (evt.type === 'done') {
-              setLastResult({ processed: evt.processed, rejected: evt.rejected, errors: evt.errors, message: evt.message })
-              setProgress(null)
-              onMessage({ text: `✅ KI-Analyse abgeschlossen: ${evt.message}`, type: 'success' })
-              fetchStats()
-            } else if (evt.type === 'error') {
-              onMessage({ text: `❌ KI-Analyse Fehler: ${evt.message}`, type: 'error' })
-            }
-          } catch { /* ignore parse errors */ }
-        }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      // Update progress from initial state if available
+      if (data.state) {
+        setProgress({ processed: data.state.processed ?? 0, total: data.state.total ?? 0 })
       }
+      // Poll for progress updates (works for both new and already-running jobs)
+      pollJobStatus(intervalRef)
     } catch (err) {
+      if (intervalRef.id) clearInterval(intervalRef.id)
       onMessage({ text: `❌ KI-Analyse fehlgeschlagen: ${String(err)}`, type: 'error' })
-    } finally {
       setRunning(false)
     }
   }
