@@ -1640,16 +1640,16 @@ export default function Admin() {
                   >
                     <option value="pixabay">🟠 Pixabay (200/Keyword, empfohlen)</option>
                     <option value="pexels">🟢 Pexels (80/Keyword)</option>
-                    <option value="unsplash">🟣 Unsplash (30/Keyword)</option>
+                    <option value="unsplash">🟣 Unsplash (bis 5000/Keyword)</option>
                   </select>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-emerald-700">Bilder/Keyword:</span>
                     <input
                       type="number"
                       value={customKeywordCount}
-                      onChange={e => setCustomKeywordCount(Math.max(10, Math.min(500, Number(e.target.value))))} 
+                      onChange={e => setCustomKeywordCount(Math.max(10, Math.min(5000, Number(e.target.value))))} 
                       className="w-20 text-sm border border-emerald-300 rounded-lg px-2 py-1.5 text-center"
-                      min={10} max={500} step={10}
+                      min={10} max={5000} step={10}
                       disabled={customKeywordLoading}
                     />
                   </div>

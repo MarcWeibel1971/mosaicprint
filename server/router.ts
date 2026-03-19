@@ -2341,7 +2341,7 @@ export const appRouter = router({
     .input(z.object({
       sourceId: z.enum(["unsplash", "pexels", "pixabay"]).default("pexels"),
       query: z.string().min(1).max(200),
-      count: z.number().min(10).max(500).default(100),
+      count: z.number().min(10).max(5000).default(100),
       sessionId: z.string().optional(), // optional: group into a multi-keyword session
     }))
     .mutation(async ({ input }) => {
@@ -2930,8 +2930,16 @@ export const appRouter = router({
                       const res = await fetch(`https://pixabay.com/api/?key=${encodeURIComponent(alApiKey)}&q=${encodeURIComponent(task.query)}&per_page=${alPerPage}&image_type=photo&safesearch=true&orientation=horizontal`, { headers: { 'Accept': 'application/json' } });
                       if (res.ok) { const data = await res.json() as any; alPhotos = (data.hits ?? []).map((p: any) => ({ sourceUrl: p.largeImageURL || p.webformatURL || '', tile128Url: p.webformatURL || p.previewURL || '' })).filter((p: any) => p.tile128Url); }
                     } else {
-                      const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=${alPerPage}&orientation=squarish`, { headers: { Authorization: `Client-ID ${alApiKey}` } });
-                      if (res.ok) { const data = await res.json() as any; alPhotos = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb })); }
+                      // Unsplash: Multi-Page-Fetch (max 30/Seite)
+                      const alMaxPages = Math.ceil(input.importCount / 30);
+                      for (let alPg = 1; alPg <= alMaxPages && alPhotos.length < input.importCount; alPg++) {
+                        const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=30&page=${alPg}&orientation=squarish`, { headers: { Authorization: `Client-ID ${alApiKey}` } });
+                        if (!res.ok) break;
+                        const data = await res.json() as any;
+                        const pg = (data.results ?? []).map((p: any) => ({ sourceUrl: p.urls.regular, tile128Url: p.urls.thumb, downloadLocation: p.links?.download_location ?? null }));
+                        alPhotos.push(...pg);
+                        if (pg.length < 30) break;
+                      }
                     }
                     let alBatchImported = 0;
                     for (let i = 0; i < alPhotos.length; i += AL_CONCURRENCY) {
