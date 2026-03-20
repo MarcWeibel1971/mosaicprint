@@ -1515,15 +1515,19 @@ app.post('/api/admin/migrate-to-r2', async (_req, res) => {
         const batch = result.rows.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map(async (row: { id: number; source_url: string; tile128_url: string; source_provider: string }) => {
           try {
-            // Prefer tile128_url (smaller, faster), fall back to source_url
-            const url = row.tile128_url || row.source_url;
+            // Try tile128_url first (smaller, faster), then source_url as fallback
+            // If tile128_url is hotlink-protected (e.g. Pixabay), try source_url instead
+            let url = row.tile128_url || '';
+            if (!url || url.startsWith('data:') || isHotlinkProtected(url)) {
+              url = row.source_url || '';
+            }
             if (!url || url.startsWith('data:')) {
               r2MigrationStatus.skippedNoUrl++;
               r2MigrationStatus.done++;
               return;
             }
-            // Skip hotlink-protected URLs (Pixabay direct downloads)
             if (isHotlinkProtected(url)) {
+              // Both tile128_url and source_url are hotlink-protected → skip
               r2MigrationStatus.skippedHotlink++;
               r2MigrationStatus.done++;
               return;
