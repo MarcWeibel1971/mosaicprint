@@ -97,9 +97,10 @@ function HeroSection() {
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
                 background: "linear-gradient(135deg, #FF6B6B, #FF9F43)", color: "white",
                 borderRadius: 9999, padding: "0 2rem", height: 48, fontSize: 15, fontWeight: 700,
-                textDecoration: "none",
+                textDecoration: "none", gap: 8,
               }}>
                 Mosaik erstellen
+                <span style={{ fontSize: 12, opacity: 0.85, fontWeight: 500 }}>ab CHF 29</span>
               </a>
               <button onClick={() => scrollTo("#how-it-works")} style={{
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
@@ -108,6 +109,19 @@ function HeroSection() {
               }}>
                 So funktioniert's
               </button>
+            </motion.div>
+
+            <motion.div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 24, flexWrap: "wrap" }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.45 }}>
+              {[
+                { icon: "✓", text: "Vorschau kostenlos" },
+                { icon: "✓", text: "Kein Account nötig" },
+                { icon: "✓", text: "Lieferung CH & DE" },
+              ].map((t, i) => (
+                <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "#6B7280", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 9999, padding: "4px 12px" }}>
+                  <span style={{ color: "#22C55E", fontWeight: 700 }}>{t.icon}</span> {t.text}
+                </span>
+              ))}
             </motion.div>
 
             <motion.div style={{ display: "flex", gap: 32, alignItems: "center" }}

@@ -1189,12 +1189,13 @@ export default function Studio() {
       // targetSat 0-1: at sat=0.3 (moderately colorful), W_A/W_B = 3.2; at sat=0.6+, W_A/W_B = 5.0
       const satBoost = Math.min(3.0, targetSat * 5.0); // 0 at gray, up to +3.0 at fully saturated
       const W_L = 1.2, W_A = 2.0 + satBoost, W_B = 2.0 + satBoost; // Dynamic: 2.0 (gray) to 5.0 (saturated)
-      // W_QUAD = 0: Quadrant-Matching in Stage A deaktiviert.
-      // Begründung: Ziel-Zellen in Stage A sind 1px groß und haben keine echten Quadrant-Daten.
-      // targetQuadA/B = [targetA, targetA, targetA, targetA] (alle Quadranten identisch) –
-      // der Vergleich mit Tile-Quadranten wäre daher bedeutungslos und würde nur Rauschen einführen.
-      // Stage C (SSD) verwendet echte Pixel-Quadranten und ist der korrekte Ort für Quadrant-Matching.
-      const W_QUAD = 0; // Deaktiviert: Ziel-Zellen haben keine Quadrant-Info (1px Auflösung)
+      // W_QUAD: Leichtes Quadrant-a/b-Matching in Stage A.
+      // Begründung: Ziel-Zellen sind 1px, daher targetQuadA/B = [targetA, targetA, targetA, targetA].
+      // Das Quadrant-Matching vergleicht Tile-interne Farbverteilung mit dem Zielwert –
+      // Tiles mit starken Farbgradienten (z.B. blauer Himmel oben / grünes Gras unten) werden
+      // leicht benachteiligt wenn der Zielbereich einfarbig ist. Kleines Gewicht = subtile Verbesserung.
+      // Stage C (SSD) ist weiterhin der primäre Ort für Quadrant-Matching.
+      const W_QUAD = IS_14D ? 0.15 : 0; // Aktiviert: leichtes Quadrant-Matching (war 0)
       // W_EDGE: active for all index types - edge energy drives contour sharpness
       const W_EDGE = IS_7D ? 25.0 : 22.0;
       // W_BRIGHT: brightness matching - prevents dark tiles in bright areas

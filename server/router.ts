@@ -2647,11 +2647,15 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const pool = db.getPool();
       // Get tiles that don't have a mirrored version yet
-      // Mirrored tiles are identified by source_url ending with '#mirror'
+      // Use LEFT JOIN to find originals without a mirror counterpart
       const countRes = await pool.query(`
-        SELECT COUNT(*) as total FROM mosaic_images
-        WHERE source_url NOT LIKE '%#mirror'
-        AND avg_l IS NOT NULL
+        SELECT COUNT(*) as total FROM mosaic_images orig
+        WHERE orig.source_url NOT LIKE '%#mirror'
+        AND orig.avg_l IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM mosaic_images m
+          WHERE m.source_url = orig.source_url || '#mirror'
+        )
       `);
       const total = Number(countRes.rows[0].total);
       if (input.dryRun) {
@@ -2660,24 +2664,30 @@ export const appRouter = router({
       // Check how many mirrors already exist
       const existingRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE source_url LIKE '%#mirror'`);
       const existingMirrors = Number(existingRes.rows[0].cnt);
-      // Process in batches
+      // Process in batches - only tiles without mirror
       let inserted = 0; let skipped = 0;
       const limit = Math.min(input.batchSize, 2000);
       const rows = await pool.query(`
-        SELECT id, source_url, tile128_url, r2_url, avg_l, avg_a, avg_b,
-          tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
-          bl_l, bl_a, bl_b, br_l, br_a, br_b,
-          theme, source_provider, import_query, tile_type, edge_energy, phash
-        FROM mosaic_images
-        WHERE source_url NOT LIKE '%#mirror'
-        AND avg_l IS NOT NULL
-        ORDER BY id ASC
+        SELECT orig.id, orig.source_url, orig.tile128_url, orig.r2_url, orig.avg_l, orig.avg_a, orig.avg_b,
+          orig.tl_l, orig.tl_a, orig.tl_b, orig.tr_l, orig.tr_a, orig.tr_b,
+          orig.bl_l, orig.bl_a, orig.bl_b, orig.br_l, orig.br_a, orig.br_b,
+          orig.theme, orig.source_provider, orig.import_query, orig.tile_type, orig.edge_energy, orig.phash
+        FROM mosaic_images orig
+        WHERE orig.source_url NOT LIKE '%#mirror'
+        AND orig.avg_l IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM mosaic_images m
+          WHERE m.source_url = orig.source_url || '#mirror'
+        )
+        ORDER BY orig.id ASC
         LIMIT $1
       `, [limit]);
       for (const row of rows.rows) {
         const mirrorUrl = row.source_url + '#mirror';
         // Swap TL↔TR and BL↔BR for horizontal mirror
-        const mirrorPhash = row.phash ? row.phash + 'm' : null; // distinguish from original
+        // Original:  TL | TR      Mirror:  TR | TL
+        //            BL | BR               BR | BL
+        const mirrorPhash = row.phash ? row.phash + 'm' : null;
         try {
           const res = await pool.query(
             `INSERT INTO mosaic_images
@@ -2687,26 +2697,30 @@ export const appRouter = router({
                 subject, theme, source_provider, import_query, url_hash,
                 imported_at, tile_type, edge_energy, phash)
              VALUES ($1,$2,$3,$4,$5,$6,
-                $9,$10,$11, $6,$7,$8,
-                $15,$16,$17, $12,$13,$14,
-                $18,$18,$19,$20,MD5($1),NOW(),$21,$22,$23)
+                $7,$8,$9,   $10,$11,$12,
+                $13,$14,$15, $16,$17,$18,
+                $19,$19,$20,$21,MD5($1),NOW(),$22,$23,$24)
              ON CONFLICT (source_url) DO NOTHING
              RETURNING id`,
             [
-              mirrorUrl,                    // $1 source_url
-              row.tile128_url,              // $2 tile128_url (same – we don't flip the actual image, just LAB)
-              row.r2_url,                   // $3 r2_url
-              row.avg_l, row.avg_a, row.avg_b, // $4,$5,$6 global LAB unchanged
-              row.tr_a, row.tr_b,           // $7,$8 → used as TL a/b (swapped)
-              row.tl_l, row.tl_a, row.tl_b, // $9,$10,$11 → used as TR (original TL)
-              row.br_l, row.br_a, row.br_b, // $12,$13,$14 → used as BL (original BR)
-              row.bl_l, row.bl_a, row.bl_b, // $15,$16,$17 → used as BR (original BL)
-              row.theme,                    // $18 subject/theme
-              row.source_provider,          // $19
-              row.import_query,             // $20
-              row.tile_type,                // $21
-              row.edge_energy,              // $22
-              mirrorPhash,                  // $23
+              mirrorUrl,                    // $1  source_url
+              row.tile128_url,              // $2  tile128_url (same image, only LAB swapped)
+              row.r2_url,                   // $3  r2_url
+              row.avg_l, row.avg_a, row.avg_b, // $4,$5,$6  global LAB unchanged
+              // TL gets TR values (horizontal mirror: left becomes right)
+              row.tr_l, row.tr_a, row.tr_b, // $7,$8,$9   new TL = original TR
+              // TR gets TL values
+              row.tl_l, row.tl_a, row.tl_b, // $10,$11,$12  new TR = original TL
+              // BL gets BR values
+              row.br_l, row.br_a, row.br_b, // $13,$14,$15  new BL = original BR
+              // BR gets BL values
+              row.bl_l, row.bl_a, row.bl_b, // $16,$17,$18  new BR = original BL
+              row.theme,                    // $19 subject/theme
+              row.source_provider,          // $20
+              row.import_query,             // $21
+              row.tile_type,                // $22
+              row.edge_energy,              // $23
+              mirrorPhash,                  // $24
             ]
           );
           if ((res.rowCount ?? 0) > 0) inserted++; else skipped++;

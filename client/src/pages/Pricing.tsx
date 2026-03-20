@@ -8,12 +8,16 @@ const PACKAGES = [
     price: 49,
     color: "#0f172a",
     highlight: false,
+    tileCount: "50×50",
+    tileLabel: "2’500 Tiles",
+    qualityBar: 33,
+    qualityLabel: "Gut",
     features: [
-      "50×50 Tiles",
+      "2’500 Tiles (50×50)",
       "A3-Format (30×42 cm)",
       "Fotopapier-Druck",
       "Lieferung in 5 Werktagen",
-      "Digitale Vorschau",
+      "Kostenlose Vorschau",
     ],
     cta: "Auswählen",
     ctaStyle: "outline",
@@ -25,12 +29,16 @@ const PACKAGES = [
     color: "#f97316",
     highlight: true,
     badge: "BELIEBTESTE WAHL",
+    tileCount: "100×100",
+    tileLabel: "10’000 Tiles",
+    qualityBar: 66,
+    qualityLabel: "Sehr gut",
     features: [
-      "100×100 Tiles",
+      "10’000 Tiles (100×100)",
       "A2-Format (42×60 cm)",
       "Leinwand oder Alu-Dibond",
       "Lieferung in 48h",
-      "Digitale Vorschau",
+      "Kostenlose Vorschau",
       "Unbegrenzte Korrekturen",
     ],
     cta: "Jetzt bestellen",
@@ -38,16 +46,20 @@ const PACKAGES = [
   },
   {
     name: "Galerie",
-    subtitle: "Für Kunstliebhaber",
+    subtitle: "Für Kunstliebhaber & Geschenke",
     price: 149,
     color: "#6366f1",
     highlight: false,
+    tileCount: "200×200",
+    tileLabel: "40’000 Tiles",
+    qualityBar: 100,
+    qualityLabel: "Exzellent",
     features: [
-      "200×200 Tiles",
+      "40’000 Tiles (200×200)",
       "A1-Format (60×84 cm)",
       "Museum-Leinwand mit Rahmen",
       "Express-Lieferung in 24h",
-      "Digitale Vorschau",
+      "Kostenlose Vorschau",
       "Unbegrenzte Korrekturen",
       "Persönliche Beratung",
     ],
@@ -137,9 +149,21 @@ export default function Pricing() {
               <h2 style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>
                 {pkg.name}
               </h2>
-              <p style={{ color: "#64748b", fontSize: 14, marginBottom: 24 }}>
+              <p style={{ color: "#64748b", fontSize: 14, marginBottom: 16 }}>
                 {pkg.subtitle}
               </p>
+
+              {/* Qualitäts-Balken: Tile-Anzahl als Qualitätsmerkmal */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>{(pkg as any).tileLabel}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: pkg.color }}>{(pkg as any).qualityLabel}</span>
+                </div>
+                <div style={{ height: 6, background: "#e2e8f0", borderRadius: 9999, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${(pkg as any).qualityBar}%`, background: pkg.highlight ? "linear-gradient(90deg, #f97316, #ec4899)" : `linear-gradient(90deg, ${pkg.color}99, ${pkg.color})`, borderRadius: 9999, transition: "width 0.6s ease" }} />
+                </div>
+                <p style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>Mehr Tiles = feinere Details &amp; schärfere Konturen</p>
+              </div>
 
               <div style={{ marginBottom: 28 }}>
                 <span style={{ fontSize: 42, fontWeight: 800, color: pkg.color }}>
@@ -191,6 +215,27 @@ export default function Pricing() {
               </Link>
             </div>
           ))}
+        </div>
+
+        {/* Upsell-Erklärungsbanner: Warum mehr Tiles besser sind */}
+        <div style={{ maxWidth: 1000, margin: "40px auto 0", background: "linear-gradient(135deg, rgba(249,115,22,0.06), rgba(99,102,241,0.06))", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 16, padding: "24px 32px", display: "flex", gap: 32, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <p style={{ fontWeight: 800, fontSize: 16, color: "#0f172a", marginBottom: 6 }}>Warum sind mehr Tiles besser?</p>
+            <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6 }}>Je mehr Tiles, desto feiner die Details und desto schärfer die Konturen. Bei 40’000 Tiles sind selbst Augen und Haare gestochen scharf erkennbar.</p>
+          </div>
+          <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+            {[
+              { tiles: "2’500", detail: "Grobe Konturen", emoji: "□" },
+              { tiles: "10’000", detail: "Klare Gesichter", emoji: "▣" },
+              { tiles: "40’000", detail: "Haarfeine Details", emoji: "█" },
+            ].map((t, i) => (
+              <div key={i} style={{ textAlign: "center", minWidth: 80 }}>
+                <div style={{ fontSize: 28, marginBottom: 4 }}>{t.emoji}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>{t.tiles}</div>
+                <div style={{ fontSize: 11, color: "#94a3b8" }}>{t.detail}</div>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
