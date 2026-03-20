@@ -1173,7 +1173,25 @@ export default function Studio() {
       // before calling renderMosaic which needs canvasRef.current
       await new Promise(r => setTimeout(r, 50));
       try {
-        await renderMosaic(userPhotoImg);
+        // MOBILE: Downscale user photo to max 2048px to save decoded memory
+        // A 12MP photo = 48MB decoded. At 2048px max → ~8MB. Mosaic only needs ~500px target.
+        let renderImg = userPhotoImg;
+        const _isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+        if (_isMob && (userPhotoImg.naturalWidth > 2048 || userPhotoImg.naturalHeight > 2048)) {
+          const scale = 2048 / Math.max(userPhotoImg.naturalWidth, userPhotoImg.naturalHeight);
+          const w = Math.round(userPhotoImg.naturalWidth * scale);
+          const h = Math.round(userPhotoImg.naturalHeight * scale);
+          const tmpC = document.createElement('canvas');
+          tmpC.width = w; tmpC.height = h;
+          tmpC.getContext('2d')!.drawImage(userPhotoImg, 0, 0, w, h);
+          renderImg = await new Promise<HTMLImageElement>((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.src = tmpC.toDataURL('image/jpeg', 0.92);
+          });
+          console.log(`[Studio] Mobile: downscaled user photo from ${userPhotoImg.naturalWidth}x${userPhotoImg.naturalHeight} to ${w}x${h}`);
+        }
+        await renderMosaic(renderImg);
       } catch (e) {
         setError("Fehler beim Rendern: " + String(e));
         setLoading(false);
@@ -1685,9 +1703,28 @@ export default function Studio() {
     setProgressMsg(`Lade ${neededTileIds.size} Kachel-Bilder...`);
     setProgress(25);
 
-    // tileId -> HTMLImageElement (loaded at 64px)
+    // tileId -> HTMLImageElement (loaded at 64px on mobile, 128px on desktop)
     const tileImgMap = new Map<number, HTMLImageElement>();
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
+
+    // MOBILE: CDN serves 128px tiles but we only need 64px for preview canvas.
+    // 128px decoded: 128*128*4 = 64KB/tile, 800 tiles = 50MB → iOS Safari OOM crash.
+    // 64px decoded:   64*64*4 = 16KB/tile, 800 tiles = 12.5MB → safe.
+    // Downscale loaded images using a shared offscreen canvas.
+    const MOBILE_TILE_DOWNSCALE = 64;
+    const downscaleCanvas = isMobileOrSlow ? document.createElement('canvas') : null;
+    if (downscaleCanvas) { downscaleCanvas.width = MOBILE_TILE_DOWNSCALE; downscaleCanvas.height = MOBILE_TILE_DOWNSCALE; }
+    const downscaleCtx = downscaleCanvas?.getContext('2d') ?? null;
+    function downscaleTile(img: HTMLImageElement): HTMLImageElement {
+      if (!downscaleCtx || !downscaleCanvas) return img;
+      if (img.naturalWidth <= MOBILE_TILE_DOWNSCALE) return img; // already small
+      downscaleCtx.clearRect(0, 0, MOBILE_TILE_DOWNSCALE, MOBILE_TILE_DOWNSCALE);
+      downscaleCtx.drawImage(img, 0, 0, MOBILE_TILE_DOWNSCALE, MOBILE_TILE_DOWNSCALE);
+      const smallImg = new Image();
+      smallImg.src = downscaleCanvas.toDataURL('image/jpeg', 0.8);
+      smallImg.dataset.originalSrc = img.dataset.originalSrc || '';
+      return smallImg;
+    }
 
     if (USE_2STAGE && neededTileIds.size > 0) {
       try {
@@ -1728,7 +1765,10 @@ export default function Studio() {
               })
             );
             for (let j = 0; j < batchIds.length; j++) {
-              if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+              if (batchImgs[j]) {
+                // On mobile, downscale 128px CDN tiles to 64px to save ~75% decoded memory
+                tileImgMap.set(batchIds[j], isMobileOrSlow ? downscaleTile(batchImgs[j]!) : batchImgs[j]!);
+              }
             }
           } catch (batchErr) {
             console.warn(`[Studio] CDN batch ${i}-${i + DIRECT_BATCH} failed:`, batchErr);
@@ -1866,7 +1906,7 @@ export default function Studio() {
               batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
             );
             for (let j = 0; j < batchIds.length; j++) {
-              if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+              if (batchImgs[j]) tileImgMap.set(batchIds[j], isMobileOrSlow ? downscaleTile(batchImgs[j]!) : batchImgs[j]!);
             }
           }
           loaded += batchIds.length;
@@ -1891,7 +1931,7 @@ export default function Studio() {
             batchIds.map(id => loadImageCached(`/api/tile/${id}?size=64`, IMG_TIMEOUT))
           );
           for (let j = 0; j < batchIds.length; j++) {
-            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+            if (batchImgs[j]) tileImgMap.set(batchIds[j], isMobileOrSlow ? downscaleTile(batchImgs[j]!) : batchImgs[j]!);
           }
           loaded += batchIds.length;
           const pct = 25 + Math.round((loaded / tileIdArray.length) * 20);
