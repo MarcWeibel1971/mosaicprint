@@ -2027,7 +2027,25 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [warmCoolFilter, setWarmCoolFilter] = useState('alle')
   const [saturationFilter, setSaturationFilter] = useState('alle')
   const [geminiFilter, setGeminiFilter] = useState('alle')
+  const [rebuildStatus, setRebuildStatus] = useState<{ running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null } | null>(null)
+  const rebuildPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const LIMIT = 60
+
+  const startRebuildPolling = useCallback(() => {
+    if (rebuildPollRef.current) return
+    rebuildPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/trpc/getRebuildStatus')
+        const data = await res.json()
+        const status = data.result?.data ?? data
+        setRebuildStatus(status)
+        if (!status?.running) {
+          clearInterval(rebuildPollRef.current!)
+          rebuildPollRef.current = null
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+  }, [])
 
   const fetchDbStats = useCallback(async () => {
     try {
@@ -2047,7 +2065,9 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const data = await res.json()
       const parsed = data.result?.data?.json ?? data.result?.data ?? data
       if (parsed?.started) {
-        onMessage({ text: '⏳ Reklassifizierung läuft im Hintergrund. Seite nach 30-90 Min neu laden für aktualisierte Statistik.', type: 'info' })
+        setRebuildStatus({ running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null })
+        startRebuildPolling()
+        onMessage({ text: '⏳ Reklassifizierung läuft – Fortschrittsbalken wird aktualisiert.', type: 'info' })
       } else {
         onMessage({ text: parsed?.message ?? 'Reklassifizierung gestartet', type: 'info' })
       }
@@ -2434,7 +2454,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3 mt-4">Nach Quelle</h3>
               <div className="flex flex-wrap gap-3">
-                {Object.entries(dbStats.bySource).map(([src, cnt]) => (
+                {Object.entries(dbStats.bySource ?? {}).map(([src, cnt]) => (
                   <div key={src} className="flex items-center gap-1">
                     <button onClick={() => setSourceFilter(sourceFilter === src ? 'alle' : src)}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${sourceFilter === src ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-indigo-300'}`}>
@@ -2459,7 +2479,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Nach Farbe (LAB-indexiert)</h3>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(COLOR_LABELS).map(([key, { label, color, emoji }]) => {
-                  const cnt = dbStats.byColor[key] ?? 0
+                  const cnt = (dbStats.byColor ?? {})[key] ?? 0
                   const pct = dbStats.labIndexed > 0 ? Math.round((cnt / dbStats.labIndexed) * 100) : 0
                   return (
                     <button key={key} onClick={() => setColorFilter(colorFilter === key ? 'alle' : key)}
@@ -2478,7 +2498,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               {/* Missing areas hint */}
               {dbStats.labIndexed > 0 && (() => {
                 const missing = Object.entries(COLOR_LABELS)
-                  .filter(([key]) => (dbStats.byColor[key] ?? 0) < dbStats.labIndexed * 0.05)
+                  .filter(([key]) => ((dbStats.byColor ?? {})[key] ?? 0) < dbStats.labIndexed * 0.05)
                   .map(([, { label }]) => label)
                 if (missing.length === 0) return null
                 return (
@@ -2498,8 +2518,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   { key: 'mittel', label: 'Mittel', color: '#6b7280', bg: 'bg-gray-400' },
                   { key: 'hell',   label: 'Hell',   color: '#d1d5db', bg: 'bg-gray-200' },
                 ].map(({ key, label, color, bg }) => {
-                  const cnt = dbStats.byBrightness[key] ?? 0
-                  const pct = dbStats.labIndexed > 0 ? Math.round((cnt / dbStats.labIndexed) * 100) : 0
+                   const cnt = (dbStats.byBrightness ?? {})[key] ?? 0
+                   const pct = dbStats.labIndexed > 0 ? Math.round((cnt / dbStats.labIndexed) * 100) : 0
                   return (
                     <button key={key} onClick={() => setBrightnessFilter(brightnessFilter === key ? 'alle' : key)}
                       className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${brightnessFilter === key ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'}`}>
