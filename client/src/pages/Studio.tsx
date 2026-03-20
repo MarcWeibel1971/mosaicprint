@@ -155,6 +155,14 @@ const MATERIALS = [
   { label: "Fotopapier", surcharge: -10, icon: "📄" },
 ];
 
+// Digital download options (no physical print)
+const DIGITAL_FORMATS = [
+  { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 128, price: 9, format: 'jpg' as const },
+  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 256, price: 19, format: 'jpg' as const },
+  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 400, price: 29, format: 'jpg' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 400, price: 39, format: 'png' as const },
+];
+
 export default function Studio() {
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [userPhotoImg, setUserPhotoImg] = useState<HTMLImageElement | null>(null);
@@ -181,6 +189,8 @@ export default function Studio() {
   const tileUploadRef = useRef<HTMLInputElement>(null);
   const MIN_OWN_TILES = 20; // minimum tiles for 'own' mode
   const [showOrderPanel, setShowOrderPanel] = useState(false);
+  const [orderMode, setOrderMode] = useState<'print' | 'digital'>('print');
+  const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(1); // HD default
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
   const [cacheSize, setCacheSize] = useState(0);
   const [dbTileCount, setDbTileCount] = useState<number | null>(null);
@@ -3365,7 +3375,7 @@ export default function Studio() {
       const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
       const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM); // px for 1:1 at 300dpi
-      const PRINT_TILE_PX = Math.min(400, Math.max(200, naturalTilePx)); // min 200px for recognizable tiles
+      const PRINT_TILE_PX = Math.min(600, Math.max(200, naturalTilePx)); // min 200px, max 600px for highest print quality
       // Actual output dimensions (= format at 300 DPI, aspect-ratio preserved)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
@@ -3489,7 +3499,66 @@ export default function Studio() {
     link.click();
   }, [selectedFormat]);
 
-  const totalPrice = PRINT_FORMATS[selectedFormat].price + MATERIALS[selectedMaterial].surcharge;
+  const totalPrice = orderMode === 'print'
+    ? PRINT_FORMATS[selectedFormat].price + MATERIALS[selectedMaterial].surcharge
+    : DIGITAL_FORMATS[selectedDigitalFormat].price;
+
+  // Digital download handler: server-side render without watermark
+  const handleDigitalDownload = useCallback(async () => {
+    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
+    const digFmt = DIGITAL_FORMATS[selectedDigitalFormat];
+    const { cols, rows } = mosaicParamsRef.current;
+    const TILE_PX = digFmt.tilePx;
+    const outW = cols * TILE_PX;
+    const outH = rows * TILE_PX;
+
+    try {
+      setLoading(true);
+      setProgressMsg(`Rendere ${digFmt.label} (${outW}x${outH}px)...`);
+      setProgress(10);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+
+      const resp = await fetch('/api/print-render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tileIds: tileIdsRef.current,
+          assignment: assignmentRef.current,
+          cols,
+          rows,
+          tilePx: TILE_PX,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        throw new Error(`Server error: ${resp.status} - ${errText}`);
+      }
+
+      const { token, filename, size } = await resp.json();
+      setProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+
+      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      const dlLink = document.createElement('a');
+      dlLink.href = downloadUrl;
+      dlLink.download = filename;
+      dlLink.style.display = 'none';
+      document.body.appendChild(dlLink);
+      dlLink.click();
+      setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
+      setProgressMsg(`Download gestartet: ${filename}`);
+    } catch (e) {
+      console.error('[Digital Download] Failed:', e);
+      setProgressMsg(`Fehler: ${e}`);
+    } finally {
+      setLoading(false);
+      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+    }
+  }, [selectedDigitalFormat]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
@@ -3910,7 +3979,7 @@ export default function Studio() {
                       <button
                         onClick={() => handleDownload(true)}
                         className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 shadow-sm hover:shadow-md transition-all text-amber-700 hover:text-amber-900"
-                        title="Admin: Druckqualitaet herunterladen (ohne Wasserzeichen, 400px Tiles)"
+                        title="Admin: Druckqualitaet herunterladen (ohne Wasserzeichen, max 600px Tiles)"
                       >
                         <Printer className="w-4 h-4" />
                       </button>
@@ -4200,149 +4269,279 @@ export default function Studio() {
               </button>
             </div>
 
-            {/* Format selection */}
-            <div className="mb-5">
-              <p className="text-sm font-bold text-gray-700 mb-3">Format waehlen</p>
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                {PRINT_FORMATS.map(({ label, price }, idx) => (
-                  <button
-                    key={label}
-                    onClick={() => setSelectedFormat(idx)}
-                    className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
-                      selectedFormat === idx
-                        ? "border-coral-500 bg-coral-50"
-                        : "border-gray-100 hover:border-coral-200"
-                    }`}
-                  >
-                    {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
-                    <div className="text-xs font-bold text-gray-900">{label}</div>
-                    <div className="text-xs text-coral-700 font-semibold">CHF {price}</div>
-                    {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Material selection */}
-            <div className="mb-6">
-              <p className="text-sm font-bold text-gray-700 mb-3">Material waehlen</p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {MATERIALS.map(({ label, surcharge, icon }, idx) => (
-                  <button
-                    key={label}
-                    onClick={() => setSelectedMaterial(idx)}
-                    className={`p-3 rounded-xl border-2 text-left transition-all ${
-                      selectedMaterial === idx
-                        ? "border-coral-500 bg-coral-50"
-                        : "border-gray-100 hover:border-coral-200"
-                    }`}
-                  >
-                    <div className="text-xl mb-1">{icon}</div>
-                    <div className="text-xs font-bold text-gray-900">{label}</div>
-                    <div className="text-xs text-gray-500">
-                      {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `?CHF ${Math.abs(surcharge)}` : "Inklusive"}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Order summary */}
-            <div className="bg-coral-50 rounded-xl p-4 mb-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} . {MATERIALS[selectedMaterial].label}</p>
-                  <p className="text-sm text-gray-500">inkl. MwSt., Druck & Lieferung CH</p>
-                </div>
-                <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
-              </div>
-            </div>
-
-            {/* Printolino-Info-Box */}
-            {(() => {
-              const fmt = PRINT_FORMATS[selectedFormat];
-              const cols = mosaicParamsRef.current?.cols ?? 60;
-              const rows = mosaicParamsRef.current?.rows ?? 80;
-              const PX_PER_CM = 300 / 2.54;
-              const tileSizeCm = fmt.widthCm / cols;
-              const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
-              const printTilePx = Math.min(400, Math.max(200, naturalTilePx2));
-              const outW = cols * printTilePx;
-              const outH = rows * printTilePx;
-              const posterW = (cols * tileSizeCm).toFixed(0);
-              const posterH = (rows * tileSizeCm).toFixed(0);
-              return (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 text-xs text-blue-800">
-                  <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                    <span className="text-blue-600">Poster-Groesse:</span>
-                    <span className="font-semibold">{posterW} × {posterH} cm</span>
-                    <span className="text-blue-600">Kachel-Groesse:</span>
-                    <span className="font-semibold">{tileSizeCm.toFixed(1)} cm × {tileSizeCm.toFixed(1)} cm</span>
-                    <span className="text-blue-600">Kachel-Pixel:</span>
-                    <span className="font-semibold">{printTilePx} px ({fmt.dpi} dpi)</span>
-                    <span className="text-blue-600">Ausgabe-Pixel:</span>
-                    <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
-                    <span className="text-blue-600">Anzahl Kacheln:</span>
-                    <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
-                  </div>
-                  <p className="mt-1.5 text-blue-600">Optimiert fuer Printolino {fmt.label} Druck.</p>
-                </div>
-              );
-            })()}
-
-            {/* Payment success banner */}
-            {paymentSuccess && (
-              <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-2 text-green-800 text-sm font-semibold">
-                <Check className="w-4 h-4 text-green-600" />
-                Zahlung erfolgreich! Lade jetzt deine druckbereite Datei herunter.
-                <button
-                  onClick={() => handleDownload(true)}
-                  className="ml-auto flex items-center gap-1 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700 transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Herunterladen
-                </button>
-              </div>
-            )}
-
-            {paymentError && (
-              <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
-                {paymentError}
-              </div>
-            )}
-
-            <div className="flex flex-col sm:flex-row gap-3">
+            {/* Digital / Print Tab Switcher */}
+            <div className="flex gap-2 mb-5 bg-gray-100 rounded-xl p-1">
               <button
-                onClick={() => setShowPayModal(true)}
-                disabled={paymentLoading}
-                className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
+                onClick={() => setOrderMode('digital')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-bold transition-all ${
+                  orderMode === 'digital'
+                    ? 'bg-white text-blue-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
               >
-                {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                Druckbereite Datei kaufen . CHF {totalPrice}
+                <Download className="w-4 h-4" />
+                Digitale Datei
               </button>
-              <a
-                href={`https://www.printolino.ch?ref=mosaicprint&format=${encodeURIComponent(PRINT_FORMATS[selectedFormat].label)}&material=${encodeURIComponent(MATERIALS[selectedMaterial].label)}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all"
+              <button
+                onClick={() => setOrderMode('print')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-bold transition-all ${
+                  orderMode === 'print'
+                    ? 'bg-white text-coral-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
               >
                 <Printer className="w-4 h-4" />
-                Bei Printolino bestellen
-                <ExternalLink className="w-4 h-4" />
-              </a>
-            </div>
-            <div className="flex items-center justify-between mt-3">
-              <button
-                onClick={() => handleDownload(false)}
-                className="text-xs text-gray-400 hover:text-gray-600 underline"
-              >
-                Vorschau herunterladen (mit Wasserzeichen)
+                Druck bestellen
               </button>
-              <p className="text-xs text-gray-400">
-                Lade die druckbereite Datei bei Printolino.ch hoch.
-              </p>
             </div>
+
+            {/* ===== DIGITAL MODE ===== */}
+            {orderMode === 'digital' && (
+              <>
+                {/* Digital format selection */}
+                <div className="mb-5">
+                  <p className="text-sm font-bold text-gray-700 mb-3">Aufloesung waehlen</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {DIGITAL_FORMATS.map(({ label, desc, tilePx, price, format }, idx) => {
+                      const cols = mosaicParamsRef.current?.cols ?? 60;
+                      const rows = mosaicParamsRef.current?.rows ?? 80;
+                      const outW = cols * tilePx;
+                      const outH = rows * tilePx;
+                      return (
+                        <button
+                          key={label}
+                          onClick={() => setSelectedDigitalFormat(idx)}
+                          className={`relative p-3 rounded-xl border-2 text-left transition-all ${
+                            selectedDigitalFormat === idx
+                              ? 'border-blue-500 bg-blue-50'
+                              : 'border-gray-100 hover:border-blue-200'
+                          }`}
+                        >
+                          {idx === 2 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Beliebt</div>}
+                          <div className="text-xs font-bold text-gray-900">{label}</div>
+                          <div className="text-[10px] text-gray-500 mt-0.5">{desc}</div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">{outW.toLocaleString()}x{outH.toLocaleString()} px . {format.toUpperCase()}</div>
+                          <div className="text-xs text-blue-700 font-bold mt-1">CHF {price}</div>
+                          {selectedDigitalFormat === idx && <Check className="w-3 h-3 text-blue-600 absolute top-1 right-1" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Digital order summary */}
+                <div className="bg-blue-50 rounded-xl p-4 mb-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-gray-900">Digitale Datei - {DIGITAL_FORMATS[selectedDigitalFormat].label}</p>
+                      <p className="text-sm text-gray-500">Sofort-Download . Ohne Wasserzeichen . {DIGITAL_FORMATS[selectedDigitalFormat].format.toUpperCase()}</p>
+                    </div>
+                    <div className="text-2xl font-extrabold text-blue-700">CHF {totalPrice}</div>
+                  </div>
+                </div>
+
+                {/* Payment success banner */}
+                {paymentSuccess && (
+                  <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-2 text-green-800 text-sm font-semibold">
+                    <Check className="w-4 h-4 text-green-600" />
+                    Zahlung erfolgreich! Lade jetzt deine Datei herunter.
+                    <button
+                      onClick={handleDigitalDownload}
+                      className="ml-auto flex items-center gap-1 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Herunterladen
+                    </button>
+                  </div>
+                )}
+
+                {paymentError && (
+                  <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
+                    {paymentError}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => setShowPayModal(true)}
+                  disabled={paymentLoading}
+                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
+                >
+                  {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+                  Digitale Datei kaufen . CHF {totalPrice}
+                </button>
+
+                <div className="flex items-center justify-between mt-3">
+                  <button
+                    onClick={() => handleDownload(false)}
+                    className="text-xs text-gray-400 hover:text-gray-600 underline"
+                  >
+                    Vorschau herunterladen (mit Wasserzeichen)
+                  </button>
+                  {isAdminMode && (
+                    <button
+                      onClick={handleDigitalDownload}
+                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
+                    >
+                      Admin: Direkt herunterladen
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* ===== PRINT MODE ===== */}
+            {orderMode === 'print' && (
+              <>
+                {/* Format selection */}
+                <div className="mb-5">
+                  <p className="text-sm font-bold text-gray-700 mb-3">Druckformat waehlen</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                    {PRINT_FORMATS.map(({ label, price }, idx) => (
+                      <button
+                        key={label}
+                        onClick={() => setSelectedFormat(idx)}
+                        className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
+                          selectedFormat === idx
+                            ? "border-coral-500 bg-coral-50"
+                            : "border-gray-100 hover:border-coral-200"
+                        }`}
+                      >
+                        {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
+                        <div className="text-xs font-bold text-gray-900">{label}</div>
+                        <div className="text-xs text-coral-700 font-semibold">CHF {price}</div>
+                        {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Material selection */}
+                <div className="mb-6">
+                  <p className="text-sm font-bold text-gray-700 mb-3">Material waehlen</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {MATERIALS.map(({ label, surcharge, icon }, idx) => (
+                      <button
+                        key={label}
+                        onClick={() => setSelectedMaterial(idx)}
+                        className={`p-3 rounded-xl border-2 text-left transition-all ${
+                          selectedMaterial === idx
+                            ? "border-coral-500 bg-coral-50"
+                            : "border-gray-100 hover:border-coral-200"
+                        }`}
+                      >
+                        <div className="text-xl mb-1">{icon}</div>
+                        <div className="text-xs font-bold text-gray-900">{label}</div>
+                        <div className="text-xs text-gray-500">
+                          {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `-CHF ${Math.abs(surcharge)}` : "Inklusive"}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Order summary */}
+                <div className="bg-coral-50 rounded-xl p-4 mb-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} . {MATERIALS[selectedMaterial].label}</p>
+                      <p className="text-sm text-gray-500">inkl. MwSt., Druck & Lieferung CH</p>
+                    </div>
+                    <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
+                  </div>
+                </div>
+
+                {/* Printolino-Info-Box */}
+                {(() => {
+                  const fmt = PRINT_FORMATS[selectedFormat];
+                  const cols = mosaicParamsRef.current?.cols ?? 60;
+                  const rows = mosaicParamsRef.current?.rows ?? 80;
+                  const PX_PER_CM = 300 / 2.54;
+                  const tileSizeCm = fmt.widthCm / cols;
+                  const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
+                  const printTilePx = Math.min(600, Math.max(200, naturalTilePx2));
+                  const outW = cols * printTilePx;
+                  const outH = rows * printTilePx;
+                  const posterW = (cols * tileSizeCm).toFixed(0);
+                  const posterH = (rows * tileSizeCm).toFixed(0);
+                  return (
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 text-xs text-blue-800">
+                      <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                        <span className="text-blue-600">Poster-Groesse:</span>
+                        <span className="font-semibold">{posterW} × {posterH} cm</span>
+                        <span className="text-blue-600">Kachel-Groesse:</span>
+                        <span className="font-semibold">{tileSizeCm.toFixed(1)} cm × {tileSizeCm.toFixed(1)} cm</span>
+                        <span className="text-blue-600">Kachel-Pixel:</span>
+                        <span className="font-semibold">{printTilePx} px ({fmt.dpi} dpi)</span>
+                        <span className="text-blue-600">Ausgabe-Pixel:</span>
+                        <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
+                        <span className="text-blue-600">Anzahl Kacheln:</span>
+                        <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
+                      </div>
+                      <p className="mt-1.5 text-blue-600">Optimiert fuer Printolino {fmt.label} Druck.</p>
+                    </div>
+                  );
+                })()}
+
+                {/* Payment success banner */}
+                {paymentSuccess && (
+                  <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-2 text-green-800 text-sm font-semibold">
+                    <Check className="w-4 h-4 text-green-600" />
+                    Zahlung erfolgreich! Lade jetzt deine druckbereite Datei herunter.
+                    <button
+                      onClick={() => handleDownload(true)}
+                      className="ml-auto flex items-center gap-1 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Herunterladen
+                    </button>
+                  </div>
+                )}
+
+                {paymentError && (
+                  <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
+                    {paymentError}
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={() => setShowPayModal(true)}
+                    disabled={paymentLoading}
+                    className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
+                  >
+                    {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+                    Druckbereite Datei kaufen . CHF {totalPrice}
+                  </button>
+                  <a
+                    href={`https://www.printolino.ch?ref=mosaicprint&format=${encodeURIComponent(PRINT_FORMATS[selectedFormat].label)}&material=${encodeURIComponent(MATERIALS[selectedMaterial].label)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all"
+                  >
+                    <Printer className="w-4 h-4" />
+                    Bei Printolino bestellen
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                </div>
+                <div className="flex items-center justify-between mt-3">
+                  <button
+                    onClick={() => handleDownload(false)}
+                    className="text-xs text-gray-400 hover:text-gray-600 underline"
+                  >
+                    Vorschau herunterladen (mit Wasserzeichen)
+                  </button>
+                  {isAdminMode && (
+                    <button
+                      onClick={() => handleDownload(true)}
+                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
+                    >
+                      Admin: Direkt herunterladen
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
 
