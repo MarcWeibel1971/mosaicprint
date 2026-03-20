@@ -187,22 +187,25 @@ async function drainIDBWriteQueue() {
 export async function loadImageCached(
   url: string,
   timeoutMs = 10000,
+  opts?: { skipIDB?: boolean },
 ): Promise<HTMLImageElement | null> {
   // Layer 1: memory
   const mem = getMemoryCached(url);
   if (mem) return mem;
 
-  // Layer 2: IndexedDB
-  const blob = await getFromIDB(url);
-  if (blob) {
-    const objectUrl = URL.createObjectURL(blob);
-    const img = await loadImageFromSrc(objectUrl, timeoutMs);
-    URL.revokeObjectURL(objectUrl);
-    if (img) {
-      // Re-tag with original URL for reference
-      img.dataset.originalSrc = url;
-      setMemoryCached(url, img);
-      return img;
+  // Layer 2: IndexedDB (skip during bulk mobile loading to avoid IDB transaction pressure)
+  if (!opts?.skipIDB) {
+    const blob = await getFromIDB(url);
+    if (blob) {
+      const objectUrl = URL.createObjectURL(blob);
+      const img = await loadImageFromSrc(objectUrl, timeoutMs);
+      URL.revokeObjectURL(objectUrl);
+      if (img) {
+        // Re-tag with original URL for reference
+        img.dataset.originalSrc = url;
+        setMemoryCached(url, img);
+        return img;
+      }
     }
   }
 
