@@ -4558,128 +4558,8 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
             {pdfGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
             {pdfGenerating ? 'Generiere...' : 'PDF-Report'}
           </button>
-          <button onClick={fetchRuns} className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl text-sm transition-colors">
-            <RefreshCw className="w-4 h-4" />
-            Aktualisieren
-          </button>
-          <button onClick={runAll} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-2 rounded-xl text-sm transition-colors">
-            <Zap className="w-4 h-4" />
-            Alle Checks starten
-          </button>
         </div>
       </div>
-
-      {/* Check Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {QA_CHECKS.map(check => {
-          const lastRun = lastRunByType[check.id]
-          const isRunning = runningChecks.has(check.id) || lastRun?.status === 'running'
-          const isDone = lastRun && !isRunning
-          const isSuccess = isDone && lastRun.status === 'success'
-          const isWarning = isDone && lastRun.status === 'warning'
-          const isError = isDone && lastRun.status === 'error'
-          const dur = lastRun?.finishedAt
-            ? Math.round((new Date(lastRun.finishedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000)
-            : null
-          const cardBorder = isRunning ? 'border-blue-300 shadow-blue-100 shadow-md'
-            : isSuccess ? 'border-green-300'
-            : isWarning ? 'border-amber-300'
-            : isError ? 'border-red-300'
-            : 'border-gray-200'
-          return (
-            <div key={check.id} className={`bg-white rounded-2xl p-5 border-2 flex flex-col gap-3 transition-all ${cardBorder}`}>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">{check.icon}</span>
-                  <div>
-                    <h3 className="font-bold text-gray-900 text-sm">{check.label}</h3>
-                    {isRunning && (
-                      <span className="text-xs font-medium px-2 py-0.5 rounded-full text-blue-700 bg-blue-50 flex items-center gap-1">
-                        <RefreshCw className="w-3 h-3 animate-spin" /> Läuft...
-                      </span>
-                    )}
-                    {isDone && (
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColor(lastRun.status)}`}>
-                        {statusEmoji(lastRun.status)} {isSuccess ? 'Fertig' : isWarning ? 'Warnung' : 'Fehler'}
-                        {dur !== null && ` · ${dur}s`}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <button
-                  onClick={() => runCheck(check.id)}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-medium px-3 py-1.5 rounded-lg text-xs transition-colors"
-                >
-                  {isRunning ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-                  {isRunning ? 'Läuft...' : 'Starten'}
-                </button>
-              </div>
-              <p className="text-xs text-gray-500">{check.desc}</p>
-              {/* Fertig-Banner */}
-              {isSuccess && (
-                <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 font-medium">
-                  ✅ Abgeschlossen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {isWarning && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 font-medium">
-                  ⚠️ Mit Warnungen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {isError && (
-                <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 font-medium">
-                  ❌ Fehler · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {lastRun?.summary && (
-                <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 font-mono border-t border-gray-100">
-                  {Object.entries(lastRun.summary).slice(0, 4).map(([k, v]) => (
-                    <div key={k}>{k}: <span className="font-semibold">{String(v)}</span></div>
-                  ))}
-                </div>
-              )}
-              {lastRun && (
-                <button
-                  onClick={() => setSelectedRun(selectedRun === lastRun.id ? null : lastRun.id)}
-                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium text-left"
-                >
-                  {selectedRun === lastRun.id ? '▲ Details ausblenden' : '▼ Details anzeigen'}
-                </button>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Run Items Detail */}
-      {selectedRun !== null && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-bold text-gray-900">Check-Details (Run #{selectedRun})</h3>
-            <button onClick={() => setSelectedRun(null)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
-          </div>
-          {loadingItems ? (
-            <div className="text-center py-8 text-gray-400"><RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />Lade...</div>
-          ) : runItems.length === 0 ? (
-            <div className="text-center py-8 text-gray-400">Keine Einträge gefunden</div>
-          ) : (
-            <div className="space-y-2 max-h-96 overflow-y-auto">
-              {runItems.map(item => (
-                <div key={item.id} className={`flex items-start gap-3 p-3 rounded-xl border text-sm ${itemStatusColor(item.status)}`}>
-                  <span className="font-bold shrink-0 w-12 text-center">
-                    {item.status === 'pass' ? '✅' : item.status === 'warn' ? '⚠️' : '❌'}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium truncate">{item.entityType}/{item.entityId}</div>
-                    <div className="text-xs mt-0.5 opacity-80">{item.message}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Letztes Mosaik – Qualitätsanalyse */}
       <LastMosaicQualityPanel />
@@ -5046,53 +4926,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
-      {/* Run History */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-        <h3 className="font-bold text-gray-900 mb-4">Run-Verlauf (letzte 50)</h3>
-        {runs.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">Noch keine Checks ausgeführt. Starte einen Check oben.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
-                  <th className="pb-2 pr-4">ID</th>
-                  <th className="pb-2 pr-4">Check-Typ</th>
-                  <th className="pb-2 pr-4">Status</th>
-                  <th className="pb-2 pr-4">Gestartet</th>
-                  <th className="pb-2 pr-4">Dauer</th>
-                  <th className="pb-2">Aktionen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map(run => (
-                  <tr key={run.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="py-2 pr-4 text-gray-400 font-mono">#{run.id}</td>
-                    <td className="py-2 pr-4 font-medium">{run.checkType}</td>
-                    <td className="py-2 pr-4">
-                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor(run.status)}`}>
-                        {statusEmoji(run.status)} {run.status}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(run.startedAt).toLocaleString('de-CH')}</td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">
-                      {run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'}
-                    </td>
-                    <td className="py-2">
-                      <button
-                        onClick={() => { setSelectedRun(run.id); fetchItems(run.id) }}
-                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                      >
-                        Details
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
       {/* ── Auto-Learn Cycle ─────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-4">
@@ -5263,7 +5096,6 @@ interface CleanupCandidates {
   themeDistribution: Array<{ theme: string; count: number; pct: number }>
   stage1: { rejected: number; urlDuplicates: number; pixabayHotlink: number; total: number }
   stage2: { grayBusy: number; nearWhite: number; lowScore: number; total: number }
-  stage3: { oversaturatedSkin: number; portraitBusy: number; total: number }
 }
 
 function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
@@ -5365,8 +5197,6 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     if (cat === 'grayBusy') return candidates.stage2.grayBusy
     if (cat === 'nearWhite') return candidates.stage2.nearWhite
     if (cat === 'lowScore') return candidates.stage2.lowScore
-    if (cat === 'oversaturatedSkin') return candidates.stage3.oversaturatedSkin
-    if (cat === 'portraitBusy') return candidates.stage3.portraitBusy
     return 0
   }
 
@@ -5382,14 +5212,14 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
           <div>
             <h3 className="font-bold text-gray-900">Bereinigungsassistent</h3>
             <p className="text-xs text-gray-500">
-              Ungeeignete Tiles gezielt identifizieren und löschen – 3-stufiger Workflow mit Vorschau
+              Ungeeignete Tiles gezielt identifizieren und löschen – 2-stufiger Workflow mit Vorschau
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {candidates && (
             <span className="text-xs font-semibold bg-red-100 text-red-700 px-2 py-1 rounded-full">
-              {candidates.stage1.total + candidates.stage2.total + candidates.stage3.total} Kandidaten
+              {candidates.stage1.total + candidates.stage2.total} Kandidaten
             </span>
           )}
           <span className="text-gray-400 text-sm">{expanded ? '▲ Einklappen' : '▼ Ausklappen'}</span>
@@ -5410,8 +5240,8 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
             </button>
             {candidates && (
               <span className="text-sm text-gray-600">
-                Gesamt: <strong>{candidates.stage1.total + candidates.stage2.total + candidates.stage3.total}</strong> Tiles
-                ({candidates.stage1.total} auto · {candidates.stage2.total} bulk · {candidates.stage3.total} manuell)
+                Gesamt: <strong>{candidates.stage1.total + candidates.stage2.total}</strong> Tiles
+                ({candidates.stage1.total} auto · {candidates.stage2.total} bulk)
               </span>
             )}
           </div>
