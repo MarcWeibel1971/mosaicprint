@@ -3418,7 +3418,7 @@ export const appRouter = router({
       let whereClause = '';
       switch (input.category) {
         case 'rejected':
-          whereClause = `quality_status = 'rejected'`;
+          whereClause = `quality_status = 'rejected' OR ai_suitability = 'reject'`;
           break;
         case 'urlDuplicates':
           whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
@@ -3437,7 +3437,6 @@ export const appRouter = router({
           whereClause = `semantic_theme LIKE 'portrait%' AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected'`;
           break;
         case 'portraitBusy':
-          // Portrait-Tiles die strukturell unruhig UND qualitativ schwach sind
           whereClause = `semantic_theme LIKE 'portrait%' AND tile_type = 'busy' AND quality_score < 55 AND quality_status != 'rejected'`;
           break;
         case 'pixabayHotlink':
@@ -3490,7 +3489,7 @@ export const appRouter = router({
       let whereClause = '';
       switch (input.category) {
         case 'rejected':
-          whereClause = `quality_status = 'rejected'`;
+          whereClause = `quality_status = 'rejected' OR ai_suitability = 'reject'`;
           break;
         case 'urlDuplicates':
           whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
