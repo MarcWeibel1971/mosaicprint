@@ -1000,6 +1000,7 @@ async function computeLabFull(url: string): Promise<{
   edgeDensity: number; // 0-1 echter Sobel-basierter Kantenwert
   blurScore: number;   // Laplacian Variance (< 100 = unscharf)
   pHash: string | null; // 16-char hex perceptual hash
+  mosaicScore: number; // 0-1 Gesamteignung als Mosaic-Tile (Schärfe + Farbvielfalt + Kantendichte)
 } | null> {
   try {
     const { Jimp } = await import("jimp");
@@ -1155,6 +1156,13 @@ async function computeLabFull(url: string): Promise<{
     let pHash = '';
     for (let i = 0; i < 64; i += 4) pHash += parseInt(hashBits.slice(i, i+4), 2).toString(16);
 
+    // Mosaic-Score: Gesamteignung als Tile (0-1)
+    // Faktoren: Schärfe (40%), Farbvielfalt/Chroma (30%), Kantendichte (30%)
+    const sharpnessScore = Math.min(1, blurScore / 300); // 300+ = sehr scharf
+    const chromaScore = Math.min(1, Math.sqrt(global.a * global.a + global.b * global.b) / 40); // Chroma 0-40+
+    const edgeScore = Math.min(1, edgeDensity / 0.3); // 0.3+ = gut strukturiert
+    const mosaicScore = 0.4 * sharpnessScore + 0.3 * chromaScore + 0.3 * edgeScore;
+
     return {
       L: global.L, a: global.a, b: global.b,
       tlL: tl.L, tlA: tl.a, tlB: tl.b,
@@ -1165,6 +1173,7 @@ async function computeLabFull(url: string): Promise<{
       edgeDensity, // echter Sobel-basierter Kantenwert (0-1)
       blurScore,   // Laplacian Variance (< 100 = unscharf)
       pHash,       // 16-char hex perceptual hash
+      mosaicScore, // 0-1 Gesamteignung als Mosaic-Tile
     };
   } catch {
     return null;
@@ -1740,8 +1749,14 @@ export const appRouter = router({
           const CONCURRENCY = input.sourceId === "unsplash" ? 20 : 5; // Unsplash Production: 5000 req/h → 20 parallel für maximalen Durchsatz
           const perPage = input.sourceId === "pexels" ? 30 : input.sourceId === "pixabay" ? 200 : 30; // Unsplash max=30 per request
 
+          // BUG FIX: count ist Gesamt-Limit, aber pro Keyword soll ein fairer Anteil importiert werden.
+          // Ohne diesen Fix importiert das erste Keyword alle Bilder und die restlichen werden übersprungen.
+          const countPerKeyword = tasks.length > 0 ? Math.ceil(input.count / tasks.length) : input.count;
+          const keywordImported: Record<string, number> = {};
+
           for (const task of tasks) {
             if (imported >= input.count) break;
+            const maxForThisKeyword = Math.min(countPerKeyword, input.count - imported);
             try {
               let photos: Array<{ sourceUrl: string; tile128Url: string }> = [];
               if (input.sourceId === "pexels") {
@@ -1836,12 +1851,17 @@ export const appRouter = router({
               }
 
               // Process in parallel batches for speed
+              // BUG FIX: limit photos to maxForThisKeyword to ensure all keywords get processed
+              const photosToProcess = photos.slice(0, maxForThisKeyword * 3); // 3x buffer to account for rejections
               let batchImported = 0;
               let batchRejected = 0;
               const smartApiKey = process.env.UNSPLASH_ACCESS_KEY;
-              for (let i = 0; i < photos.length; i += CONCURRENCY) {
-                const batch = photos.slice(i, i + CONCURRENCY);
+              for (let i = 0; i < photosToProcess.length; i += CONCURRENCY) {
+                // Stop if we've hit the per-keyword limit
+                if (batchImported >= maxForThisKeyword) break;
+                const batch = photosToProcess.slice(i, i + CONCURRENCY);
                 await Promise.all(batch.map(async (photo) => {
+                  if (batchImported >= maxForThisKeyword) return; // per-keyword limit reached
                   try {
                     // ── Post-Import Quality Check ──
                     const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl, task.subject);
@@ -1850,9 +1870,11 @@ export const appRouter = router({
                       return; // discard – too vivid / noisy / watermarked
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    // Upload to R2 for permanent storage (avoids expiring CDN URLs)
                     // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
                     if (lab && lab.blurScore < 80) { batchRejected++; return; }
+                    // Mosaic-Score-Filter: nur Tiles mit mosaicScore >= 0.3 importieren
+                    // (verhindert zu einfarbige oder zu chaotische Tiles)
+                    if (lab && typeof lab.mosaicScore === 'number' && lab.mosaicScore < 0.3) { batchRejected++; return; }
                     // R2 upload is handled automatically by insertMosaicImage (fire-and-forget)
                     const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
@@ -1867,6 +1889,7 @@ export const appRouter = router({
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
                       pHash: lab?.pHash,
+                      mosaicScore: lab?.mosaicScore,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
                     if (result.inserted && (photo as any).downloadLocation && smartApiKey) {
@@ -1876,8 +1899,11 @@ export const appRouter = router({
                   } catch { /* skip duplicates / errors */ }
                 }));
               }
+              keywordImported[task.query] = batchImported;
               if (batchImported > 0 || batchRejected > 0) {
                 log(`✓ [${task.label}] "${task.query}": +${batchImported} importiert, ${batchRejected} abgelehnt (deficit: ${task.deficit})`);
+              } else {
+                log(`⚠️ "${task.query}": 0 importiert (${photos.length} Fotos gefunden, alle abgelehnt oder Duplikate)`);
               }
             } catch (e) { log(`✗ "${task.query}" error: ${e}`); }
           }
@@ -2979,7 +3005,9 @@ export const appRouter = router({
             return Math.sqrt(dL*dL + dA*dA + dB*dB) < labGapThreshold;
           });
           const needed = Math.max(50, zone.count * 10);
-          const available = nearby.reduce((s: number, p: {count: number}) => s + p.count, 0);
+          // Qualitätsgewichtete Verfügbarkeit: exzellente Tiles zählen mehr
+          const available = nearby.reduce((s: number, p: {count: number; qualityCount?: number}) =>
+            s + (p.qualityCount ?? p.count), 0);
           if (available < needed) {
             const deficit = needed - available;
             // Describe the zone
@@ -3029,7 +3057,7 @@ export const appRouter = router({
             keywordSuggestions.push({ keyword: fkw.keyword, reason: fkw.reason, priority: 'medium' });
             seenFaceKw.add(fkw.keyword);
           }
-          if (keywordSuggestions.length >= 6) break;
+          if (keywordSuggestions.length >= 8) break;
         }
       }
 
@@ -3045,7 +3073,7 @@ export const appRouter = router({
         imageError: imageError,
         dominantZones: imageLABZones.slice(0, 10),
         gapZones: gapZones.slice(0, 10),
-        keywordSuggestions: uniqueKeywords.slice(0, isPortrait ? 6 : 12),
+        keywordSuggestions: uniqueKeywords.slice(0, isPortrait ? 8 : 10),
         poolSize: poolStats.reduce((s: number, p: {count: number}) => s + p.count, 0),
       };
     }),

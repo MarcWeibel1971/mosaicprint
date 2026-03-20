@@ -493,6 +493,7 @@ export async function insertMosaicImage(data: {
   edgeEnergy?: number;     // 0.0-1.0 Sobel-basierter Kantenwert aus computeLabFull
   pHash?: string | null;    // 16-char hex perceptual hash for duplicate detection
   blurScore?: number | null; // Laplacian Variance (< 100 = blurry)
+  mosaicScore?: number | null; // 0-1 Gesamteignung als Mosaic-Tile
   photographerName?: string;   // Unsplash: user.name (for attribution)
   photographerUrl?: string;    // Unsplash: user.links.html (for attribution link)
   downloadLocation?: string;   // Unsplash: links.download_location (for download tracking)
@@ -527,8 +528,8 @@ export async function insertMosaicImage(data: {
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
         subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy,
-        photographer_name, photographer_url, download_location, phash)
-     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28,$29)
+        photographer_name, photographer_url, download_location, phash, ai_mosaic_score)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28,$29,$30)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -544,6 +545,7 @@ export async function insertMosaicImage(data: {
       data.photographerUrl ?? null,  // $27
       data.downloadLocation ?? null, // $28
       data.pHash ?? null,            // $29
+      data.mosaicScore != null ? Math.round(data.mosaicScore * 100) : null, // $30 ai_mosaic_score (0-100)
     ]
   );
   const insertedId: number | null = res.rows[0]?.id ?? null;
@@ -684,23 +686,35 @@ export async function markMosaicOrderPaid(stripeSessionId: string, exportUrl?: s
 export async function getPoolLABStats(): Promise<Array<{avgL: number; avgA: number; avgB: number; count: number}>> {
   const pool = getPool();
   // Quantize LAB values to 8-unit grid and count tiles per zone
+  // Mosaic-Score-gewichtet: Tiles mit ai_mosaic_score < 50 zählen nur halb
+  // Nur qualitativ hochwertige Tiles (blur_score IS NULL OR blur_score > 80)
   const res = await pool.query(`
     SELECT
       ROUND(avg_l / 8) * 8 AS "avgL",
       ROUND(avg_a / 8) * 8 AS "avgA",
       ROUND(avg_b / 8) * 8 AS "avgB",
-      COUNT(*) AS count
+      COUNT(*) AS count,
+      -- Qualitätsgewichtete Zählung: exzellente Tiles (score>=70) zählen 1.5x, schlechte 0.5x
+      SUM(CASE
+        WHEN ai_mosaic_score IS NULL THEN 1.0
+        WHEN ai_mosaic_score >= 70 THEN 1.5
+        WHEN ai_mosaic_score >= 50 THEN 1.0
+        ELSE 0.5
+      END) AS "qualityCount"
     FROM mosaic_images
-    WHERE avg_l IS NOT NULL AND NOT (avg_l = 50 AND avg_a = 0 AND avg_b = 0)
+    WHERE avg_l IS NOT NULL
+      AND NOT (avg_l = 50 AND avg_a = 0 AND avg_b = 0)
+      AND (blur_score IS NULL OR blur_score > 60)
     GROUP BY 1, 2, 3
     ORDER BY count DESC
     LIMIT 500
   `);
-  return res.rows.map((r: {avgL: string; avgA: string; avgB: string; count: string}) => ({
+  return res.rows.map((r: {avgL: string; avgA: string; avgB: string; count: string; qualityCount: string}) => ({
     avgL: Number(r.avgL),
     avgA: Number(r.avgA),
     avgB: Number(r.avgB),
     count: Number(r.count),
+    qualityCount: Math.round(Number(r.qualityCount)),
   }));
 }
 

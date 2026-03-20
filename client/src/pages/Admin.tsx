@@ -1435,8 +1435,8 @@ export default function Admin() {
               </div>
             )}
 
-            {/* Gezielte Importe (Empfehlungen) */}
-            <div className="bg-white rounded-2xl p-6 border border-amber-200">
+            {/* Gezielte Importe (Empfehlungen) – ENTFERNT: zu viele Optionen, Keyword-Generator ist die bessere Alternative */}
+            {false && <div className="bg-white rounded-2xl p-6 border border-amber-200">
               <div className="flex items-start justify-between mb-1">
                 <h2 className="font-bold text-gray-900 flex items-center gap-2">
                   <Zap className="w-5 h-5 text-amber-500" />
@@ -1575,7 +1575,7 @@ export default function Admin() {
                       : `⚡ ${selectedRecs.size} Empfehlungen (alle Quellen)`}
                 </button>
               </div>
-            </div>
+            </div>}
 
             {/* ── Unified Import Section ── */}
             <div className="bg-white rounded-2xl p-6 border border-indigo-200">
@@ -1615,8 +1615,8 @@ export default function Admin() {
                 )
               })}
 
-              {/* Kategorie-Auswahl für gezielten Import */}
-              <div className="mb-4 p-4 bg-amber-50 rounded-xl border border-amber-200">
+              {/* Kategorie-Auswahl für gezielten Import – ENTFERNT: Keyword-Generator ist die bessere Alternative */}
+              {false && <div className="mb-4 p-4 bg-amber-50 rounded-xl border border-amber-200">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-semibold text-amber-900">🎯 Manueller Kategorie-Import</span>
                   <span className="text-xs text-amber-600">Für spezifische Kategorien – oder nutze den Bild-optimierten Import oben für automatische Empfehlungen</span>
@@ -1658,7 +1658,7 @@ export default function Admin() {
                 {importCategory && (
                   <p className="mt-1 text-xs text-amber-700">✅ Import wird mit Kategorie-Keywords für <strong>{importCategory}</strong> priorisiert</p>
                 )}
-              </div>
+              </div>}
 
               {/* ── Freie Keyword-Eingabe ── */}
               <div className="mb-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
