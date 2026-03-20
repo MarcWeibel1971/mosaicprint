@@ -3,7 +3,8 @@ import { loadStripe } from "@stripe/stripe-js";
 import { Link } from "react-router-dom";
 import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
-  Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check
+  Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check,
+  ImagePlus, Images, Sparkles
 } from "lucide-react";
 import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
 import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
@@ -168,6 +169,15 @@ export default function Studio() {
   const [comparePos, setComparePos] = useState(50);
   const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
+
+  // Tile source mode: 'pool' = our DB only (default), 'own' = user photos only, 'mix' = user + DB
+  const [tileSourceMode, setTileSourceMode] = useState<'pool' | 'own' | 'mix'>('pool');
+  const [userTileFiles, setUserTileFiles] = useState<File[]>([]);
+  const [userTileImages, setUserTileImages] = useState<HTMLImageElement[]>([]);
+  const userTileImagesRef = useRef<HTMLImageElement[]>([]);
+  const tileSourceModeRef = useRef<'pool' | 'own' | 'mix'>('pool');
+  const tileUploadRef = useRef<HTMLInputElement>(null);
+  const MIN_OWN_TILES = 20; // minimum tiles for 'own' mode
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
   const [cacheSize, setCacheSize] = useState(0);
@@ -906,6 +916,56 @@ export default function Studio() {
     reader.readAsDataURL(file);
   }, []);
 
+  // Handle user tile photo uploads (multiple files)
+  const handleTileUpload = useCallback((files: FileList | File[]) => {
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    setUserTileFiles(prev => [...prev, ...imageFiles]);
+    // Load all images to 64px thumbnails for the mosaic pipeline
+    const loadPromises = imageFiles.map(file => new Promise<HTMLImageElement | null>(resolve => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          // Resize to 64x64 for tile matching (same as DB tiles)
+          const canvas = document.createElement('canvas');
+          canvas.width = 64; canvas.height = 64;
+          const ctx = canvas.getContext('2d')!;
+          // Center-crop to square
+          const s = Math.min(img.naturalWidth, img.naturalHeight);
+          const sx = (img.naturalWidth - s) / 2;
+          const sy = (img.naturalHeight - s) / 2;
+          ctx.drawImage(img, sx, sy, s, s, 0, 0, 64, 64);
+          const tileImg = new Image();
+          tileImg.onload = () => resolve(tileImg);
+          tileImg.onerror = () => resolve(null);
+          tileImg.src = canvas.toDataURL('image/jpeg', 0.85);
+        };
+        img.onerror = () => resolve(null);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    }));
+    Promise.all(loadPromises).then(imgs => {
+      const valid = imgs.filter(Boolean) as HTMLImageElement[];
+      setUserTileImages(prev => {
+        const next = [...prev, ...valid];
+        userTileImagesRef.current = next;
+        return next;
+      });
+    });
+  }, []);
+
+  const removeUserTile = useCallback((index: number) => {
+    setUserTileFiles(prev => prev.filter((_, i) => i !== index));
+    setUserTileImages(prev => {
+      const next = prev.filter((_, i) => i !== index);
+      userTileImagesRef.current = next;
+      return next;
+    });
+  }, []);
+
   // Auto-render when photo is loaded
   useEffect(() => {
     if (!userPhotoImg) return;
@@ -1161,7 +1221,9 @@ export default function Studio() {
     const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity), 17 (17D with mosaicScore)
     const IS_16D = FPT >= 16; // includes tileComplexity
     const IS_17D = FPT >= 17; // includes mosaicScore (AI quality tiebreaker)
-    const USE_2STAGE = labIndex !== null && labIndex.length >= (FPT);
+    const currentTileSourceMode = tileSourceModeRef.current;
+    const skipDbTiles = currentTileSourceMode === 'own' && userTileImagesRef.current.length >= MIN_OWN_TILES;
+    const USE_2STAGE = !skipDbTiles && labIndex !== null && labIndex.length >= (FPT);
     const TOTAL_DB_TILES = USE_2STAGE ? Math.floor(labIndex!.length / FPT) : 0;
     const IS_7D = FPT >= 7;
     const IS_14D = FPT >= 14;
@@ -1681,6 +1743,33 @@ export default function Studio() {
       // 2-stage: build flat arrays from tileImgMap (for feature extraction + rendering)
       validImgs = Array.from(tileImgMap.values());
       validTileIds = Array.from(tileImgMap.keys());
+    }
+
+    // -- Tile Source Mode: merge user-uploaded tiles into the pool ----------------
+    const currentTileMode = tileSourceModeRef.current;
+    const currentUserTiles = userTileImagesRef.current;
+
+    if (currentTileMode === 'own' && currentUserTiles.length > 0) {
+      // Only user tiles – replace entire pool
+      validImgs = [...currentUserTiles];
+      validTileIds = currentUserTiles.map((_, i) => -(i + 1)); // negative IDs for user tiles
+      // Duplicate tiles to fill pool if too few (repeat to reach ~200 minimum for variety)
+      while (validImgs.length < 200 && currentUserTiles.length > 0) {
+        validImgs.push(...currentUserTiles);
+        validTileIds.push(...currentUserTiles.map((_, i) => -(i + 1)));
+      }
+      console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length})`);
+    } else if (currentTileMode === 'mix' && currentUserTiles.length > 0) {
+      // Mix: user tiles + DB pool – prepend user tiles (they get priority in matching)
+      const userExpanded = [...currentUserTiles];
+      // Add user tiles 3x to boost their presence in the mix
+      for (let rep = 0; rep < 2; rep++) userExpanded.push(...currentUserTiles);
+      const userIds = userExpanded.map((_, i) => -(i + 1));
+      validImgs = [...userExpanded, ...validImgs];
+      validTileIds = [...userIds, ...validTileIds];
+      console.log(`[Studio] Tile source: MIX – ${currentUserTiles.length} user tiles (3x boosted) + ${validImgs.length - userExpanded.length} DB tiles`);
+    } else {
+      console.log(`[Studio] Tile source: POOL ONLY – ${validImgs.length} DB tiles`);
     }
 
     // Step 3: Extract features
@@ -3269,10 +3358,116 @@ export default function Studio() {
             )}
           </div>
         )}
+        {/* Tile source mode selector */}
+        {!userPhoto && !loading && (
+          <div className="max-w-xl mx-auto mb-6">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Quelle waehlen</p>
+            <div className="grid grid-cols-3 gap-3">
+              {([
+                { key: 'pool' as const, icon: Sparkles, label: 'KI-Bilderpool', desc: 'Schnelles Ergebnis aus 10\'000+ Fotos' },
+                { key: 'mix' as const, icon: Images, label: 'Mix', desc: 'Deine Fotos + unser Pool zur Ergaenzung' },
+                { key: 'own' as const, icon: ImagePlus, label: 'Eigene Fotos', desc: `Min. ${MIN_OWN_TILES} eigene Fotos hochladen` },
+              ]).map(({ key, icon: Icon, label, desc }) => (
+                <button
+                  key={key}
+                  onClick={() => { setTileSourceMode(key); tileSourceModeRef.current = key; }}
+                  className={`flex flex-col items-center gap-1.5 p-4 rounded-2xl border-2 transition-all text-center ${
+                    tileSourceMode === key
+                      ? 'border-coral-500 bg-coral-50 shadow-sm'
+                      : 'border-gray-200 bg-white hover:border-coral-300'
+                  }`}
+                >
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                    tileSourceMode === key ? 'bg-coral-500 text-white' : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <span className={`text-sm font-bold ${tileSourceMode === key ? 'text-coral-700' : 'text-gray-700'}`}>{label}</span>
+                  <span className="text-[11px] text-gray-400 leading-tight">{desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* User tile upload area (shown for 'own' and 'mix' modes) */}
+        {!userPhoto && !loading && (tileSourceMode === 'own' || tileSourceMode === 'mix') && (
+          <div className="max-w-xl mx-auto mb-6">
+            <div
+              className="border-2 border-dashed border-teal-200 rounded-2xl p-6 text-center cursor-pointer hover:border-teal-400 hover:bg-teal-50 transition-all"
+              onClick={() => tileUploadRef.current?.click()}
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => { e.preventDefault(); if (e.dataTransfer.files) handleTileUpload(e.dataTransfer.files); }}
+            >
+              <input ref={tileUploadRef} type="file" accept="image/*" multiple className="hidden"
+                onChange={e => { if (e.target.files) handleTileUpload(e.target.files); e.target.value = ''; }} />
+              <ImagePlus className="w-8 h-8 text-teal-500 mx-auto mb-2" />
+              <p className="text-sm font-bold text-gray-700">Kachel-Fotos hochladen</p>
+              <p className="text-xs text-gray-400 mt-1">Mehrere Bilder gleichzeitig waehlen oder per Drag & Drop</p>
+            </div>
+
+            {/* User tile preview grid */}
+            {userTileFiles.length > 0 && (
+              <div className="mt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className={`text-xs font-bold ${
+                    tileSourceMode === 'own' && userTileImages.length < MIN_OWN_TILES
+                      ? 'text-amber-600'
+                      : 'text-teal-600'
+                  }`}>
+                    {userTileImages.length} Kachel-Fotos geladen
+                    {tileSourceMode === 'own' && userTileImages.length < MIN_OWN_TILES &&
+                      ` (mind. ${MIN_OWN_TILES} noetig)`}
+                  </span>
+                  <button
+                    onClick={() => { setUserTileFiles([]); setUserTileImages([]); userTileImagesRef.current = []; }}
+                    className="text-xs text-red-400 hover:text-red-600 font-medium"
+                  >
+                    Alle entfernen
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {userTileFiles.slice(0, 50).map((f, i) => (
+                    <div key={i} className="relative group">
+                      <div className="w-12 h-12 rounded-lg overflow-hidden border border-gray-200">
+                        {userTileImages[i] ? (
+                          <img src={userTileImages[i].src} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gray-100 animate-pulse" />
+                        )}
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeUserTile(i); }}
+                        className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  {userTileFiles.length > 50 && (
+                    <div className="w-12 h-12 rounded-lg bg-gray-100 border border-gray-200 flex items-center justify-center">
+                      <span className="text-[10px] font-bold text-gray-400">+{userTileFiles.length - 50}</span>
+                    </div>
+                  )}
+                </div>
+                {tileSourceMode === 'own' && userTileImages.length < MIN_OWN_TILES && (
+                  <div className="mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                    <p className="text-xs text-amber-700">
+                      Noch <strong>{MIN_OWN_TILES - userTileImages.length}</strong> Fotos noetig. Je mehr Fotos, desto besser das Ergebnis!
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Upload area (when no photo) */}
         {!userPhoto && !loading && (
           <div
-            className="max-w-xl mx-auto border-2 border-dashed border-coral-200 rounded-3xl p-12 text-center cursor-pointer hover:border-coral-400 hover:bg-coral-50 transition-all group mb-8"
+            className={`max-w-xl mx-auto border-2 border-dashed border-coral-200 rounded-3xl p-12 text-center cursor-pointer hover:border-coral-400 hover:bg-coral-50 transition-all group mb-8 ${
+              tileSourceMode === 'own' && userTileImages.length < MIN_OWN_TILES ? 'opacity-50 pointer-events-none' : ''
+            }`}
             onClick={() => uploadRef.current?.click()}
             onDragOver={e => e.preventDefault()}
             onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) handleUpload(f); }}
@@ -3281,9 +3476,9 @@ export default function Studio() {
             <div className="w-16 h-16 rounded-2xl bg-coral-100 group-hover:bg-coral-200 flex items-center justify-center mx-auto mb-4 transition-colors">
               <Upload className="w-8 h-8 text-coral-600" />
             </div>
-            <p className="text-xl font-bold text-gray-800 mb-2">Foto hochladen</p>
-            <p className="text-gray-500 mb-1">JPG, PNG, HEIC . Drag & Drop oder klicken</p>
-            <p className="text-sm text-gray-400">Empfohlen: min. 1000x1000 px fuer beste Qualitaet</p>
+            <p className="text-xl font-bold text-gray-800 mb-2">Hauptfoto hochladen</p>
+            <p className="text-gray-500 mb-1">Das Foto, das als Mosaik dargestellt wird</p>
+            <p className="text-sm text-gray-400">JPG, PNG, HEIC . Drag & Drop oder klicken</p>
           </div>
         )}
 
