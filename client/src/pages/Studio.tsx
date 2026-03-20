@@ -1690,6 +1690,7 @@ export default function Studio() {
     const IMG_TIMEOUT = isMobileOrSlow ? 10000 : 15000;
 
     if (USE_2STAGE && neededTileIds.size > 0) {
+      try {
       // -- Strategy: Direct R2/CDN loading (preferred) or Atlas fallback --
       // If tile URL index is available (tiles.mosaicprint.ch CDN), load tiles directly
       // This bypasses Railway proxy, avoids 429 rate-limiting, and is much faster
@@ -1701,32 +1702,37 @@ export default function Studio() {
         // -- Direct R2/CDN loading strategy --
         // Load tiles in parallel batches directly from tiles.mosaicprint.ch
         // CDN has no rate limits and serves from edge nodes worldwide
-        const DIRECT_BATCH = isMobileOrSlow ? 15 : 100; // Smaller batches on mobile to reduce memory pressure
-        const DIRECT_TIMEOUT = isMobileOrSlow ? 15000 : 15000;
-        const BATCH_DELAY = isMobileOrSlow ? 200 : 50; // ms between batches (longer on mobile for GC)
+        const DIRECT_BATCH = isMobileOrSlow ? 10 : 100; // Small batches on mobile (memory pressure)
+        const DIRECT_TIMEOUT = isMobileOrSlow ? 12000 : 15000;
+        const BATCH_DELAY = isMobileOrSlow ? 300 : 50; // ms between batches (GC breathing room)
+        // On mobile first load, skip IDB reads (empty cache = 800 wasted IDB transactions)
+        const skipIDB = isMobileOrSlow;
         let loaded = 0;
         let r2Loaded = 0;
         let proxyFallback = 0;
         setProgressMsg(`Lade ${neededArray.length} Kacheln direkt von CDN...`);
         for (let i = 0; i < neededArray.length; i += DIRECT_BATCH) {
           const batchIds = neededArray.slice(i, i + DIRECT_BATCH);
-          const batchImgs = await Promise.all(
-            batchIds.map(async (id) => {
-              const directUrl = urlIndex[String(id)];
-              if (directUrl) {
-                // Try direct R2/CDN URL first
-                try {
-                  const img = await loadImageCached(directUrl, DIRECT_TIMEOUT);
-                  if (img) { r2Loaded++; return img; }
-                } catch { /* fall through to proxy */ }
-              }
-              // Fallback: Railway proxy (always works, just slower)
-              proxyFallback++;
-              return loadImageCached(`/api/tile/${id}?size=64`, DIRECT_TIMEOUT);
-            })
-          );
-          for (let j = 0; j < batchIds.length; j++) {
-            if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+          try {
+            const batchImgs = await Promise.all(
+              batchIds.map(async (id) => {
+                const directUrl = urlIndex[String(id)];
+                if (directUrl) {
+                  try {
+                    const img = await loadImageCached(directUrl, DIRECT_TIMEOUT, { skipIDB });
+                    if (img) { r2Loaded++; return img; }
+                  } catch { /* fall through to proxy */ }
+                }
+                proxyFallback++;
+                return loadImageCached(`/api/tile/${id}?size=64`, DIRECT_TIMEOUT, { skipIDB });
+              })
+            );
+            for (let j = 0; j < batchIds.length; j++) {
+              if (batchImgs[j]) tileImgMap.set(batchIds[j], batchImgs[j]!);
+            }
+          } catch (batchErr) {
+            console.warn(`[Studio] CDN batch ${i}-${i + DIRECT_BATCH} failed:`, batchErr);
+            // Continue with next batch instead of crashing entire render
           }
           loaded += batchIds.length;
           const pct = 25 + Math.round((loaded / neededArray.length) * 17);
@@ -1898,6 +1904,11 @@ export default function Studio() {
 
       setProgress(45);
       } // end else (Atlas fallback)
+      } catch (tileLoadErr) {
+        console.error('[Studio] Tile loading phase failed:', tileLoadErr);
+        // Continue with whatever tiles we managed to load
+        setProgress(45);
+      }
     }
 
     // -- Fallback: legacy pool if 2-stage not available ------------------------
