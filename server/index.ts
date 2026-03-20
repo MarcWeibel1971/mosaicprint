@@ -751,11 +751,41 @@ app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, 
     "recommendedProfile": "portrait|landscape|abstract|colorful|night_skyline",
     "reasoning": "one sentence why"
   },
+  "dynamicSettings": {
+    "baseTiles": 120,
+    "tilePx": 7,
+    "maxReuse": 8,
+    "rotation": false,
+    "neighborRadius": 6,
+    "neighborPenalty": 200,
+    "contrastBoost": 1.35,
+    "histogramBlend": 0.09,
+    "baseOverlay": 0.22,
+    "edgeBoost": 0.28,
+    "overlayMode": "softlight|none",
+    "labWeight": 0.15,
+    "brightnessWeight": 0.55,
+    "textureWeight": 0.10,
+    "edgeWeight": 0.20,
+    "saturationWeight": 0.35,
+    "portraitMode": true|false,
+    "reasoning": "one sentence explaining the parameter choices"
+  },
   "importKeywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
   "keywordSuggestions": [
     {"keyword": "search term", "reason": "why needed for mosaic", "priority": "high|medium|low"}
   ]
 }
+CRITICAL – dynamicSettings must be tailored to THIS specific image. Guidelines:
+- Portrait with faces: baseTiles=120, tilePx=7, portraitMode=true, overlayMode=softlight, baseOverlay=0.20-0.25, edgeBoost=0.25-0.30, brightnessWeight=0.50-0.60, labWeight=0.12-0.20, saturationWeight=0.30-0.40, contrastBoost=1.30-1.40, neighborPenalty=180-250, neighborRadius=5-7, histogramBlend=0.07-0.10, rotation=false
+- Portrait with white/gray hair: brightnessWeight=0.65-0.75, contrastBoost=1.40-1.50, saturationWeight=0.15-0.25, baseOverlay=0.25-0.30, histogramBlend=0.05-0.08
+- Portrait with dark skin: labWeight=0.30-0.40, contrastBoost=1.10-1.20, brightnessWeight=0.40-0.50
+- Landscape/nature: baseTiles=60-80, tilePx=10-16, portraitMode=false, overlayMode=none, baseOverlay=0, labWeight=0.35-0.45, brightnessWeight=0.25-0.35, textureWeight=0.15-0.25, contrastBoost=1.35-1.50, rotation=true, neighborPenalty=100-180, neighborRadius=3-5
+- Night/skyline: baseTiles=80-100, tilePx=8-10, contrastBoost=1.55-1.70, textureWeight=0.25-0.35, overlayMode=softlight, baseOverlay=0.05, edgeBoost=0.12-0.18
+- Colorful/abstract: baseTiles=80-110, tilePx=8-12, labWeight=0.40-0.55, contrastBoost=1.35-1.45, rotation=true, neighborPenalty=150-220
+- High detail: baseTiles=130-160, tilePx=5-7, contrastBoost=1.10-1.20
+- Minimalistic/calm: baseTiles=120-150, tilePx=6-8, contrastBoost=1.05-1.15, labWeight=0.35-0.45, rotation=false
+Adjust values within ranges based on the specific image content – do NOT use generic defaults.
 For portraits: set face.pct to actual face area percentage, face.tileComplexityMax=0.18 (very smooth tiles for skin), hair.tileComplexityMax=0.55 (texture ok), background.tileComplexityMax=0.12 (very calm).
 For landscapes: face.pct=0, background.pct=60-80, set algoRecommendations.preferCalmGlobally=false.
 All region pct values must sum to 100. dominantColor must be a hex color like #f5c5a3.
@@ -844,10 +874,31 @@ No explanation, only JSON.`;
       reasoning: `Automatisch generiert für sceneType=${sceneType}`,
     };
 
+    // Extract dynamic settings – Gemini returns image-specific algo parameters
+    // Fallback: generate sensible defaults based on sceneType/hasFace
+    const dynamicSettings = parsed.dynamicSettings ?? (() => {
+      if (hasFace && (attributes.hasWhiteHair || attributes.hairColor === 'white' || attributes.hairColor === 'gray')) {
+        return { baseTiles: 100, tilePx: 9, maxReuse: 12, rotation: false, neighborRadius: 5, neighborPenalty: 160, contrastBoost: 1.45, histogramBlend: 0.07, baseOverlay: 0.28, edgeBoost: 0.15, overlayMode: 'softlight', labWeight: 0.30, brightnessWeight: 0.70, textureWeight: 0.05, edgeWeight: 0.05, saturationWeight: 0.20, portraitMode: true, reasoning: 'Fallback: Portrait mit hellem Haar' };
+      } else if (hasFace && attributes.skinTone === 'dark') {
+        return { baseTiles: 120, tilePx: 8, maxReuse: 8, rotation: false, neighborRadius: 6, neighborPenalty: 200, contrastBoost: 1.15, histogramBlend: 0.09, baseOverlay: 0.18, edgeBoost: 0.20, overlayMode: 'softlight', labWeight: 0.35, brightnessWeight: 0.45, textureWeight: 0.10, edgeWeight: 0.10, saturationWeight: 0.30, portraitMode: true, reasoning: 'Fallback: Portrait mit dunklem Hautton' };
+      } else if (hasFace) {
+        return { baseTiles: 120, tilePx: 7, maxReuse: 8, rotation: false, neighborRadius: 6, neighborPenalty: 200, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, reasoning: 'Fallback: Standard-Portrait' };
+      } else if (sceneType === 'night_skyline') {
+        return { baseTiles: 90, tilePx: 9, maxReuse: 10, rotation: true, neighborRadius: 6, neighborPenalty: 200, contrastBoost: 1.65, histogramBlend: 0.05, baseOverlay: 0.05, edgeBoost: 0.15, overlayMode: 'softlight', labWeight: 0.25, brightnessWeight: 0.35, textureWeight: 0.30, edgeWeight: 0.10, saturationWeight: 0.30, portraitMode: false, reasoning: 'Fallback: Nacht/Skyline' };
+      } else if (sceneType === 'landscape' || sceneType === 'nature') {
+        return { baseTiles: 80, tilePx: 10, maxReuse: 10, rotation: true, neighborRadius: 8, neighborPenalty: 150, contrastBoost: 1.45, histogramBlend: 0.12, baseOverlay: 0.0, edgeBoost: 0.0, overlayMode: 'none', labWeight: 0.40, brightnessWeight: 0.28, textureWeight: 0.20, edgeWeight: 0.12, saturationWeight: 0.25, portraitMode: false, reasoning: 'Fallback: Landschaft/Natur' };
+      } else if (sceneType === 'colorful') {
+        return { baseTiles: 100, tilePx: 8, maxReuse: 10, rotation: true, neighborRadius: 6, neighborPenalty: 200, contrastBoost: 1.40, histogramBlend: 0.13, baseOverlay: 0.0, edgeBoost: 0.0, overlayMode: 'none', labWeight: 0.45, brightnessWeight: 0.25, textureWeight: 0.15, edgeWeight: 0.15, saturationWeight: 0.30, portraitMode: false, reasoning: 'Fallback: Farbenreich' };
+      } else {
+        return { baseTiles: 70, tilePx: 14, maxReuse: 10, rotation: true, neighborRadius: 4, neighborPenalty: 160, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, overlayMode: 'none', labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false, reasoning: 'Fallback: Allgemein/Abstrakt' };
+      }
+    })();
+
     console.log(`[Gemini] Analysis: sceneType=${sceneType} hasFace=${hasFace} skinTone=${attributes.skinTone} hairColor=${attributes.hairColor}`);
     console.log(`[Gemini] Description: ${description}`);
     console.log(`[Gemini] Keywords: ${importKeywords.join(', ')}`);
     console.log(`[Gemini] Regions: face=${regions.face?.pct}% bg=${regions.background?.pct}% profile=${algoRecommendations.recommendedProfile}`);
+    console.log(`[Gemini] DynamicSettings: baseTiles=${dynamicSettings.baseTiles} tilePx=${dynamicSettings.tilePx} brightnessW=${dynamicSettings.brightnessWeight} labW=${dynamicSettings.labWeight} portrait=${dynamicSettings.portraitMode} reasoning=${dynamicSettings.reasoning}`);
 
     return res.json({
       ok: true,
@@ -858,6 +909,7 @@ No explanation, only JSON.`;
       attributes,
       regions,
       algoRecommendations,
+      dynamicSettings,
       keywordSuggestions,
       importKeywords,
       imageUrl: directUrl ?? '(uploaded file)',

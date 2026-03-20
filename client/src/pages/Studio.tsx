@@ -710,8 +710,8 @@ export default function Studio() {
             setAutoPresetApplied(null);
           }
 
-          // -- fal.ai (Florence-2) async background analysis --
-          // Runs after heuristic preset is applied; overrides if fal.ai disagrees
+          // -- Gemini Vision async background analysis --
+          // Runs after heuristic preset is applied; Gemini dynamicSettings REPLACE the heuristic preset
           (() => {
             try {
               const falCanvas = document.createElement('canvas');
@@ -731,19 +731,14 @@ export default function Studio() {
                 const falHasFace: boolean = falResult.hasFace ?? false;
                 const falSceneType: string = falResult.sceneType ?? '';
                 const adminOverrides2 = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}'); } catch { return {}; } })();
-                const PORTRAIT_LOCKED_KEYS2 = ['tilePx', 'baseTiles', 'maxReuse', 'rotation', 'neighborPenalty', 'neighborRadius'];
                 const mergeWithAdmin2 = (preset: Record<string, unknown>) => {
                   const merged = { ...preset, ...adminOverrides2 };
-                  if (preset.portraitMode === true) {
-                    for (const key of PORTRAIT_LOCKED_KEYS2) {
-                      if (key in preset) merged[key] = preset[key];
-                    }
-                  }
                   return merged;
                 };
                 // Extract Gemini region analysis and algo recommendations
                 const geminiRegions = falResult.regions ?? null;
                 const geminiAlgo = falResult.algoRecommendations ?? null;
+                const geminiDynamic = falResult.dynamicSettings ?? null;
 
                 // Store Gemini region data for use in matching algorithm
                 if (geminiRegions) {
@@ -751,38 +746,94 @@ export default function Studio() {
                   console.log('[Studio] Gemini regions: face=' + (geminiRegions.face?.pct ?? 0) + '% bg=' + (geminiRegions.background?.pct ?? 0) + '%');
                 }
 
-                if (falHasFace && imageType !== 'portrait') {
-                  // fal.ai found a face but heuristic missed it
-                  // Use Gemini algo recommendations if available
-                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 200;
-                  const neighborRadius = geminiAlgo?.neighborRadius ?? 6;
-                  const tileComplexityThreshold = geminiAlgo?.tileComplexityThreshold ?? 0.22;
-                  const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 8, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
-                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
-                  localStorage.removeItem('mosaicprint_selected_theme');
-                  setAutoPresetApplied('Portrait');
-                  setDetectedImageType('portrait');
-                  console.log('[Studio] Gemini override → portrait penalty=' + neighborPenalty + ' radius=' + neighborRadius + ' complexityMax=' + tileComplexityThreshold);
-                } else if (!falHasFace && imageType === 'portrait') {
-                  // fal.ai says no face, heuristic was wrong
-                  const neighborPenalty = geminiAlgo?.neighborPenalty ?? 280;
-                  const neighborRadius = geminiAlgo?.neighborRadius ?? 4;
-                  const recommendedProfile = geminiAlgo?.recommendedProfile ?? 'landscape';
-                  const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius, neighborPenalty, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
-                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(abstractPreset)));
-                  setAutoPresetApplied(null);
-                  setDetectedImageType(recommendedProfile as any);
-                  console.log('[Studio] Gemini override → no face, profile=' + recommendedProfile);
-                } else if (falHasFace && imageType === 'portrait' && geminiAlgo) {
-                  // Face confirmed, refine existing portrait preset with Gemini recommendations
-                  const currentSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-                  const refined = { ...currentSettings, neighborPenalty: geminiAlgo.neighborPenalty, neighborRadius: geminiAlgo.neighborRadius, tileComplexityThreshold: geminiAlgo.tileComplexityThreshold };
-                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(refined));
-                  console.log('[Studio] Gemini refined portrait: penalty=' + geminiAlgo.neighborPenalty + ' complexityMax=' + geminiAlgo.tileComplexityThreshold);
+                // ── Dynamic Settings: Gemini returns image-specific algo parameters ──
+                // These REPLACE the heuristic preset entirely for better quality
+                if (geminiDynamic && typeof geminiDynamic.baseTiles === 'number') {
+                  // Apply Gemini dynamic settings (merged with any admin overrides)
+                  const dynamicPreset: Record<string, unknown> = {
+                    baseTiles: geminiDynamic.baseTiles,
+                    tilePx: geminiDynamic.tilePx ?? 8,
+                    maxReuse: geminiDynamic.maxReuse ?? 10,
+                    rotation: geminiDynamic.rotation ?? false,
+                    neighborRadius: geminiDynamic.neighborRadius ?? geminiAlgo?.neighborRadius ?? 5,
+                    neighborPenalty: geminiDynamic.neighborPenalty ?? geminiAlgo?.neighborPenalty ?? 200,
+                    contrastBoost: geminiDynamic.contrastBoost ?? 1.30,
+                    histogramBlend: geminiDynamic.histogramBlend ?? 0.08,
+                    baseOverlay: geminiDynamic.baseOverlay ?? 0.15,
+                    edgeBoost: geminiDynamic.edgeBoost ?? 0.15,
+                    overlayMode: geminiDynamic.overlayMode ?? 'softlight',
+                    labWeight: geminiDynamic.labWeight ?? 0.20,
+                    brightnessWeight: geminiDynamic.brightnessWeight ?? 0.45,
+                    textureWeight: geminiDynamic.textureWeight ?? 0.10,
+                    edgeWeight: geminiDynamic.edgeWeight ?? 0.15,
+                    saturationWeight: geminiDynamic.saturationWeight ?? 0.30,
+                    portraitMode: geminiDynamic.portraitMode ?? falHasFace,
+                    tileComplexityThreshold: geminiAlgo?.tileComplexityThreshold ?? 0.25,
+                  };
+                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(dynamicPreset)));
+
+                  // Update detected type & preset label
+                  const profile = geminiAlgo?.recommendedProfile ?? falSceneType ?? 'abstract';
+                  if (falHasFace || profile === 'portrait') {
+                    localStorage.removeItem('mosaicprint_selected_theme');
+                    setAutoPresetApplied('KI-Dynamisch');
+                    setDetectedImageType('portrait');
+                  } else if (profile === 'landscape' || profile === 'nature') {
+                    setAutoPresetApplied('KI-Dynamisch');
+                    setDetectedImageType('landscape');
+                  } else {
+                    setAutoPresetApplied('KI-Dynamisch');
+                    setDetectedImageType('abstract');
+                  }
+
+                  console.log('[Studio] Gemini dynamicSettings applied: baseTiles=' + dynamicPreset.baseTiles + ' tilePx=' + dynamicPreset.tilePx + ' brightnessW=' + dynamicPreset.brightnessWeight + ' labW=' + dynamicPreset.labWeight + ' portrait=' + dynamicPreset.portraitMode);
+                  console.log('[Studio] Gemini reasoning: ' + (geminiDynamic.reasoning ?? 'n/a'));
+                } else {
+                  // Fallback: old behavior using fixed presets + Gemini algo refinements
+                  if (falHasFace && imageType !== 'portrait') {
+                    const neighborPenalty = geminiAlgo?.neighborPenalty ?? 200;
+                    const neighborRadius = geminiAlgo?.neighborRadius ?? 6;
+                    const tileComplexityThreshold = geminiAlgo?.tileComplexityThreshold ?? 0.22;
+                    const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 8, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
+                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
+                    localStorage.removeItem('mosaicprint_selected_theme');
+                    setAutoPresetApplied('Portrait');
+                    setDetectedImageType('portrait');
+                  } else if (!falHasFace && imageType === 'portrait') {
+                    const neighborPenalty = geminiAlgo?.neighborPenalty ?? 280;
+                    const neighborRadius = geminiAlgo?.neighborRadius ?? 4;
+                    const recommendedProfile = geminiAlgo?.recommendedProfile ?? 'landscape';
+                    const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius, neighborPenalty, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
+                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(abstractPreset)));
+                    setAutoPresetApplied(null);
+                    setDetectedImageType(recommendedProfile as any);
+                  } else if (falHasFace && imageType === 'portrait' && geminiAlgo) {
+                    const currentSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+                    const refined = { ...currentSettings, neighborPenalty: geminiAlgo.neighborPenalty, neighborRadius: geminiAlgo.neighborRadius, tileComplexityThreshold: geminiAlgo.tileComplexityThreshold };
+                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(refined));
+                  }
                 }
+
+                // Store full Gemini analysis for Admin Qualität tab (admin-only display)
+                try {
+                  localStorage.setItem('mosaicprint_gemini_analysis', JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    sceneType: falSceneType,
+                    hasFace: falHasFace,
+                    faceCount: falResult.faceCount ?? 0,
+                    description: falResult.description ?? '',
+                    attributes: falResult.attributes ?? {},
+                    regions: geminiRegions,
+                    algoRecommendations: geminiAlgo,
+                    dynamicSettings: geminiDynamic,
+                    appliedSettings: JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'),
+                  }));
+                  window.dispatchEvent(new Event('geminiAnalysisUpdated'));
+                } catch { /* ignore */ }
+
                 console.log('[Studio] Gemini result: sceneType=' + falSceneType + ' hasFace=' + falHasFace + ' profile=' + (geminiAlgo?.recommendedProfile ?? 'n/a'));
-              }).catch(e => console.warn('[Studio] fal.ai async failed:', e));
-            } catch (e) { console.warn('[Studio] fal.ai setup failed:', e); }
+              }).catch(e => console.warn('[Studio] Gemini async failed:', e));
+            } catch (e) { console.warn('[Studio] Gemini setup failed:', e); }
           })();
 
           // -- KI-Themen-Analyse: Farbpalette des Fotos analysieren --
@@ -3536,14 +3587,18 @@ export default function Studio() {
                 detectedImageType === 'portrait' ? 'text-rose-500' : detectedImageType === 'landscape' ? 'text-sky-500' : 'text-violet-500'
               }`}>KI-Erkennung</p>
               <p className="text-sm font-semibold text-gray-800">
-                {detectedImageType === 'portrait' && 'Portrait erkannt - Optimale Einstellungen fuer Gesichter aktiv'}
-                {detectedImageType === 'landscape' && 'Landschaft erkannt - Optimale Einstellungen fuer Natur & Architektur aktiv'}
-                {detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt - Standard-Einstellungen aktiv'}
+                {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Portrait erkannt - Dynamische Einstellungen von Gemini aktiv'}
+                {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Landschaft erkannt - Dynamische Einstellungen von Gemini aktiv'}
+                {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Motiv erkannt - Dynamische Einstellungen von Gemini aktiv'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Portrait erkannt - Optimale Einstellungen fuer Gesichter aktiv'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Landschaft erkannt - Optimale Einstellungen fuer Natur & Architektur aktiv'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt - Standard-Einstellungen aktiv'}
               </p>
               <p className="text-xs text-gray-500 mt-0.5">
-                {detectedImageType === 'portrait' && 'Feineres Raster . Staerkere Helligkeits- & Saettigungs-Gewichtung . Haut-Ton-Boost'}
-                {detectedImageType === 'landscape' && 'Groessere Kacheln . Mehr Farb-Genauigkeit . Weite Komposition'}
-                {detectedImageType === 'abstract' && 'Ausgewogene Gewichtung fuer allgemeine Motive'}
+                {autoPresetApplied === 'KI-Dynamisch' && 'Alle Parameter individuell auf dieses Bild angepasst (Gemini Vision)'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Feineres Raster . Staerkere Helligkeits- & Saettigungs-Gewichtung . Haut-Ton-Boost'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Groessere Kacheln . Mehr Farb-Genauigkeit . Weite Komposition'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Ausgewogene Gewichtung fuer allgemeine Motive'}
               </p>
               {/* Gemini Region Analysis */}
               {(() => {
