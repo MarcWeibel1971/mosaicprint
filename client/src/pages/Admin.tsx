@@ -684,6 +684,24 @@ export default function Admin() {
   // Rebuild/Reclassify Job Status (for progress bar)
   const [rebuildStatus, setRebuildStatus] = useState<{ running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null } | null>(null)
   const rebuildPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // fetchStats declared here (before startRebuildPolling) to avoid TDZ
+  const fetchStats = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [statsRes, keysRes] = await Promise.all([
+        fetch('/api/trpc/getTileStats'),
+        fetch('/api/trpc/getApiKeyStatus'),
+      ])
+      const statsData = await statsRes.json()
+      const keysData = await keysRes.json()
+      setStats(statsData.result?.data?.json ?? statsData.result?.data ?? statsData)
+      setApiKeys(keysData.result?.data?.json ?? keysData.result?.data ?? keysData)
+    } catch {
+      setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
+    } finally { setLoading(false) }
+  }, [])
+
   const startRebuildPolling = useCallback(() => {
     if (rebuildPollRef.current) return
     rebuildPollRef.current = setInterval(async () => {
@@ -735,22 +753,6 @@ export default function Admin() {
     } catch { /* ignore */ } finally {
       setRecsLoading(false)
     }
-  }, [])
-
-  const fetchStats = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [statsRes, keysRes] = await Promise.all([
-        fetch('/api/trpc/getTileStats'),
-        fetch('/api/trpc/getApiKeyStatus'),
-      ])
-      const statsData = await statsRes.json()
-      const keysData = await keysRes.json()
-      setStats(statsData.result?.data?.json ?? statsData.result?.data ?? statsData)
-      setApiKeys(keysData.result?.data?.json ?? keysData.result?.data ?? keysData)
-    } catch {
-      setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
-    } finally { setLoading(false) }
   }, [])
 
   // Open Import-Review-Modal for a given session
