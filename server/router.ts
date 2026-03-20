@@ -2883,6 +2883,7 @@ export const appRouter = router({
       colorFilter: z.string().optional(),
       warmCoolFilter: z.string().optional(), // 'warm' | 'kuehl' | 'neutral'
       saturationFilter: z.string().optional(), // 'niedrig' | 'mittel' | 'hoch'
+      geminiFilter: z.string().optional(), // 'excellent' | 'good' | 'poor' | 'reject'
       sourceId: z.string().optional(),
       importedSince: z.string().optional(), // ISO date string, or 'last-import' for last session
       qualityStatus: z.string().optional(),
@@ -2920,6 +2921,7 @@ export const appRouter = router({
         qualityStatus: input.qualityStatus,
         semanticTheme: input.semanticTheme,
         tileType: input.tileType,
+        geminiFilter: input.geminiFilter,
       });
     }),
 
@@ -3364,6 +3366,8 @@ export const appRouter = router({
     const statsRes = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE quality_status = 'rejected' OR ai_suitability = 'reject') AS rejected,
+        COUNT(*) FILTER (WHERE ai_suitability = 'poor'
+          AND COALESCE(quality_status,'') != 'rejected') AS poor,
         COUNT(*) FILTER (WHERE id NOT IN (
           SELECT MIN(id) FROM mosaic_images GROUP BY source_url
         )) AS url_duplicates,
@@ -3389,14 +3393,16 @@ export const appRouter = router({
     const nearWhiteCount = Number(s.near_white);
     const lowScoreCount = Number(s.low_score);
     const pixabayHotlinkCount = Number(s.pixabay_hotlink);
+    const poorCount = Number(s.poor);
 
     return {
       totalActive,
       stage1: {
         rejected: rejectedCount,
+        poor: poorCount,
         urlDuplicates: urlDupCount,
         pixabayHotlink: pixabayHotlinkCount,
-        total: rejectedCount + urlDupCount + pixabayHotlinkCount,
+        total: rejectedCount + poorCount + urlDupCount + pixabayHotlinkCount,
       },
       stage2: {
         grayBusy: grayBusyCount,
@@ -3412,7 +3418,7 @@ export const appRouter = router({
    */
   getCleanupPreview: publicProcedure
     .input(z.object({
-      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'lowScore', 'generalLow', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
+      category: z.enum(['rejected', 'poor', 'urlDuplicates', 'grayBusy', 'nearWhite', 'lowScore', 'generalLow', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       limit: z.number().min(1).max(200).default(50),
     }))
     .query(async ({ input }) => {
@@ -3421,6 +3427,9 @@ export const appRouter = router({
       switch (input.category) {
         case 'rejected':
           whereClause = `quality_status = 'rejected' OR ai_suitability = 'reject'`;
+          break;
+        case 'poor':
+          whereClause = `ai_suitability = 'poor' AND COALESCE(quality_status,'') != 'rejected'`;
           break;
         case 'urlDuplicates':
           whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
@@ -3480,7 +3489,7 @@ export const appRouter = router({
    */
   bulkDeleteTiles: publicProcedure
     .input(z.object({
-      category: z.enum(['rejected', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'lowScore', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
+      category: z.enum(['rejected', 'poor', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'lowScore', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       // Wenn ids angegeben: nur diese IDs löschen (selektiv)
       // Wenn ids leer: alle Kandidaten der Kategorie löschen
       ids: z.array(z.number()).optional(),
@@ -3492,6 +3501,9 @@ export const appRouter = router({
       switch (input.category) {
         case 'rejected':
           whereClause = `quality_status = 'rejected' OR ai_suitability = 'reject'`;
+          break;
+        case 'poor':
+          whereClause = `ai_suitability = 'poor' AND COALESCE(quality_status,'') != 'rejected'`;
           break;
         case 'urlDuplicates':
           whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;

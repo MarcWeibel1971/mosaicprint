@@ -2024,6 +2024,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [tileTypeFilter, setTileTypeFilter] = useState('alle')
   const [warmCoolFilter, setWarmCoolFilter] = useState('alle')
   const [saturationFilter, setSaturationFilter] = useState('alle')
+  const [geminiFilter, setGeminiFilter] = useState('alle')
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -2063,6 +2064,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
       if (warmCoolFilter !== 'alle') params.warmCoolFilter = warmCoolFilter
       if (saturationFilter !== 'alle') params.saturationFilter = saturationFilter
+      if (geminiFilter !== 'alle') params.geminiFilter = geminiFilter
       if (importedSince !== 'alle') params.importedSince = importedSince
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
       if (tileTypeFilter !== 'alle') params.tileType = tileTypeFilter
@@ -2075,7 +2077,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, importedSince, qualityStatusFilter, tileTypeFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, geminiFilter, importedSince, qualityStatusFilter, tileTypeFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -2168,7 +2170,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     const interval = setInterval(() => { fetchDbStats() }, 30000)
     return () => clearInterval(interval)
   }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, qualityStatusFilter, importedSince, tileTypeFilter])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, geminiFilter, qualityStatusFilter, importedSince, tileTypeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
@@ -2898,6 +2900,21 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           ))}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Gemini:</span>
+          {[{v:'alle',label:'Alle'},{v:'excellent',label:'⭐ Excellent'},{v:'good',label:'👍 Good'},{v:'poor',label:'⚠️ Poor'},{v:'reject',label:'❌ Reject'}].map(({v,label}) => (
+            <button key={v} onClick={() => { setGeminiFilter(v); setPage(1) }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                geminiFilter === v
+                  ? v === 'excellent' ? 'bg-green-600 text-white'
+                  : v === 'good' ? 'bg-blue-600 text-white'
+                  : v === 'poor' ? 'bg-amber-500 text-white'
+                  : v === 'reject' ? 'bg-red-600 text-white'
+                  : 'bg-gray-700 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}>{label}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Warm/Kühl:</span>
           {[{v:'alle',label:'Alle'},{v:'warm',label:'🔥 Warm'},{v:'neutral',label:'⚪ Neutral'},{v:'kuehl',label:'❄️ Kühl'}].map(({v,label}) => (
             <button key={v} onClick={() => { setWarmCoolFilter(v); setPage(1) }}
@@ -2978,8 +2995,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setSaturationFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle'  || tileTypeFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
+        {geminiFilter !== 'alle' && (
+          <span className="flex items-center gap-1 bg-teal-100 text-teal-700 text-xs px-2 py-1 rounded-full">
+            Gemini: {geminiFilter === 'excellent' ? '⭐ Excellent' : geminiFilter === 'good' ? '👍 Good' : geminiFilter === 'poor' ? '⚠️ Poor' : '❌ Reject'}
+            <button onClick={() => setGeminiFilter('alle')}><X className="w-3 h-3" /></button>
+          </span>
+        )}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || geminiFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle'  || tileTypeFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setGeminiFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>
@@ -5031,7 +5054,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 // ── Semantic Tagger Panel ────────────────────────────────────────────────
 
 // ── Bereinigungsassistent ────────────────────────────────────────────────
-type CleanupCategory = 'rejected' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore' | 'oversaturatedSkin' | 'portraitBusy'
+type CleanupCategory = 'rejected' | 'poor' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore' | 'oversaturatedSkin' | 'portraitBusy'
 
 interface CleanupTile {
   id: number
@@ -5051,7 +5074,7 @@ interface CleanupTile {
 interface CleanupCandidates {
   totalActive: number
   themeDistribution: Array<{ theme: string; count: number; pct: number }>
-  stage1: { rejected: number; urlDuplicates: number; pixabayHotlink: number; total: number }
+  stage1: { rejected: number; poor: number; urlDuplicates: number; pixabayHotlink: number; total: number }
   stage2: { grayBusy: number; nearWhite: number; lowScore: number; total: number }
 }
 
@@ -5134,6 +5157,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
 
   const categoryMeta: Record<CleanupCategory, { label: string; desc: string; stage: 1 | 2 | 3; color: string; icon: string }> = {
     rejected: { label: 'Abgelehnte Tiles', desc: 'quality_status = rejected – bereits aus Index gefiltert, aber noch in DB', stage: 1, color: 'red', icon: '❌' },
+    poor: { label: 'Poor-Tiles (Gemini)', desc: 'ai_suitability = poor – von Gemini als wenig geeignet eingestuft', stage: 1, color: 'orange', icon: '⚠️' },
     urlDuplicates: { label: 'URL-Duplikate', desc: 'Gleiche source_url – nur niedrigste ID wird behalten', stage: 1, color: 'orange', icon: '🔁' },
     pixabayHotlink: { label: 'Pixabay ohne R2', desc: 'Pixabay-Tiles ohne R2-URL – Hotlink-geschützt, nicht mehr nutzbar', stage: 1, color: 'amber', icon: '🔒' },
     grayBusy: { label: 'Grau + Busy', desc: 'Chroma < 3 UND tile_type = busy – strukturlos und unruhig', stage: 2, color: 'gray', icon: '🌫️' },
@@ -5149,6 +5173,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
   const countForCat = (cat: CleanupCategory): number => {
     if (!candidates) return 0
     if (cat === 'rejected') return candidates.stage1.rejected
+    if (cat === 'poor') return candidates.stage1.poor ?? 0
     if (cat === 'urlDuplicates') return candidates.stage1.urlDuplicates
     if (cat === 'pixabayHotlink') return candidates.stage1.pixabayHotlink
     if (cat === 'grayBusy') return candidates.stage2.grayBusy

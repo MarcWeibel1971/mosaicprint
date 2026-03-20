@@ -334,6 +334,7 @@ export async function getAdminImages(opts: {
   brightnessFilter?: string; colorFilter?: string;
   warmCoolFilter?: string; // 'warm' | 'kuehl' | 'neutral'
   saturationFilter?: string; // 'niedrig' | 'mittel' | 'hoch'
+  geminiFilter?: string; // 'excellent' | 'good' | 'poor' | 'reject'
   sourceId?: string;
   importedSince?: string; // ISO date string for 'recently imported' filter
   qualityStatus?: string;
@@ -397,6 +398,11 @@ export async function getAdminImages(opts: {
   if (opts.saturationFilter === "niedrig") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) < 20");
   else if (opts.saturationFilter === "mittel") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) >= 20 AND SQRT(avg_a * avg_a + avg_b * avg_b) <= 42");
   else if (opts.saturationFilter === "hoch") conditions.push("SQRT(avg_a * avg_a + avg_b * avg_b) > 42");
+
+  // Gemini-Qualitätsfilter (ai_suitability: excellent | good | poor | reject)
+  if (opts.geminiFilter && opts.geminiFilter !== 'alle') {
+    conditions.push(`COALESCE(ai_suitability, 'pending') = '${opts.geminiFilter.replace(/'/g, "''")}'`);
+  }
 
   // Color filter
   if (opts.colorFilter === "schwarz") conditions.push("avg_l < 25");
