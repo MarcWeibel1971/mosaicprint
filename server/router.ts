@@ -960,7 +960,7 @@ async function getUnderrepresentedColors(targetPerColor = 500): Promise<string[]
 }
 
 // ---- Job state ----
-type JobStatus = { running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null; imported: number; total: number };
+type JobStatus = { running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null; imported: number; total: number; sessionId?: string | null; pendingReview?: boolean; };
 const importJobStatuses: Record<string, JobStatus> = {};
 const smartImportJobs: Record<string, JobStatus> = {};
 // targetedImport jobs: keyed by sessionId (client-generated)
@@ -973,7 +973,7 @@ let rebuildJobStatus = { running: false, log: [] as string[], startedAt: null as
 
 function getImportStatus(sourceId: string): JobStatus {
   if (!importJobStatuses[sourceId]) {
-    importJobStatuses[sourceId] = { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0 };
+    importJobStatuses[sourceId] = { running: false, log: [], startedAt: null, finishedAt: null, error: null, imported: 0, total: 0, sessionId: null };
   }
   return importJobStatuses[sourceId];
 }
@@ -1515,7 +1515,8 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
       if (status.running) return { started: false, message: "Import läuft bereits" };
-      status.running = true; status.startedAt = new Date().toISOString(); status.log = []; status.imported = 0; status.total = input.count; status.error = null;
+      const importSessionId = crypto.randomUUID();
+      status.running = true; status.startedAt = new Date().toISOString(); status.log = []; status.imported = 0; status.total = input.count; status.error = null; status.sessionId = importSessionId;
       const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
       (async () => {
         try {
@@ -1639,6 +1640,8 @@ export const appRouter = router({
                       tileType: lab?.tileType,
                       edgeEnergy: lab?.edgeDensity,
                       pHash: lab?.pHash,
+                      importSessionId,
+                      pendingReview: true,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
                     if (result.inserted && (photo as any).downloadLocation && apiKey) {
@@ -1670,6 +1673,47 @@ export const appRouter = router({
     .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay", "flickr"]).default("pexels") }))
     .query(({ input }) => getImportStatus(input.source)),
 
+  // Admin: Import Preview – returns all pending_review tiles for a session
+  getImportPreview: publicProcedure
+    .input(z.object({ sessionId: z.string() }))
+    .query(async ({ input }) => {
+      const pool = (await import('./db.js')).getPool();
+      const res = await pool.query(
+        `SELECT id, tile128_url, r2_url, source_url, avg_l, avg_a, avg_b, subject, import_query, source_provider
+         FROM mosaic_images
+         WHERE import_session_id = $1 AND quality_status = 'pending_review'
+         ORDER BY id ASC
+         LIMIT 2000`,
+        [input.sessionId]
+      );
+      return { tiles: res.rows as Array<{ id: number; tile128_url: string; r2_url: string | null; source_url: string; avg_l: number; avg_a: number; avg_b: number; subject: string; import_query: string; source_provider: string }> };
+    }),
+  // Admin: Confirm Import – activates selected tiles, deletes rejected ones
+  confirmImport: publicProcedure
+    .input(z.object({
+      sessionId: z.string(),
+      rejectedIds: z.array(z.number()), // IDs to delete
+    }))
+    .mutation(async ({ input }) => {
+      const pool = (await import('./db.js')).getPool();
+      // Activate all pending_review tiles in this session
+      const activateRes = await pool.query(
+        `UPDATE mosaic_images SET quality_status = 'pending'
+         WHERE import_session_id = $1 AND quality_status = 'pending_review'`,
+        [input.sessionId]
+      );
+      // Delete rejected tiles
+      let deleted = 0;
+      if (input.rejectedIds.length > 0) {
+        const delRes = await pool.query(
+          `DELETE FROM mosaic_images WHERE id = ANY($1::int[]) AND import_session_id = $2`,
+          [input.rejectedIds, input.sessionId]
+        );
+        deleted = delRes.rowCount ?? 0;
+      }
+      const activated = (activateRes.rowCount ?? 0) - deleted;
+      return { activated, deleted };
+    }),
   // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
   smartImport: publicProcedure
     .input(z.object({
@@ -1683,7 +1727,8 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const jobKey = input.keywords?.length ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       if (smartImportJobs[jobKey]?.running) return { started: false };
-      smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count };
+      const smartSessionId = crypto.randomUUID();
+      smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, sessionId: smartSessionId };
       const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
       (async () => {
         try {
@@ -1890,6 +1935,8 @@ export const appRouter = router({
                       edgeEnergy: lab?.edgeDensity,
                       pHash: lab?.pHash,
                       mosaicScore: lab?.mosaicScore,
+                      importSessionId: smartSessionId,
+                      pendingReview: true,
                     });
                     // Unsplash: trigger download tracking as required by API guidelines
                     if (result.inserted && (photo as any).downloadLocation && smartApiKey) {
@@ -2006,12 +2053,14 @@ export const appRouter = router({
       for (const source of sources) {
         const status = getImportStatus(source);
         if (status.running) { results[source] = false; continue; }
+        const importAllSessionId = crypto.randomUUID();
         status.running = true;
         status.startedAt = new Date().toISOString();
         status.log = [];
         status.imported = 0;
         status.total = input.count;
         status.error = null;
+        status.sessionId = importAllSessionId;
         const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
         results[source] = true;
         // Fire-and-forget background job (same logic as importFromSource)
@@ -2097,6 +2146,8 @@ export const appRouter = router({
                         avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                         sourceProvider: src,
                         importQuery: keyword,
+                        importSessionId: importAllSessionId,
+                        pendingReview: true,
                       });
                       // Unsplash: trigger download tracking
                       if (result.inserted && (photo as any).downloadLocation && apiKey) {
@@ -2461,7 +2512,8 @@ export const appRouter = router({
         : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
       // Init job tracking
-      targetedImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, query: input.query, sourceId: input.sourceId };
+      const targetedSessionId = crypto.randomUUID();
+      targetedImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, query: input.query, sourceId: input.sourceId, sessionId: targetedSessionId };
       // Register in session if provided
       if (input.sessionId && keywordSessions[input.sessionId]) {
         keywordSessions[input.sessionId].results.push({ keyword: input.query, imported: 0, rejected: 0, total: 0, status: 'running' });
@@ -2561,6 +2613,8 @@ export const appRouter = router({
                   pHash: lab?.pHash,
                   sourceProvider: input.sourceId, // explicitly set provider
                   importQuery: input.query,
+                  importSessionId: targetedSessionId,
+                  pendingReview: true,
                 });
                 // Unsplash: trigger download tracking
                 if (result?.inserted && (photo as any).downloadLocation && targetedApiKey) {

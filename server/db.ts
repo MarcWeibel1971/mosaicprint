@@ -297,7 +297,11 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS ai_has_text BOOLEAN DEFAULT NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_ai_mosaic_score ON mosaic_images (ai_mosaic_score)`);
 
-  console.log("[DB] Schema ensured (v7 with extended AI Vision scores)");
+  // v8: import_session_id – groups tiles from same import batch for review modal
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS import_session_id TEXT DEFAULT NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_import_session_id ON mosaic_images (import_session_id)`);
+
+  console.log("[DB] Schema ensured (v8 with import_session_id)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
@@ -502,6 +506,8 @@ export async function insertMosaicImage(data: {
   photographerName?: string;   // Unsplash: user.name (for attribution)
   photographerUrl?: string;    // Unsplash: user.links.html (for attribution link)
   downloadLocation?: string;   // Unsplash: links.download_location (for download tracking)
+  importSessionId?: string | null; // UUID to group tiles from same import batch for review modal
+  pendingReview?: boolean;         // if true, sets quality_status = 'pending_review'
 }): Promise<{ inserted: boolean; id: number | null }> {
   const pool = getPool();
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
@@ -535,8 +541,9 @@ export async function insertMosaicImage(data: {
         tl_l, tl_a, tl_b, tr_l, tr_a, tr_b,
         bl_l, bl_a, bl_b, br_l, br_a, br_b,
         subject, theme, source_provider, import_query, url_hash, imported_at, tile_type, semantic_theme, edge_energy,
-        photographer_name, photographer_url, download_location, phash, ai_mosaic_score)
-     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28,$29,$30)
+        photographer_name, photographer_url, download_location, phash, ai_mosaic_score,
+        import_session_id, quality_status)
+     VALUES ($1,$2,$24,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,MD5($1),NOW(),$22,$23,$25,$26,$27,$28,$29,$30,$31,$32)
      ON CONFLICT (source_url) DO NOTHING
      RETURNING id`,
     [
@@ -547,12 +554,14 @@ export async function insertMosaicImage(data: {
       theme, theme, sourceProvider, data.importQuery ?? null,
       data.tileType ?? 'medium', semanticTheme,
       data.r2Url ?? null,
-      data.edgeEnergy ?? null,     // $25
+      data.edgeEnergy ?? null,       // $25
       data.photographerName ?? null, // $26
       data.photographerUrl ?? null,  // $27
       data.downloadLocation ?? null, // $28
       data.pHash ?? null,            // $29
       data.mosaicScore != null ? Math.round(data.mosaicScore * 100) : null, // $30 ai_mosaic_score (0-100)
+      data.importSessionId ?? null,  // $31 import_session_id
+      data.pendingReview ? 'pending_review' : 'pending', // $32 quality_status
     ]
   );
   const insertedId: number | null = res.rows[0]?.id ?? null;

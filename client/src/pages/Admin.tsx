@@ -45,6 +45,12 @@ interface ApiKeyStatus { stripe: boolean; unsplash: boolean; pexels: boolean; pi
 interface ImportJob {
   running: boolean; imported?: number; total?: number
   log: string[]; error?: string | null; finishedAt?: string | null
+  sessionId?: string | null
+}
+interface ImportPreviewTile {
+  id: number; tile128_url: string; r2_url: string | null; source_url: string
+  avg_l: number; avg_a: number; avg_b: number
+  subject: string; import_query: string; source_provider: string
 }
 interface TileImage {
   id: number; sourceUrl: string; tile128Url: string
@@ -658,6 +664,13 @@ export default function Admin() {
   const [recsJobs, setRecsJobs] = useState<Record<string, SmartImportJob>>({})
   const [recsRunning, setRecsRunning] = useState(false)
   const [selectedRecs, setSelectedRecs] = useState<Set<string>>(new Set())
+  // Import-Review-Modal
+  const [importReviewOpen, setImportReviewOpen] = useState(false)
+  const [importReviewSessionId, setImportReviewSessionId] = useState<string | null>(null)
+  const [importReviewTiles, setImportReviewTiles] = useState<ImportPreviewTile[]>([])
+  const [importReviewRejected, setImportReviewRejected] = useState<Set<number>>(new Set())
+  const [importReviewLoading, setImportReviewLoading] = useState(false)
+  const [importReviewConfirming, setImportReviewConfirming] = useState(false)
   // Last image analysis result (from Quality tab) - persisted via localStorage for cross-tab use
   const [lastAnalysis, setLastAnalysis] = useState<LastAnalysisData | null>(() => {
     try { const s = localStorage.getItem('mosaicprint_last_analysis'); return s ? JSON.parse(s) : null } catch { return null }
@@ -729,6 +742,50 @@ export default function Admin() {
       setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
     } finally { setLoading(false) }
   }, [])
+
+  // Open Import-Review-Modal for a given session
+  const openImportReview = useCallback(async (sessionId: string) => {
+    setImportReviewSessionId(sessionId)
+    setImportReviewRejected(new Set())
+    setImportReviewLoading(true)
+    setImportReviewOpen(true)
+    try {
+      const params = encodeURIComponent(JSON.stringify({ sessionId }))
+      const res = await fetch(`/api/trpc/getImportPreview?input=${params}`)
+      const data = await res.json()
+      const tiles: ImportPreviewTile[] = data.result?.data?.tiles ?? data.result?.data?.json?.tiles ?? []
+      setImportReviewTiles(tiles)
+    } catch {
+      setMessage({ text: 'Fehler beim Laden der Import-Vorschau', type: 'error' })
+      setImportReviewOpen(false)
+    } finally {
+      setImportReviewLoading(false)
+    }
+  }, [])
+  // Confirm Import: activate selected, delete rejected
+  const confirmImportReview = useCallback(async () => {
+    if (!importReviewSessionId) return
+    setImportReviewConfirming(true)
+    try {
+      const rejectedIds = Array.from(importReviewRejected)
+      const res = await fetch('/api/trpc/confirmImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: importReviewSessionId, rejectedIds }),
+      })
+      const data = await res.json()
+      const result = data.result?.data ?? data
+      setMessage({ text: `✅ ${result.activated ?? 0} Tiles aktiviert, ${result.deleted ?? 0} gelöscht`, type: 'success' })
+      setImportReviewOpen(false)
+      setImportReviewTiles([])
+      setImportReviewSessionId(null)
+      fetchStats()
+    } catch {
+      setMessage({ text: 'Fehler beim Bestätigen des Imports', type: 'error' })
+    } finally {
+      setImportReviewConfirming(false)
+    }
+  }, [importReviewSessionId, importReviewRejected, fetchStats])
 
   // Start analysis-based import from Import tab (uses lastAnalysis from localStorage)
   const startAnalysisImportMain = useCallback(async () => {
@@ -824,14 +881,17 @@ export default function Admin() {
           setActiveJob(null)
           fetchStats()
           if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
-          else setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
+          else if (job.sessionId && (job.imported ?? 0) > 0) {
+            openImportReview(job.sessionId)
+          } else {
+            setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
+          }
         }
       } catch { /* ignore */ }
     }, 1500)
     return () => clearInterval(interval)
-  }, [activeJob, fetchStats])
-
-  // Poll multiple import jobs simultaneously (used by importAll)
+  }, [activeJob, fetchStats, openImportReview])
+  // Poll multiple import jobs simultaneously (used by importAll))
   useEffect(() => {
     if (activeJobs.size === 0) return
     const intervals: ReturnType<typeof setInterval>[] = []
@@ -874,12 +934,16 @@ export default function Admin() {
           fetchCronStatus()
           fetchRecommendations()
           if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
-          else setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
+          else if ((job as any).sessionId && (job.imported ?? 0) > 0) {
+            openImportReview((job as any).sessionId)
+          } else {
+            setMessage({ text: `Import abgeschlossen: ${job.imported ?? 0} neue Bilder importiert`, type: 'success' })
+          }
         }
       } catch { /* ignore */ }
     }, 1500)
     return () => clearInterval(interval)
-  }, [activeJob, fetchStats, fetchCronStatus, fetchRecommendations])
+  }, [activeJob, fetchStats, fetchCronStatus, fetchRecommendations, openImportReview])
 
   // Poll recsJobs (Gezielte Importe - all sources in parallel)
   useEffect(() => {
@@ -1871,6 +1935,144 @@ export default function Admin() {
           <QualityAssurance onMessage={setMessage} />
         )}
       </div>
+
+      {/* ── Import Review Modal ── */}
+      {importReviewOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <div>
+                <h2 className="text-xl font-bold text-gray-900">Import-Vorschau</h2>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {importReviewLoading
+                    ? 'Lade Tiles…'
+                    : `${importReviewTiles.length} Tiles importiert – klicke zum Abwählen`}
+                </p>
+              </div>
+              <button
+                onClick={() => setImportReviewOpen(false)}
+                className="text-gray-400 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Selection Stats */}
+            {!importReviewLoading && importReviewTiles.length > 0 && (
+              <div className="px-6 py-3 bg-gray-50 border-b border-gray-100 flex items-center gap-4">
+                <span className="text-sm font-medium text-gray-700">
+                  <span className="text-green-600 font-bold">{importReviewTiles.length - importReviewRejected.size}</span> ausgewählt
+                  {importReviewRejected.size > 0 && (
+                    <span className="ml-2 text-red-500">({importReviewRejected.size} abgewählt)</span>
+                  )}
+                </span>
+                <div className="flex gap-2 ml-auto">
+                  <button
+                    onClick={() => setImportReviewRejected(new Set())}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 hover:bg-green-200 font-medium"
+                  >
+                    Alle auswählen
+                  </button>
+                  <button
+                    onClick={() => setImportReviewRejected(new Set(importReviewTiles.map(t => t.id)))}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-red-100 text-red-700 hover:bg-red-200 font-medium"
+                  >
+                    Alle abwählen
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Tile Grid */}
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              {importReviewLoading ? (
+                <div className="flex items-center justify-center h-40 text-gray-400">
+                  <span className="animate-spin mr-2">⟳</span> Lade Vorschau…
+                </div>
+              ) : importReviewTiles.length === 0 ? (
+                <div className="flex items-center justify-center h-40 text-gray-400">
+                  Keine Tiles gefunden
+                </div>
+              ) : (
+                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
+                  {importReviewTiles.map(tile => {
+                    const rejected = importReviewRejected.has(tile.id)
+                    return (
+                      <div
+                        key={tile.id}
+                        onClick={() => {
+                          setImportReviewRejected(prev => {
+                            const next = new Set(prev)
+                            if (next.has(tile.id)) next.delete(tile.id)
+                            else next.add(tile.id)
+                            return next
+                          })
+                        }}
+                        className={`relative cursor-pointer rounded-lg overflow-hidden aspect-square border-2 transition-all ${
+                          rejected
+                            ? 'border-red-500 opacity-50'
+                            : 'border-transparent hover:border-green-400'
+                        }`}
+                        title={tile.source_url}
+                      >
+                        <img
+                          src={tile.tile128_url}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                        />
+                        {rejected && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-red-500/30">
+                            <X className="w-5 h-5 text-red-600" />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between gap-3">
+              <button
+                onClick={() => {
+                  // Discard all: reject all tiles
+                  setImportReviewRejected(new Set(importReviewTiles.map(t => t.id)))
+                  confirmImportReview()
+                }}
+                disabled={importReviewConfirming || importReviewLoading}
+                className="text-sm px-4 py-2 rounded-lg border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50"
+              >
+                Alle verwerfen
+              </button>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setImportReviewOpen(false)}
+                  disabled={importReviewConfirming}
+                  className="text-sm px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  onClick={confirmImportReview}
+                  disabled={importReviewConfirming || importReviewLoading || importReviewTiles.length === 0}
+                  className="flex items-center gap-2 text-sm px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold disabled:opacity-50"
+                >
+                  {importReviewConfirming ? (
+                    <><span className="animate-spin">⟳</span> Speichere…</>
+                  ) : importReviewRejected.size === 0 ? (
+                    <>✅ Alle speichern ({importReviewTiles.length})</>
+                  ) : (
+                    <>✅ Auswahl speichern ({importReviewTiles.length - importReviewRejected.size})</>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
