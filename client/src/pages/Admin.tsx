@@ -3679,6 +3679,201 @@ function AlgorithmSettings() {
 }
 
 // ── Last Mosaic Quality Panel ────────────────────────────────────────────────
+// ── Gemini Analysis Panel (Admin-only) ────────────────────────────────────────
+// Shows the last Gemini image analysis and the dynamically applied settings
+function GeminiAnalysisPanel() {
+  const [analysis, setAnalysis] = useState<Record<string, any> | null>(null)
+  const [expanded, setExpanded] = useState(false)
+
+  useEffect(() => {
+    const load = () => {
+      try {
+        const raw = localStorage.getItem('mosaicprint_gemini_analysis')
+        if (raw) setAnalysis(JSON.parse(raw))
+      } catch { /* ignore */ }
+    }
+    load()
+    window.addEventListener('geminiAnalysisUpdated', load)
+    window.addEventListener('storage', load)
+    return () => { window.removeEventListener('geminiAnalysisUpdated', load); window.removeEventListener('storage', load) }
+  }, [])
+
+  if (!analysis) {
+    return (
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <h3 className="font-bold text-gray-900 mb-1 flex items-center gap-2"><span>🤖</span> Gemini Bildanalyse & Dynamische Einstellungen</h3>
+        <p className="text-sm text-gray-400 mt-2">Noch keine Analyse vorhanden. Lade ein Bild im Studio hoch – die Gemini-Analyse und die dynamisch angepassten Einstellungen erscheinen hier.</p>
+      </div>
+    )
+  }
+
+  const attrs = analysis.attributes as Record<string, any> | undefined
+  const regions = analysis.regions as Record<string, Record<string, any>> | undefined
+  const dynamic = analysis.dynamicSettings as Record<string, any> | undefined
+  const applied = analysis.appliedSettings as Record<string, any> | undefined
+  const algo = analysis.algoRecommendations as Record<string, any> | undefined
+  const ts = analysis.timestamp ? new Date(analysis.timestamp as string).toLocaleString('de-CH') : ''
+
+  // Setting labels for display
+  const settingLabels: Record<string, string> = {
+    baseTiles: 'Spalten (baseTiles)',
+    tilePx: 'Kachelgrösse (px)',
+    maxReuse: 'Max. Wiederverwendung',
+    rotation: 'Rotation',
+    neighborRadius: 'Anti-Repetition Radius',
+    neighborPenalty: 'Anti-Repetition Penalty',
+    contrastBoost: 'Kontrast-Boost',
+    histogramBlend: 'Histogram-Blend',
+    baseOverlay: 'Overlay-Basis',
+    edgeBoost: 'Kanten-Boost',
+    overlayMode: 'Overlay-Modus',
+    labWeight: 'Farbe (LAB)',
+    brightnessWeight: 'Helligkeit (L)',
+    textureWeight: 'Textur',
+    edgeWeight: 'Kanten',
+    saturationWeight: 'Sättigung',
+    portraitMode: 'Portrait-Modus',
+    tileComplexityThreshold: 'Tile-Komplexität Max',
+  }
+
+  const regionColors: Record<string, string> = {
+    face: 'bg-rose-100 text-rose-700 border-rose-200',
+    hair: 'bg-amber-100 text-amber-700 border-amber-200',
+    clothing: 'bg-blue-100 text-blue-700 border-blue-200',
+    background: 'bg-gray-100 text-gray-700 border-gray-200',
+    other: 'bg-purple-100 text-purple-700 border-purple-200',
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="font-bold text-gray-900 flex items-center gap-2"><span>🤖</span> Gemini Bildanalyse & Dynamische Einstellungen</h3>
+          <p className="text-sm text-gray-500 mt-0.5">Letzte Analyse: {ts}</p>
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-sm text-indigo-600 hover:text-indigo-800 font-medium"
+        >
+          {expanded ? 'Einklappen' : 'Details anzeigen'}
+        </button>
+      </div>
+
+      {/* Summary row */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <div className="bg-indigo-50 rounded-xl p-3 text-center">
+          <p className="text-xs text-indigo-500 font-medium">Szene</p>
+          <p className="text-sm font-bold text-indigo-800 mt-0.5">{String(analysis.sceneType ?? '–')}</p>
+        </div>
+        <div className="bg-rose-50 rounded-xl p-3 text-center">
+          <p className="text-xs text-rose-500 font-medium">Gesichter</p>
+          <p className="text-sm font-bold text-rose-800 mt-0.5">{analysis.hasFace ? `Ja (${analysis.faceCount ?? 1})` : 'Nein'}</p>
+        </div>
+        <div className="bg-amber-50 rounded-xl p-3 text-center">
+          <p className="text-xs text-amber-500 font-medium">Hautton</p>
+          <p className="text-sm font-bold text-amber-800 mt-0.5">{String(attrs?.skinTone ?? '–')}</p>
+        </div>
+        <div className="bg-emerald-50 rounded-xl p-3 text-center">
+          <p className="text-xs text-emerald-500 font-medium">Haarfarbe</p>
+          <p className="text-sm font-bold text-emerald-800 mt-0.5">{String(attrs?.hairColor ?? '–')}</p>
+        </div>
+      </div>
+
+      {/* Description */}
+      {analysis.description && (
+        <p className="text-sm text-gray-600 italic mb-4 px-1">"{String(analysis.description)}"</p>
+      )}
+
+      {expanded && (
+        <div className="space-y-4 mt-4 border-t border-gray-100 pt-4">
+          {/* Regions */}
+          {regions && (
+            <div>
+              <h4 className="text-sm font-semibold text-gray-700 mb-2">Bildregionen</h4>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {Object.entries(regions).map(([key, region]) => (
+                  <div key={key} className={`rounded-xl border p-3 ${regionColors[key] ?? 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+                    <p className="text-xs font-semibold capitalize">{key === 'face' ? 'Gesicht' : key === 'hair' ? 'Haare' : key === 'clothing' ? 'Kleidung' : key === 'background' ? 'Hintergrund' : 'Sonstiges'}</p>
+                    <p className="text-lg font-bold mt-0.5">{region?.pct ?? 0}%</p>
+                    {region?.dominantColor && (
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <div className="w-4 h-4 rounded-full border border-black/10" style={{ backgroundColor: String(region.dominantColor) }} />
+                        <span className="text-xs font-mono">{String(region.dominantColor)}</span>
+                      </div>
+                    )}
+                    <p className="text-xs mt-1 opacity-70">Komplexität max: {region?.tileComplexityMax ?? '–'}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Algo Reasoning */}
+          {(dynamic?.reasoning || algo?.reasoning) && (
+            <div className="bg-indigo-50 rounded-xl p-3 border border-indigo-200">
+              <p className="text-xs font-semibold text-indigo-600 mb-1">KI-Begründung</p>
+              <p className="text-sm text-indigo-800">{String(dynamic?.reasoning ?? algo?.reasoning ?? '')}</p>
+            </div>
+          )}
+
+          {/* Dynamic vs Applied Settings comparison */}
+          <div>
+            <h4 className="text-sm font-semibold text-gray-700 mb-2">Angewendete Einstellungen (dynamisch von Gemini)</h4>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-1.5 px-2 text-xs font-semibold text-gray-500">Parameter</th>
+                    <th className="text-right py-1.5 px-2 text-xs font-semibold text-indigo-500">Gemini empfiehlt</th>
+                    <th className="text-right py-1.5 px-2 text-xs font-semibold text-emerald-500">Angewendet</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(settingLabels).map(key => {
+                    const geminiVal = dynamic ? dynamic[key] : undefined
+                    const appliedVal = applied ? applied[key] : undefined
+                    if (geminiVal === undefined && appliedVal === undefined) return null
+                    const isDiff = geminiVal !== undefined && appliedVal !== undefined && String(geminiVal) !== String(appliedVal)
+                    return (
+                      <tr key={key} className="border-b border-gray-50 hover:bg-gray-50">
+                        <td className="py-1.5 px-2 text-gray-700 font-medium">{settingLabels[key] ?? key}</td>
+                        <td className="py-1.5 px-2 text-right font-mono text-indigo-700">{geminiVal !== undefined ? String(geminiVal) : '–'}</td>
+                        <td className={`py-1.5 px-2 text-right font-mono ${isDiff ? 'text-amber-600 font-bold' : 'text-emerald-700'}`}>
+                          {appliedVal !== undefined ? String(appliedVal) : '–'}
+                          {isDiff && <span className="ml-1 text-xs text-amber-500" title="Admin-Override aktiv">*</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">* = Admin-Override aktiv (weicht von Gemini-Empfehlung ab)</p>
+          </div>
+
+          {/* Attributes detail */}
+          {attrs && (
+            <div>
+              <h4 className="text-sm font-semibold text-gray-700 mb-2">Erkannte Attribute</h4>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(attrs).map(([key, val]) => (
+                  <span key={key} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                    val === true ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                    val === false ? 'bg-gray-50 text-gray-400 border-gray-200' :
+                    'bg-blue-50 text-blue-700 border-blue-200'
+                  }`}>
+                    {key}: {String(val)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LastMosaicQualityPanel() {
   const [data, setData] = useState<Record<string, unknown> | null>(null)
   const [open, setOpen] = useState(true)
@@ -4694,6 +4889,9 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
           </button>
         </div>
       </div>
+
+      {/* Gemini Bildanalyse & Dynamische Einstellungen (Admin-only) */}
+      <GeminiAnalysisPanel />
 
       {/* Letztes Mosaik – Qualitätsanalyse */}
       <LastMosaicQualityPanel />
