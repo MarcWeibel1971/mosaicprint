@@ -1174,6 +1174,10 @@ export default function Admin() {
           setCustomKeywordResult(`✅ Import abgeschlossen: ${totalImported} neue Bilder importiert (${keywords.length} Keywords via ${customKeywordSource})`)
           setCustomKeywordLoading(false)
           fetchStats()
+          // Open import review modal if tiles were imported
+          if (totalImported > 0 && sessionId) {
+            openImportReview(sessionId)
+          }
           // Generate PDF report
           generateImportReportPdf(sess, keywords, customKeywordSource, customKeywordCount)
         }
@@ -4970,138 +4974,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
-      {/* ── Auto-Learn Cycle ─────────────────────────────────────────────── */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="font-bold text-gray-900 flex items-center gap-2">
-              <span className="text-xl">🤖</span> Auto-Learn-Zyklus
-            </h3>
-            <p className="text-sm text-gray-500 mt-1">
-              Vollautomatischer Zyklus: QA-Check → Lückenanalyse → Smart-Import → Reindex → QA-Nachcheck
-            </p>
-          </div>
-          <button
-            onClick={startAutoLearn}
-            disabled={autoLearnRunning}
-            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-semibold px-5 py-2 rounded-xl text-sm transition-colors"
-          >
-            {autoLearnRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-            {autoLearnRunning ? 'Läuft...' : 'Zyklus starten'}
-          </button>
-        </div>
-        {/* Config */}
-        <div className="flex flex-wrap gap-4 mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-500 shrink-0">Import-Anzahl:</label>
-            <input
-              type="number"
-              value={autoLearnImportCount}
-              onChange={e => setAutoLearnImportCount(Math.max(50, Math.min(2000, Number(e.target.value))))}
-              className="w-20 text-sm border border-gray-200 rounded-lg px-2 py-1 text-center"
-              min={50} max={2000} disabled={autoLearnRunning}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-500 shrink-0">Ziel pro Bucket:</label>
-            <input
-              type="number"
-              value={autoLearnTargetPerBucket}
-              onChange={e => setAutoLearnTargetPerBucket(Math.max(50, Math.min(1000, Number(e.target.value))))}
-              className="w-20 text-sm border border-gray-200 rounded-lg px-2 py-1 text-center"
-              min={50} max={1000} disabled={autoLearnRunning}
-            />
-          </div>
-        </div>
-        {/* Current run steps */}
-        {autoLearnSteps.length > 0 && (
-          <div className="space-y-1 mb-4">
-            {autoLearnSteps.map((step, i) => (
-              <div key={i} className={`flex items-start gap-2 text-xs px-3 py-2 rounded-lg ${
-                step.status === 'done' ? 'bg-green-50 text-green-700' :
-                step.status === 'running' ? 'bg-blue-50 text-blue-700' :
-                step.status === 'skipped' ? 'bg-gray-50 text-gray-500' :
-                step.status === 'error' ? 'bg-red-50 text-red-700' :
-                'bg-gray-50 text-gray-600'
-              }`}>
-                <span className="shrink-0 mt-0.5">
-                  {step.status === 'done' ? '✅' : step.status === 'running' ? '⏳' : step.status === 'skipped' ? '⏭️' : step.status === 'error' ? '❌' : '•'}
-                </span>
-                <span className="flex-1">{step.message}</span>
-                <span className="text-gray-400 shrink-0">{new Date(step.ts).toLocaleTimeString('de-CH')}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        {/* Recent runs - collapsible */}
-        {autoLearnRuns.length > 0 && (
-          <div>
-            <button
-              onClick={() => setAutoLearnRunsExpanded(e => !e)}
-              className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 hover:text-gray-700"
-            >
-              {autoLearnRunsExpanded ? '▲' : '▼'} Letzte Zyklen ({autoLearnRuns.length})
-            </button>
-            {!autoLearnRunsExpanded && autoLearnRuns[0] && (
-              <div className="flex items-center gap-2 text-xs px-3 py-2 bg-gray-50 rounded-lg">
-                <span className="font-mono text-gray-400">#{autoLearnRuns[0].id}</span>
-                <span className={`font-medium px-2 py-0.5 rounded-full ${autoLearnRuns[0].status === 'success' ? 'bg-green-100 text-green-700' : autoLearnRuns[0].status === 'running' ? 'bg-blue-100 text-blue-700' : autoLearnRuns[0].status === 'error' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
-                  {autoLearnRuns[0].status === 'success' ? '✅' : autoLearnRuns[0].status === 'running' ? '⏳' : autoLearnRuns[0].status === 'error' ? '❌' : '⚠️'} {autoLearnRuns[0].status}
-                </span>
-                <span className="text-gray-400">{new Date(autoLearnRuns[0].started_at).toLocaleString('de-CH')}</span>
-              </div>
-            )}
-            {autoLearnRunsExpanded && (
-              <div className="space-y-1">
-                {autoLearnRuns.slice(0, 5).map(run => (
-                  <div key={run.id} className="flex items-center gap-3 text-xs px-3 py-2 bg-gray-50 rounded-lg">
-                    <span className="font-mono text-gray-400">#{run.id}</span>
-                    <span className={`font-medium px-2 py-0.5 rounded-full ${
-                      run.status === 'success' ? 'bg-green-100 text-green-700' :
-                      run.status === 'running' ? 'bg-blue-100 text-blue-700' :
-                      run.status === 'error' ? 'bg-red-100 text-red-700' :
-                      'bg-gray-100 text-gray-600'
-                    }`}>
-                      {run.status === 'success' ? '\u2705' : run.status === 'running' ? '\u23f3' : run.status === 'error' ? '\u274c' : '\u26a0\ufe0f'} {run.status}
-                    </span>
-                    <span className="text-gray-500">{new Date(run.started_at).toLocaleString('de-CH')}</span>
-                    {run.finished_at && (
-                      <span className="text-gray-400">
-                        {Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s
-                      </span>
-                    )}
-                    <button
-                      onClick={() => setAutoLearnExpandedRun(autoLearnExpandedRun === run.id ? null : run.id)}
-                      className="ml-auto text-indigo-500 hover:text-indigo-700"
-                    >
-                      {autoLearnExpandedRun === run.id ? '\u25b2' : '\u25bc'}
-                    </button>
-                  </div>
-                ))}
-                {autoLearnExpandedRun !== null && (() => {
-                  const run = autoLearnRuns.find(r => r.id === autoLearnExpandedRun)
-                  if (!run || !run.steps_json) return null
-                  const steps = Array.isArray(run.steps_json) ? run.steps_json : []
-                  return (
-                    <div className="mt-2 space-y-1 pl-4">
-                      {steps.map((step: {step: string; status: string; message: string; ts: string}, i: number) => (
-                        <div key={i} className={`text-xs px-3 py-1.5 rounded-lg ${
-                          step.status === 'done' ? 'bg-green-50 text-green-700' :
-                          step.status === 'running' ? 'bg-blue-50 text-blue-700' :
-                          step.status === 'error' ? 'bg-red-50 text-red-700' :
-                          'bg-gray-50 text-gray-500'
-                        }`}>
-                          {step.status === 'done' ? '\u2705' : step.status === 'running' ? '\u23f3' : step.status === 'error' ? '\u274c' : '\u23ed\ufe0f'} {step.message}
-                        </div>
-                      ))}
-                    </div>
-                  )
-                })()}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
 
       {/* Semantic Auto-Tagger entfernt – kein Mehrwert */}
 
