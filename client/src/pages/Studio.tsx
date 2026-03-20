@@ -1653,7 +1653,7 @@ export default function Studio() {
       // - Desktop: 5000 tiles (avoids Railway/Fastly 429 when loading 17k+ tiles individually)
       // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
       // This preserves quality (best matches kept) while reducing memory footprint
-      const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 1500;
+      const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 800;
       const DESKTOP_MAX_TILES = 5000;
       const MAX_TILES = isMobileOrSlow ? MOBILE_MAX_TILES : DESKTOP_MAX_TILES;
       if (neededTileIds.size > MAX_TILES) {
@@ -1701,9 +1701,9 @@ export default function Studio() {
         // -- Direct R2/CDN loading strategy --
         // Load tiles in parallel batches directly from tiles.mosaicprint.ch
         // CDN has no rate limits and serves from edge nodes worldwide
-        const DIRECT_BATCH = isMobileOrSlow ? 30 : 100; // Parallel requests per batch
-        const DIRECT_TIMEOUT = isMobileOrSlow ? 12000 : 15000;
-        const BATCH_DELAY = isMobileOrSlow ? 100 : 50; // ms between batches
+        const DIRECT_BATCH = isMobileOrSlow ? 15 : 100; // Smaller batches on mobile to reduce memory pressure
+        const DIRECT_TIMEOUT = isMobileOrSlow ? 15000 : 15000;
+        const BATCH_DELAY = isMobileOrSlow ? 200 : 50; // ms between batches (longer on mobile for GC)
         let loaded = 0;
         let r2Loaded = 0;
         let proxyFallback = 0;
