@@ -1602,77 +1602,9 @@ export default function Admin() {
                 Pexels liefert bis zu 80 Bilder/Keyword, Unsplash bis zu 30.
               </p>
 
-              {/* Progress bars for running jobs */}
-              {(['pexels', 'unsplash', 'pixabay'] as const).map(src => {
-                const job = importProgress[src]
-                if (!job?.running && !job?.finishedAt) return null
-                return (
-                  <div key={src} className="mb-3 bg-gray-50 rounded-xl p-3">
-                    <div className="flex justify-between text-xs text-gray-600 mb-1">
-                      <span className="font-medium capitalize">{src}</span>
-                      <span>{job.imported ?? 0} / {job.total ?? '?'} neu importiert</span>
-                    </div>
-                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all ${job.running ? 'bg-indigo-400 animate-pulse' : 'bg-green-400'}`}
-                        style={{ width: `${job.total ? Math.min(100, Math.round(((job.imported ?? 0) / job.total) * 100)) : 0}%` }}
-                      />
-                    </div>
-                    {job.log && job.log.length > 0 && (
-                      <div className="mt-1 max-h-16 overflow-y-auto">
-                        {job.log.slice(-3).map((l, i) => (
-                          <div key={i} className="text-[10px] text-gray-400 truncate">{l}</div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
 
-              {/* Kategorie-Auswahl für gezielten Import – ENTFERNT: Keyword-Generator ist die bessere Alternative */}
-              {false && <div className="mb-4 p-4 bg-amber-50 rounded-xl border border-amber-200">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-semibold text-amber-900">🎯 Manueller Kategorie-Import</span>
-                  <span className="text-xs text-amber-600">Für spezifische Kategorien – oder nutze den Bild-optimierten Import oben für automatische Empfehlungen</span>
-                </div>
-                <select
-                  value={importCategory}
-                  onChange={e => setImportCategory(e.target.value)}
-                  className="w-full text-sm border border-amber-300 rounded-lg px-3 py-2 bg-white text-gray-800"
-                >
-                  <option value="">— Kein Kategorie-Filter (Standard: Gap-basiert) —</option>
-                  <optgroup label="Portraits">
-                    <option value="portrait_light_skin">👤 Portrait – Helle Haut / Blond</option>
-                    <option value="portrait_medium_skin">👤 Portrait – Mittlere Haut / Braun</option>
-                    <option value="portrait_dark_skin">👤 Portrait – Dunkle Haut</option>
-                    <option value="portrait_olive_skin">👤 Portrait – Olive / Dunkles Haar</option>
-                    <option value="portrait_glasses">👓 Portrait – Brille / Graues Haar</option>
-                    <option value="portrait_red_hair">🦰 Portrait – Rotes Haar</option>
-                    <option value="portrait_child">👶 Portrait – Kind / Baby</option>
-                    <option value="portrait_elderly">👴 Portrait – Ältere Person</option>
-                    <option value="portrait_backlight">🌅 Portrait – Gegenlicht / Silhouette</option>
-                    <option value="portrait_group">👥 Portrait – Gruppe / Mehrere Personen</option>
-                  </optgroup>
-                  <optgroup label="Natur">
-                    <option value="nature_sunset">🌅 Natur – Sonnenuntergang</option>
-                    <option value="nature_ocean">🌊 Natur – Ozean / Meer</option>
-                    <option value="nature_forest">🌲 Natur – Wald / Grün</option>
-                    <option value="nature_snow">❄️ Natur – Schnee / Winter</option>
-                    <option value="nature_mountains">⛰️ Natur – Berge</option>
-                  </optgroup>
-                  <optgroup label="Stadt">
-                    <option value="city_night">🌃 Stadt – Skyline Nacht</option>
-                    <option value="city_architecture">🏛️ Stadt – Architektur</option>
-                  </optgroup>
-                  <optgroup label="Tiere">
-                    <option value="animal_warm">🦁 Tiere – Erdtöne (Löwe etc.)</option>
-                    <option value="animal_colorful">🦜 Tiere – Bunt (Vögel etc.)</option>
-                  </optgroup>
-                </select>
-                {importCategory && (
-                  <p className="mt-1 text-xs text-amber-700">✅ Import wird mit Kategorie-Keywords für <strong>{importCategory}</strong> priorisiert</p>
-                )}
-              </div>}
+
+
 
               {/* ── Freie Keyword-Eingabe ── */}
               <div className="mb-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
@@ -1745,39 +1677,7 @@ export default function Admin() {
               {/* ── Keyword-Generator ── */}
               <KeywordGenerator onInsertKeywords={(kws) => setCustomKeywords(prev => prev ? prev + ', ' + kws : kws)} />
 
-              {/* Alle gleichzeitig */}
-              <div className="flex flex-wrap items-center gap-3 mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-indigo-900 text-sm mb-0.5">Alle Quellen gleichzeitig</div>
-                  <div className="text-xs text-indigo-600">Startet Pexels + Unsplash + Pixabay parallel für maximalen Durchsatz</div>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <input
-                    type="number"
-                    value={importAllBatch}
-                    onChange={e => setImportAllBatch(Math.max(50, Math.min(2000, Number(e.target.value))))}
-                    className="w-24 text-sm border border-indigo-200 rounded-lg px-2 py-1.5 text-center"
-                    min={50} max={2000} step={50}
-                    disabled={importAllRunning}
-                  />
-                  <button
-                    onClick={startImportAll}
-                    disabled={importAllRunning || (!apiKeys?.pexels && !apiKeys?.unsplash && !apiKeys?.pixabay)}
-                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm whitespace-nowrap"
-                  >
-                    {importAllRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                    {importAllRunning ? 'Startet...' : '⚡ Alle gleichzeitig'}
-                  </button>
-                </div>
-              </div>
 
-              {/* Individual source cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <ImportCard title="Pexels" description="Bis zu 80 Bilder/Keyword, diverse Suche. Empfohlen für große Batches." icon={<Camera className="w-5 h-5 text-green-600" />} color="green" available={!!apiKeys?.pexels} job={importProgress['pexels']} isActive={activeJob === 'pexels'} onImport={(n) => startImport('pexels', n)} defaultBatch={500} maxBatch={2000} />
-                <ImportCard title="Unsplash" description="Bis zu 30 Bilder/Keyword, hochwertige Fotos. Ergänzt Pexels gut." icon={<Camera className="w-5 h-5 text-purple-600" />} color="purple" available={!!apiKeys?.unsplash} job={importProgress['unsplash']} isActive={activeJob === 'unsplash'} onImport={(n) => startImport('unsplash', n)} defaultBatch={300} maxBatch={1000} />
-                <ImportCard title="Pixabay" description="Bis zu 200 Bilder/Keyword, lizenzfreie CC0-Fotos ohne Wasserzeichen. Ideal für Portraits & Hauttöne." icon={<Camera className="w-5 h-5 text-orange-600" />} color="orange" available={!!apiKeys?.pixabay} job={importProgress['pixabay']} isActive={activeJob === 'pixabay'} onImport={(n) => startImport('pixabay', n)} defaultBatch={300} maxBatch={1000} />
-                <ImportCard title="Flickr" description="Bis zu 100 Bilder/Seite, CC-lizenzierte Fotos. Millionen Bilder für Sand, Himmel, Natur & mehr." icon={<Camera className="w-5 h-5 text-blue-600" />} color="blue" available={!!apiKeys?.flickr} job={importProgress['flickr']} isActive={activeJob === 'flickr'} onImport={(n) => startImport('flickr', n)} defaultBatch={500} maxBatch={5000} />
-              </div>
             </div>
 
             {/* LAB + Seed */}
