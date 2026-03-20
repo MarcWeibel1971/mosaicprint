@@ -301,7 +301,10 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS import_session_id TEXT DEFAULT NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_mosaic_images_import_session_id ON mosaic_images (import_session_id)`);
 
-  console.log("[DB] Schema ensured (v8 with import_session_id)");
+  // v9: blur_score – Laplacian Variance for blur detection (< 80 = blurry)
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS blur_score REAL DEFAULT NULL`);
+
+  console.log("[DB] Schema ensured (v9 with blur_score)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
