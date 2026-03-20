@@ -57,7 +57,6 @@ interface TileImage {
   createdAt: string; sourceId: string
   colorCategory: string | null; brightnessCategory: string | null
   subject: string | null
-  semanticTheme: string | null
   qualityStatus?: string | null
   tileType?: string | null
   photographerName?: string | null
@@ -295,22 +294,6 @@ const COLOR_LABELS: Record<string, { label: string; color: string; emoji: string
   schwarz: { label: 'Schwarz', color: '#1f2937', emoji: '⬛' },
 }
 
-// ── Quality Assurance Types & Constants (declared before all components to avoid TDZ) ──
-interface QaRun {
-  id: number; checkType: string; status: string; startedAt: string; finishedAt: string | null; summary: Record<string, unknown> | null
-}
-interface QaItem {
-  id: number; runId: number; entityType: string; entityId: string; status: string; message: string; details: Record<string, unknown> | null
-}
-const QA_CHECKS = [
-  { id: 'index-integrity', label: 'Index-Integrität', icon: '🔍', desc: 'Prüft ob alle Bilder LAB-Werte haben und Quadrant-Index vollständig ist.' },
-  { id: 'pool-balance', label: 'Pool-Balance', icon: '⚖️', desc: 'Analysiert Farbraum-Abdeckung: Dunkel/Hell/Sättigung/Warm/Kühl.' },
-  { id: 'import-health', label: 'Import-Health', icon: '📥', desc: 'Zeigt Import-Statistiken pro Quelle und prüft auf URL-Duplikate.' },
-  { id: 'duplicate-check', label: 'Duplikat-Check', icon: '🔁', desc: 'Sucht nach pHash- und URL-Duplikaten in der Datenbank.' },
-  { id: 'tile-quality-score', label: 'Tile-Quality-Score', icon: '⭐', desc: 'Bewertet 200 zufällige Tiles nach Farbvielfalt, Textur und Helligkeit.' },
-]
-
-// ── R2 Migration Panel ──────────────────────────────────────────────────────────
 interface R2Status {
   running: boolean; done: number; total: number; errors: number;
   skippedHotlink?: number; skippedNoUrl?: number; retried?: number;
@@ -1015,6 +998,28 @@ export default function Admin() {
       fetchStats()
     } catch {
       setMessage({ text: 'Fehler bei der Reklassifizierung', type: 'error' })
+    } finally { setActiveJob(null) }
+  }
+
+  const handleReindexAll = async () => {
+    if (activeJob) return
+    if (!window.confirm('Vollständige Neu-Indexierung starten?\n\n1. LAB-Quadrant Backfill (15D-Features)\n2. Tile-Typ Reklassifizierung (calm/busy)\n\nDas kann 30-90 Min dauern.')) return
+    setActiveJob('reindex')
+    setMessage({ text: '🔄 Neu-Indexierung gestartet (Schritt 1/2: LAB Backfill)...', type: 'info' })
+    try {
+      // Step 1: LAB Backfill
+      await fetch('/api/trpc/indexLabColors', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+      })
+      setMessage({ text: '🔄 Neu-Indexierung (Schritt 2/2: Tile-Typ Reklassifizierung)...', type: 'info' })
+      // Step 2: Reclassify
+      await fetch('/api/trpc/batchReclassifyTileTypes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+      })
+      setMessage({ text: '✅ Neu-Indexierung abgeschlossen – LAB-Werte und Tile-Typen wurden aktualisiert.', type: 'success' })
+      fetchStats()
+    } catch (e) {
+      setMessage({ text: `❌ Fehler bei der Neu-Indexierung: ${String(e)}`, type: 'error' })
     } finally { setActiveJob(null) }
   }
 
@@ -1805,10 +1810,11 @@ export default function Admin() {
                     )}
                   </>
                 )}
-                <button onClick={handleIndexLab} disabled={!!activeJob} className="flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm">
-                  {activeJob === 'lab' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
-                  {activeJob === 'lab' ? 'Backfill läuft...' : `Quadrant-LAB berechnen (${(((stats as any)?.quadrantMissing) ?? stats?.total ?? 0).toLocaleString()} Tiles)`}
+                <button onClick={handleReindexAll} disabled={!!activeJob} className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 text-white font-semibold px-5 py-2.5 rounded-xl transition-colors text-sm">
+                  {activeJob === 'reindex' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🔄</span>}
+                  {activeJob === 'reindex' ? 'Indexierung läuft...' : `Neu indexieren (LAB + Klassifizierung)`}
                 </button>
+                <p className="text-xs text-gray-400 mt-1">Führt LAB-Backfill und Tile-Typ-Reklassifizierung (calm/busy) in einem Schritt aus.</p>
               </div>
 
               <div className="bg-white rounded-2xl p-6 border border-indigo-200">
@@ -1953,12 +1959,9 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [sourceDeleting, setSourceDeleting] = useState(false)
-  const [semanticThemeFilter, setSemanticThemeFilter] = useState('alle')
   const [tileTypeFilter, setTileTypeFilter] = useState('alle')
   const [warmCoolFilter, setWarmCoolFilter] = useState('alle')
   const [saturationFilter, setSaturationFilter] = useState('alle')
-  const [batchTagging, setBatchTagging] = useState(false)
-  const [batchTagResult, setBatchTagResult] = useState<string | null>(null)
   const LIMIT = 60
 
   const fetchDbStats = useCallback(async () => {
@@ -2000,7 +2003,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (saturationFilter !== 'alle') params.saturationFilter = saturationFilter
       if (importedSince !== 'alle') params.importedSince = importedSince
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
-      if (semanticThemeFilter !== 'alle') params.semanticTheme = semanticThemeFilter
       if (tileTypeFilter !== 'alle') params.tileType = tileTypeFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
       const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`)
@@ -2011,7 +2013,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, importedSince, qualityStatusFilter, semanticThemeFilter, tileTypeFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, importedSince, qualityStatusFilter, tileTypeFilter, onMessage])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
@@ -2104,7 +2106,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     const interval = setInterval(() => { fetchDbStats() }, 30000)
     return () => clearInterval(interval)
   }, [fetchDbStats])
-  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, semanticThemeFilter, qualityStatusFilter, importedSince, tileTypeFilter])
+  useEffect(() => { setPage(1); fetchImages(1) }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, qualityStatusFilter, importedSince, tileTypeFilter])
   useEffect(() => { fetchImages(page) }, [page])
 
   const handlePdfExport = useCallback(async () => {
@@ -2313,26 +2315,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     onMessage({ text: `✅ ${deleted} Bilder gelöscht`, type: 'success' })
     fetchImages(page)
     fetchDbStats()
-  }
-
-  const runBatchTag = async () => {
-    if (!confirm('Alle Tiles ohne Semantic-Tag automatisch taggen? (Kann einige Minuten dauern)')) return
-    setBatchTagging(true)
-    setBatchTagResult(null)
-    try {
-      const res = await fetch('/api/trpc/batchTagSemanticThemes', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
-      })
-      const data = await res.json()
-      const result = data.result?.data?.json ?? data.result?.data ?? data
-      setBatchTagResult(`✅ ${result.tagged ?? 0} Tiles getaggt`)
-      fetchImages(page)
-      fetchDbStats()
-    } catch (e) {
-      setBatchTagResult(`❌ Fehler: ${String(e)}`)
-    } finally {
-      setBatchTagging(false)
-    }
   }
 
   const handleDeleteBySource = async (source: string) => {
@@ -2648,15 +2630,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                       ⚠️ <strong>Zu wenig ruhige Tiles ({calmPct}%):</strong> Ideal wären 40–50%. Import von Himmel, Nebel, Wasser, Bokeh, Texturen empfohlen. Ziel: {Math.round(totalTT * 0.40 - calm).toLocaleString()} weitere ruhige Tiles.
                     </div>
                   )}
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      onClick={handleBatchReclassify}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium rounded-lg transition-colors"
-                    >
-                      🔄 Alle Tiles neu klassifizieren
-                    </button>
-                    <span className="text-xs text-gray-400">Neuer Score: Sobel-Kanten + Chroma-Varianz + Pixel-Diversität</span>
-                  </div>
+
                 </div>
               )
             })()}
@@ -2784,15 +2758,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {shutterstockLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>❌</span>}
             {shutterstockLoading ? 'Entferne...' : 'Shutterstock entfernen'}
           </button>
-          <button
-            onClick={runBatchTag}
-            disabled={batchTagging}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
-          >
-            {batchTagging ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🏷️</span>}
-            {batchTagging ? 'Tagge Tiles...' : 'Semantic-Tags vergeben'}
-          </button>
-          {batchTagResult && <p className="text-xs font-medium text-indigo-700">{batchTagResult}</p>}
+
         </div>
       </div>
 
@@ -2822,17 +2788,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}>
               {v === 'alle' ? 'Alle' : v === 'pending' ? '⏳ Ausstehend' : v === 'pass' ? '✅ Pass' : v === 'warn' ? '⚠️ Warn' : '❌ Fail'}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Semantic-Tag:</span>
-          {['alle', 'portrait', 'nature_ocean', 'nature_forest', 'nature_sunset', 'nature_snow', 'city_night', 'abstract_colorful', 'general'].map(v => (
-            <button key={v} onClick={() => { setSemanticThemeFilter(v); setPage(1) }}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                semanticThemeFilter === v ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}>
-              {v === 'alle' ? 'Alle' : v === 'portrait' ? '👤 Portrait' : v === 'nature_ocean' ? '🌊 Ozean' : v === 'nature_forest' ? '🌿 Wald' : v === 'nature_sunset' ? '🌅 Sonnenuntergang' : v === 'nature_snow' ? '❄️ Schnee' : v === 'city_night' ? '🌃 Nacht' : v === 'abstract_colorful' ? '🎨 Bunt' : '📦 Allgemein'}
             </button>
           ))}
         </div>
@@ -2914,12 +2869,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setQualityStatusFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {semanticThemeFilter !== 'alle' && (
-          <span className="flex items-center gap-1 bg-indigo-100 text-indigo-700 text-xs px-2 py-1 rounded-full">
-            🏷️ {semanticThemeFilter}
-            <button onClick={() => setSemanticThemeFilter('alle')}><X className="w-3 h-3" /></button>
-          </span>
-        )}
         {tileTypeFilter !== 'alle' && (
           <span className="flex items-center gap-1 bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded-full">
             {tileTypeFilter === 'calm' ? '🌫️ Ruhig' : tileTypeFilter === 'medium' ? '🎨 Normal' : '🌀 Komplex'}
@@ -2938,8 +2887,8 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             <button onClick={() => setSaturationFilter('alle')}><X className="w-3 h-3" /></button>
           </span>
         )}
-        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || semanticThemeFilter !== 'alle' || tileTypeFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
+        {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle' || tileTypeFilter !== 'alle') && (
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setTileTypeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>
@@ -3070,9 +3019,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <div className="flex justify-between"><span>Warm/Kühl:</span><span className="font-medium">{selectedImage.warmCoolCategory ?? '–'}</span></div>
               <div className="flex justify-between"><span>Tile-Typ:</span><span className="font-medium">{selectedImage.tileType ?? '–'}</span></div>
               <div className="flex justify-between"><span>Thema:</span><span className="font-medium">{selectedImage.subject ?? 'general'}</span></div>
-              <div className="flex justify-between"><span>Semantic-Tag:</span>
-                <span className="font-medium text-indigo-600">{selectedImage.semanticTheme ?? <span className="text-gray-400 italic">nicht getaggt</span>}</span>
-              </div>
               {/* Qualitäts-Metriken */}
               <div className="mt-2 pt-2 border-t border-gray-100">
                 <p className="text-xs font-semibold text-gray-500 mb-1">Qualitäts-Metriken</p>
@@ -3768,105 +3714,12 @@ function LastMosaicQualityPanel() {
             </div>
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }
-
-// ── Quality Assurance Tab ─────────────────────────────────────────────────────
-// (QaRun, QaItem interfaces and QA_CHECKS const are declared above Admin component to avoid TDZ)
+// ── Quality Assurance Tab ─────────────────────────────────────────────────────────────────────────────────
 function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const [runs, setRuns] = useState<QaRun[]>([])
-  const [runningChecks, setRunningChecks] = useState<Set<string>>(new Set())
-  const [selectedRun, setSelectedRun] = useState<number | null>(null)
-  const [runItems, setRunItems] = useState<QaItem[]>([])
-  const [loadingItems, setLoadingItems] = useState(false)
-  const [lastRefresh, setLastRefresh] = useState(Date.now())
-
-  const fetchRuns = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trpc/getQualityRuns?input=' + encodeURIComponent(JSON.stringify({ limit: 50 })))
-      const data = await res.json()
-      const rows: QaRun[] = data.result?.data?.json ?? data.result?.data ?? []
-      setRuns(rows)
-      // Auto-refresh while any check is running
-      const anyRunning = rows.some((r: QaRun) => r.status === 'running')
-      if (anyRunning) setTimeout(() => setLastRefresh(Date.now()), 1500)
-      // Detect newly completed checks and notify
-      setRuns(prev => {
-        for (const newRun of rows) {
-          const old = prev.find(p => p.id === newRun.id)
-          if (old?.status === 'running' && (newRun.status === 'success' || newRun.status === 'warning' || newRun.status === 'error')) {
-            const dur = newRun.finishedAt ? Math.round((new Date(newRun.finishedAt).getTime() - new Date(newRun.startedAt).getTime()) / 1000) : 0
-            const emoji = newRun.status === 'success' ? '✅' : newRun.status === 'warning' ? '⚠️' : '❌'
-            onMessage({ text: `${emoji} ${newRun.checkType} abgeschlossen (${dur}s)`, type: newRun.status === 'error' ? 'error' : 'success' })
-          }
-        }
-        return rows
-      })
-    } catch { /* ignore */ }
-  }, [])
-
-  useEffect(() => { fetchRuns() }, [fetchRuns, lastRefresh])
-
-  const fetchItems = useCallback(async (runId: number) => {
-    setLoadingItems(true)
-    try {
-      const res = await fetch('/api/trpc/getQualityRunItems?input=' + encodeURIComponent(JSON.stringify({ runId })))
-      const data = await res.json()
-      setRunItems(data.result?.data?.json ?? data.result?.data ?? [])
-    } catch { /* ignore */ }
-    finally { setLoadingItems(false) }
-  }, [])
-
-  useEffect(() => {
-    if (selectedRun !== null) fetchItems(selectedRun)
-  }, [selectedRun, fetchItems])
-
-  const runCheck = useCallback(async (checkType: string) => {
-    setRunningChecks(prev => new Set([...prev, checkType]))
-    try {
-      const res = await fetch('/api/trpc/runQualityCheck', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ checkType }),
-      })
-      const data = await res.json()
-      if (data.result?.data?.json?.started || data.result?.data?.started) {
-        onMessage({ text: `${checkType} gestartet`, type: 'info' })
-        setTimeout(() => { setLastRefresh(Date.now()); setRunningChecks(prev => { const n = new Set(prev); n.delete(checkType); return n }) }, 1500)
-      }
-    } catch (e) {
-      onMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
-      setRunningChecks(prev => { const n = new Set(prev); n.delete(checkType); return n })
-    }
-  }, [onMessage])
-
-  const runAll = useCallback(() => runCheck('all'), [runCheck])
-
-  const statusColor = (s: string) => {
-    if (s === 'success') return 'text-green-600 bg-green-50'
-    if (s === 'warning') return 'text-amber-600 bg-amber-50'
-    if (s === 'error') return 'text-red-600 bg-red-50'
-    if (s === 'running') return 'text-blue-600 bg-blue-50'
-    return 'text-gray-500 bg-gray-50'
-  }
-  const itemStatusColor = (s: string) => {
-    if (s === 'pass') return 'text-green-700 bg-green-50 border-green-200'
-    if (s === 'warn') return 'text-amber-700 bg-amber-50 border-amber-200'
-    if (s === 'fail') return 'text-red-700 bg-red-50 border-red-200'
-    return 'text-gray-600 bg-gray-50 border-gray-200'
-  }
-  const statusEmoji = (s: string) => ({ success: '✅', warning: '⚠️', error: '❌', running: '⏳' }[s] ?? '❓')
-
-  // Group runs by checkType for "last run" display
-  const lastRunByType: Record<string, QaRun> = {}
-  for (const run of runs) {
-    if (!lastRunByType[run.checkType] || run.id > lastRunByType[run.checkType].id) {
-      lastRunByType[run.checkType] = run
-    }
-  }
-
   const [pdfGenerating, setPdfGenerating] = useState(false)
   // ── Auto-Learn state ──────────────────────────────────────────────────────
   const [autoLearnRunning, setAutoLearnRunning] = useState(false)
@@ -4257,49 +4110,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
             const lines = doc.splitTextToSize(`• ${s}`, colW - 4)
             doc.setFontSize(9); doc.text(lines, margin + 2, y); y += lines.length * 5 + 2
           }
-          doc.setTextColor(50, 50, 50)
-        }
-      }
-
-      // ── Section 2: Check-Übersicht ─────────────────────────────────────────────
-      y += 6
-      addSection('2. QA-Check-Übersicht')
-      if (runs.length === 0) {
-        addText('Noch keine Checks ausgeführt.')
-      } else {
-        for (const [checkType, run] of Object.entries(lastRunByType)) {
-          const dur = run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : 'laufend'
-          addRow(checkType, `${run.status.toUpperCase()} | ${new Date(run.startedAt).toLocaleString('de-CH')} | Dauer: ${dur}`)
-          if (run.summary) {
-            for (const [k, v] of Object.entries(run.summary).slice(0, 6)) {
-              addRow('', `${k}: ${String(v)}`, 8)
-            }
-          }
-          y += 2
-        }
-      }
-
-      // ── Section 3: Run-Verlauf ────────────────────────────────────────────────
-      y += 4
-      addSection('3. Run-Verlauf (letzte 20)')
-      const recent = runs.slice(0, 20)
-      for (const run of recent) {
-        const dur = run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'
-        addRow(`#${run.id} ${run.checkType}`, `${run.status} | ${new Date(run.startedAt).toLocaleString('de-CH')} | ${dur}`)
-      }
-
-      // ── Section 4: Empfehlungen ───────────────────────────────────────────────
-      y += 4
-      addSection('4. Empfehlungen')
-      const failedChecks = Object.entries(lastRunByType).filter(([, r]) => r.status === 'error' || r.status === 'warning')
-      if (failedChecks.length === 0) {
-        addText('Alle Checks bestanden. Keine Massnahmen erforderlich.')
-      } else {
-        for (const [checkType, run] of failedChecks) {
-          addText(`${checkType}: ${run.status.toUpperCase()} - Details im Check-Tab pruefen.`)
-        }
-      }
-
       // Footer
       const pageCount = doc.getNumberOfPages()
       for (let i = 1; i <= pageCount; i++) {
@@ -4315,7 +4125,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
     } finally {
       setPdfGenerating(false)
     }
-  }, [runs, lastRunByType, onMessage])
+  }, [onMessage])
 
   const handleTestFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -4598,144 +4408,10 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 
   return (
     <div className="space-y-8">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-bold text-gray-900">Qualitätssicherung</h2>
-          <p className="text-sm text-gray-500 mt-1">Manuelle und automatische Checks für Tile-Pool, Import-Pipeline und Algorithmus</p>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={downloadPdfReport} disabled={pdfGenerating}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors">
-            {pdfGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-            {pdfGenerating ? 'Generiere...' : 'PDF-Report'}
-          </button>
-          <button onClick={fetchRuns} className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-xl text-sm transition-colors">
-            <RefreshCw className="w-4 h-4" />
-            Aktualisieren
-          </button>
-          <button onClick={runAll} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-2 rounded-xl text-sm transition-colors">
-            <Zap className="w-4 h-4" />
-            Alle Checks starten
-          </button>
-        </div>
-      </div>
-
-      {/* Check Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {QA_CHECKS.map(check => {
-          const lastRun = lastRunByType[check.id]
-          const isRunning = runningChecks.has(check.id) || lastRun?.status === 'running'
-          const isDone = lastRun && !isRunning
-          const isSuccess = isDone && lastRun.status === 'success'
-          const isWarning = isDone && lastRun.status === 'warning'
-          const isError = isDone && lastRun.status === 'error'
-          const dur = lastRun?.finishedAt
-            ? Math.round((new Date(lastRun.finishedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000)
-            : null
-          const cardBorder = isRunning ? 'border-blue-300 shadow-blue-100 shadow-md'
-            : isSuccess ? 'border-green-300'
-            : isWarning ? 'border-amber-300'
-            : isError ? 'border-red-300'
-            : 'border-gray-200'
-          return (
-            <div key={check.id} className={`bg-white rounded-2xl p-5 border-2 flex flex-col gap-3 transition-all ${cardBorder}`}>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">{check.icon}</span>
-                  <div>
-                    <h3 className="font-bold text-gray-900 text-sm">{check.label}</h3>
-                    {isRunning && (
-                      <span className="text-xs font-medium px-2 py-0.5 rounded-full text-blue-700 bg-blue-50 flex items-center gap-1">
-                        <RefreshCw className="w-3 h-3 animate-spin" /> Läuft...
-                      </span>
-                    )}
-                    {isDone && (
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColor(lastRun.status)}`}>
-                        {statusEmoji(lastRun.status)} {isSuccess ? 'Fertig' : isWarning ? 'Warnung' : 'Fehler'}
-                        {dur !== null && ` · ${dur}s`}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <button
-                  onClick={() => runCheck(check.id)}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-medium px-3 py-1.5 rounded-lg text-xs transition-colors"
-                >
-                  {isRunning ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-                  {isRunning ? 'Läuft...' : 'Starten'}
-                </button>
-              </div>
-              <p className="text-xs text-gray-500">{check.desc}</p>
-              {/* Fertig-Banner */}
-              {isSuccess && (
-                <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 font-medium">
-                  ✅ Abgeschlossen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {isWarning && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 font-medium">
-                  ⚠️ Mit Warnungen · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {isError && (
-                <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 font-medium">
-                  ❌ Fehler · {new Date(lastRun.startedAt).toLocaleString('de-CH')}
-                </div>
-              )}
-              {lastRun?.summary && (
-                <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 font-mono border-t border-gray-100">
-                  {Object.entries(lastRun.summary).slice(0, 4).map(([k, v]) => (
-                    <div key={k}>{k}: <span className="font-semibold">{String(v)}</span></div>
-                  ))}
-                </div>
-              )}
-              {lastRun && (
-                <button
-                  onClick={() => setSelectedRun(selectedRun === lastRun.id ? null : lastRun.id)}
-                  className="text-xs text-indigo-600 hover:text-indigo-800 font-medium text-left"
-                >
-                  {selectedRun === lastRun.id ? '▲ Details ausblenden' : '▼ Details anzeigen'}
-                </button>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Run Items Detail */}
-      {selectedRun !== null && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-bold text-gray-900">Check-Details (Run #{selectedRun})</h3>
-            <button onClick={() => setSelectedRun(null)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
-          </div>
-          {loadingItems ? (
-            <div className="text-center py-8 text-gray-400"><RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />Lade...</div>
-          ) : runItems.length === 0 ? (
-            <div className="text-center py-8 text-gray-400">Keine Einträge gefunden</div>
-          ) : (
-            <div className="space-y-2 max-h-96 overflow-y-auto">
-              {runItems.map(item => (
-                <div key={item.id} className={`flex items-start gap-3 p-3 rounded-xl border text-sm ${itemStatusColor(item.status)}`}>
-                  <span className="font-bold shrink-0 w-12 text-center">
-                    {item.status === 'pass' ? '✅' : item.status === 'warn' ? '⚠️' : '❌'}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium truncate">{item.entityType}/{item.entityId}</div>
-                    <div className="text-xs mt-0.5 opacity-80">{item.message}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Letztes Mosaik – Qualitätsanalyse */}
       <LastMosaicQualityPanel />
-            {/* Test-Analyse */}
+
+      {/* Test-Analyse */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <h3 className="font-bold text-gray-900 mb-1">🧪 Testbild-Analyse</h3>
         <p className="text-sm text-gray-500 mb-4">Analysiert ein Bild gegen den Tile-Pool und zeigt fehlende Farbbereiche + Keyword-Vorschläge für Smart-Import.</p>
@@ -5098,53 +4774,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
-      {/* Run History */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-        <h3 className="font-bold text-gray-900 mb-4">Run-Verlauf (letzte 50)</h3>
-        {runs.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">Noch keine Checks ausgeführt. Starte einen Check oben.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
-                  <th className="pb-2 pr-4">ID</th>
-                  <th className="pb-2 pr-4">Check-Typ</th>
-                  <th className="pb-2 pr-4">Status</th>
-                  <th className="pb-2 pr-4">Gestartet</th>
-                  <th className="pb-2 pr-4">Dauer</th>
-                  <th className="pb-2">Aktionen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map(run => (
-                  <tr key={run.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="py-2 pr-4 text-gray-400 font-mono">#{run.id}</td>
-                    <td className="py-2 pr-4 font-medium">{run.checkType}</td>
-                    <td className="py-2 pr-4">
-                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor(run.status)}`}>
-                        {statusEmoji(run.status)} {run.status}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">{new Date(run.startedAt).toLocaleString('de-CH')}</td>
-                    <td className="py-2 pr-4 text-gray-500 text-xs">
-                      {run.finishedAt ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)}s` : '—'}
-                    </td>
-                    <td className="py-2">
-                      <button
-                        onClick={() => { setSelectedRun(run.id); fetchItems(run.id) }}
-                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                      >
-                        Details
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
       {/* ── Auto-Learn Cycle ─────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-4">
@@ -5290,149 +4919,6 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   )
 }
 
-// ── Semantic Tagger Panel ────────────────────────────────────────────────
-function SemanticTaggerPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const [running, setRunning] = useState(false)
-  const [forceRetag, setForceRetag] = useState(false)
-  const [result, setResult] = useState<{ tagged: number; skipped: number } | null>(null)
-  const [stats, setStats] = useState<Array<{ theme: string; count: number; pct: number }> | null>(null)
-  const [open, setOpen] = useState(true)
-
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trpc/getSemanticThemeStats')
-      const data = await res.json()
-      const rows = data.result?.data?.json ?? data.result?.data ?? []
-      setStats(rows)
-    } catch { /* ignore */ }
-  }, [])
-
-  useEffect(() => { fetchStats() }, [fetchStats])
-
-  const runTagger = useCallback(async () => {
-    if (!forceRetag && !confirm('Alle Tiles ohne Semantic-Tag automatisch klassifizieren? (Kann bei 22.000+ Tiles 1-2 Minuten dauern)')) return
-    if (forceRetag && !confirm('ALLE Tiles (auch bereits getaggte) neu klassifizieren? (Dauert bei 22.000+ Tiles 2-3 Minuten)')) return
-    setRunning(true); setResult(null)
-    try {
-      const res = await fetch('/api/trpc/runSemanticTagger', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ forceRetag })
-      })
-      const data = await res.json()
-      const r = data.result?.data?.json ?? data.result?.data ?? {}
-      setResult({ tagged: r.tagged ?? 0, skipped: r.skipped ?? 0 })
-      onMessage({ text: `✅ Semantic-Tagger: ${r.tagged ?? 0} Tiles getaggt`, type: 'success' })
-      fetchStats()
-    } catch (e) {
-      onMessage({ text: `❌ Tagger-Fehler: ${String(e)}`, type: 'error' })
-    } finally {
-      setRunning(false)
-    }
-  }, [forceRetag, onMessage, fetchStats])
-
-  const THEME_COLORS: Record<string, string> = {
-    portrait: '#f97316', nature_forest: '#22c55e', nature_ocean: '#06b6d4',
-    nature_sunset: '#f59e0b', city_night: '#6366f1', abstract_colorful: '#ec4899',
-    abstract_dark: '#374151', abstract_light: '#d1d5db', nature_snow: '#bfdbfe',
-    nature_warm: '#fbbf24', untagged: '#9ca3af',
-  }
-
-  return (
-    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between p-5 hover:bg-gray-50 transition-colors">
-        <div className="flex items-center gap-3">
-          <span className="text-xl">🏷️</span>
-          <div className="text-left">
-            <h3 className="font-bold text-gray-900">Semantic Auto-Tagger</h3>
-            <p className="text-xs text-gray-500">
-              Klassifiziert Tiles automatisch nach Thema (Portrait, Natur, Nacht, etc.) anhand der LAB-Farbwerte.
-              {stats && ` · ${stats.find(s => s.theme === 'untagged')?.count?.toLocaleString('de-CH') ?? 0} ungetaggt`}
-            </p>
-          </div>
-        </div>
-        <span className="text-gray-400 text-sm">{open ? '▲ Einklappen' : '▼ Anzeigen'}</span>
-      </button>
-      {open && (
-        <div className="border-t border-gray-100 p-5 space-y-5">
-          {/* Controls */}
-          <div className="flex flex-wrap items-center gap-4">
-            <button
-              onClick={runTagger}
-              disabled={running}
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition-colors"
-            >
-              {running ? <RefreshCw className="w-4 h-4 animate-spin" /> : <span>🏷️</span>}
-              {running ? 'Tagge Tiles...' : (forceRetag ? 'Alle neu taggen' : 'Ungetaggte taggen')}
-            </button>
-            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={forceRetag}
-                onChange={e => setForceRetag(e.target.checked)}
-                className="w-4 h-4 rounded"
-              />
-              Alle Tiles neu klassifizieren (Force-Retag)
-            </label>
-            <button onClick={fetchStats} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1">
-              <RefreshCw className="w-3 h-3" /> Statistik aktualisieren
-            </button>
-          </div>
-
-          {/* Result */}
-          {result && (
-            <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
-              <span className="text-2xl">✅</span>
-              <div>
-                <div className="font-semibold text-green-800">{result.tagged.toLocaleString('de-CH')} Tiles getaggt</div>
-                <div className="text-xs text-green-600">{result.skipped.toLocaleString('de-CH')} übersprungen (bereits getaggt)</div>
-              </div>
-            </div>
-          )}
-
-          {/* Theme Distribution */}
-          {stats && stats.length > 0 && (
-            <div>
-              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Themen-Verteilung</h4>
-              <div className="space-y-2">
-                {stats.map(s => (
-                  <div key={s.theme} className="flex items-center gap-3">
-                    <div
-                      className="w-3 h-3 rounded-full shrink-0"
-                      style={{ backgroundColor: THEME_COLORS[s.theme] ?? '#9ca3af' }}
-                    />
-                    <div className="w-40 text-xs text-gray-700 shrink-0 truncate">{s.theme}</div>
-                    <div className="flex-1 bg-gray-100 rounded-full h-2">
-                      <div
-                        className="h-2 rounded-full transition-all"
-                        style={{ width: `${Math.min(100, s.pct)}%`, backgroundColor: THEME_COLORS[s.theme] ?? '#9ca3af' }}
-                      />
-                    </div>
-                    <div className="w-20 text-right text-xs text-gray-500">{s.count.toLocaleString('de-CH')} ({s.pct}%)</div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 text-xs text-gray-400">
-                Gesamt: {stats.reduce((s, r) => s + r.count, 0).toLocaleString('de-CH')} Tiles
-              </div>
-            </div>
-          )}
-
-          {/* Info Box */}
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-            <h4 className="text-xs font-bold text-blue-700 uppercase tracking-wider mb-2">Wie funktioniert der Tagger?</h4>
-            <p className="text-xs text-blue-700">
-              Der Tagger analysiert die LAB-Farbwerte jedes Tiles (kein Bild-Download nötig) und klassifiziert es in eine von 10+ Kategorien:
-              Portrait (Hauttöne), Natur-Wald (Grün), Natur-Ozean (Blau/Cyan), Natur-Sonnenuntergang (Orange/Rot),
-              Nacht/Skyline (Dunkel), Abstrakt-Bunt (hohe Sättigung), Abstrakt-Hell, Abstrakt-Dunkel, Natur-Schnee (Hell/Neutral), Natur-Warm.
-              Diese Tags ermöglichen thematisches Filtering im Studio und gezielteres Smart-Import.
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ── Bereinigungsassistent ────────────────────────────────────────────────
 type CleanupCategory = 'rejected' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore' | 'oversaturatedSkin' | 'portraitBusy'
 
@@ -5445,7 +4931,6 @@ interface CleanupTile {
   avgB: number
   chroma: number
   tileType: string | null
-  semanticTheme: string | null
   qualityScore: number | null
   qualityStatus: string | null
   photographerName: string | null
@@ -5768,7 +5253,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
                       className={`relative cursor-pointer rounded-lg overflow-hidden aspect-square border-2 transition-all ${
                         selectedIds.has(tile.id) ? 'border-red-500 opacity-100' : 'border-transparent opacity-40'
                       }`}
-                      title={`ID:${tile.id} | L:${tile.avgL.toFixed(0)} C:${tile.chroma} | ${tile.tileType ?? '–'} | ${tile.semanticTheme ?? '–'} | ${tile.importQuery ?? ''}`}
+                      title={`ID:${tile.id} | L:${tile.avgL.toFixed(0)} C:${tile.chroma} | ${tile.tileType ?? '–'} | ${tile.importQuery ?? ''}`}
                     >
                       {tile.thumbUrl ? (
                         <img
