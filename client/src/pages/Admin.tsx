@@ -1139,11 +1139,13 @@ export default function Admin() {
           body: JSON.stringify({ sourceId: customKeywordSource, query, count: customKeywordCount, sessionId }),
         })
         const data = await res.json()
-        if (!(data.result?.data?.started || data.started)) {
-          setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${data.result?.data?.error ?? 'Fehler'}` } : p))
+        const started = data.result?.data?.json?.started ?? data.result?.data?.started ?? data.started
+        const errMsg = data.result?.data?.json?.error ?? data.result?.data?.error ?? data.error?.message ?? (res.ok ? 'Fehler' : `HTTP ${res.status}`)
+        if (!started) {
+          setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `❌ ${errMsg}` } : p))
         }
-      } catch {
-        setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: '❌ Netzwerkfehler' } : p))
+      } catch (e) {
+        setCustomKeywordPreview((prev: Array<{query: string; count: number; status: string}>) => prev.map((p, idx) => idx === i ? { ...p, status: `❌ Netzwerkfehler: ${String(e).slice(0,60)}` } : p))
       }
       if (i < keywords.length - 1) await new Promise(r => setTimeout(r, 300))
     }
