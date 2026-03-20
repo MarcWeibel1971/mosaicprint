@@ -465,7 +465,12 @@ export async function getAdminImages(opts: {
         ELSE 'hoch'
       END as "saturationCategory",
       photographer_name as "photographerName",
-      photographer_url as "photographerUrl"
+      photographer_url as "photographerUrl",
+      ai_mosaic_score as "aiMosaicScore",
+      edge_energy as "edgeEnergy",
+      blur_score as "blurScore",
+      quality_score as "geminiScore",
+      COALESCE(quality_status, 'pending') as "geminiStatus"
     FROM mosaic_images ${where} ORDER BY id DESC LIMIT $1 OFFSET $2`,
     [pageSize, offset]
   );
@@ -500,10 +505,12 @@ export async function insertMosaicImage(data: {
 }): Promise<{ inserted: boolean; id: number | null }> {
   const pool = getPool();
   const normalizedUrl = data.sourceUrl.replace(/[?&](w|h|fit|auto|cs|fm|crop|ixid|ixlib|s)=[^&]*/g, '').replace(/[?&]+$/, '');
-  const tlL = data.tlL ?? data.avgL, tlA = data.tlA ?? data.avgA, tlB = data.tlB ?? data.avgB;
-  const trL = data.trL ?? data.avgL, trA = data.trA ?? data.avgA, trB = data.trB ?? data.avgB;
-  const blL = data.blL ?? data.avgL, blA = data.blA ?? data.avgA, blB = data.blB ?? data.avgB;
-  const brL = data.brL ?? data.avgL, brA = data.brA ?? data.avgA, brB = data.brB ?? data.avgB;
+  // Use neutral defaults (50/0/0) when quadrant values are missing, NOT avgL/avgA/avgB.
+  // This ensures the backfill job can detect tiles that need re-computation (tl_l=50 AND tl_a=0 AND tl_b=0).
+  const tlL = data.tlL ?? 50, tlA = data.tlA ?? 0, tlB = data.tlB ?? 0;
+  const trL = data.trL ?? 50, trA = data.trA ?? 0, trB = data.trB ?? 0;
+  const blL = data.blL ?? 50, blA = data.blA ?? 0, blB = data.blB ?? 0;
+  const brL = data.brL ?? 50, brA = data.brA ?? 0, brB = data.brB ?? 0;
   const theme = data.theme ?? data.subject ?? 'general';
   const sourceProvider = data.sourceProvider ?? (
     normalizedUrl.includes('pexels') ? 'pexels' :

@@ -2192,7 +2192,16 @@ export const appRouter = router({
         const res = await pool.query(
           `SELECT id, tile128_url FROM mosaic_images
            WHERE tile128_url IS NOT NULL
-           AND (tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)`
+           AND (
+             -- Default neutral values (new tiles without quadrant data)
+             (tl_l = 50 AND tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)
+             OR
+             -- Old bug: quadrant values copied from global avg (all 4 identical to avg)
+             (ABS(tl_l - avg_l) < 0.01 AND ABS(tl_a - avg_a) < 0.01 AND ABS(tl_b - avg_b) < 0.01
+              AND ABS(tr_l - avg_l) < 0.01 AND ABS(tr_a - avg_a) < 0.01 AND ABS(tr_b - avg_b) < 0.01
+              AND ABS(bl_l - avg_l) < 0.01 AND ABS(bl_a - avg_a) < 0.01 AND ABS(bl_b - avg_b) < 0.01
+              AND ABS(br_l - avg_l) < 0.01 AND ABS(br_a - avg_a) < 0.01 AND ABS(br_b - avg_b) < 0.01)
+           )`
         );
         log(`Backfill Quadrant-LAB: ${res.rows.length} Tiles ohne Quadrant-Daten gefunden`);
         const CONCURRENCY = 8;

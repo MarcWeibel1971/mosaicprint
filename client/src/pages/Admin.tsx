@@ -62,6 +62,15 @@ interface TileImage {
   tileType?: string | null
   photographerName?: string | null
   photographerUrl?: string | null
+  // Quality metrics
+  aiMosaicScore?: number | null   // 0-100 Gesamteignung
+  edgeEnergy?: number | null      // 0-1 Kantendichte (Sobel)
+  blurScore?: number | null       // Laplacian Variance (< 100 = unscharf)
+  geminiScore?: number | null     // 0-1 Gemini-Qualitätsbewertung
+  geminiStatus?: string | null    // pending | approved | rejected
+  saturationCategory?: string | null // niedrig | mittel | hoch
+  warmCoolCategory?: string | null   // warm | kuehl | neutral
+  importQuery?: string | null
 }
 interface DbStatsDetail {
   total: number; labIndexed: number
@@ -3057,9 +3066,48 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                 </span>
               </div>
               <div className="flex justify-between"><span>Helligkeit:</span><span className="font-medium">{selectedImage.brightnessCategory ?? 'Nicht indexiert'}</span></div>
+              <div className="flex justify-between"><span>Sättigung:</span><span className="font-medium">{selectedImage.saturationCategory ?? '–'}</span></div>
+              <div className="flex justify-between"><span>Warm/Kühl:</span><span className="font-medium">{selectedImage.warmCoolCategory ?? '–'}</span></div>
+              <div className="flex justify-between"><span>Tile-Typ:</span><span className="font-medium">{selectedImage.tileType ?? '–'}</span></div>
               <div className="flex justify-between"><span>Thema:</span><span className="font-medium">{selectedImage.subject ?? 'general'}</span></div>
               <div className="flex justify-between"><span>Semantic-Tag:</span>
                 <span className="font-medium text-indigo-600">{selectedImage.semanticTheme ?? <span className="text-gray-400 italic">nicht getaggt</span>}</span>
+              </div>
+              {/* Qualitäts-Metriken */}
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <p className="text-xs font-semibold text-gray-500 mb-1">Qualitäts-Metriken</p>
+                <div className="grid grid-cols-1 gap-0.5 font-mono text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Mosaic-Score:</span>
+                    <span className={selectedImage.aiMosaicScore != null ? (selectedImage.aiMosaicScore >= 70 ? 'text-green-600 font-bold' : selectedImage.aiMosaicScore >= 40 ? 'text-yellow-600' : 'text-red-500') : 'text-gray-400'}>
+                      {selectedImage.aiMosaicScore != null ? `${selectedImage.aiMosaicScore}/100` : '–'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Gemini:</span>
+                    <span className={selectedImage.geminiStatus === 'approved' ? 'text-green-600' : selectedImage.geminiStatus === 'rejected' ? 'text-red-500' : 'text-gray-400'}>
+                      {selectedImage.geminiStatus === 'approved' ? `✅ Exzellent${selectedImage.geminiScore != null ? ` (${Math.round(selectedImage.geminiScore * 100)}%)` : ''}` :
+                       selectedImage.geminiStatus === 'rejected' ? `❌ Abgelehnt${selectedImage.geminiScore != null ? ` (${Math.round(selectedImage.geminiScore * 100)}%)` : ''}` :
+                       selectedImage.geminiScore != null ? `⏳ ${Math.round(selectedImage.geminiScore * 100)}%` : '–'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Schärfe (Blur):</span>
+                    <span className={selectedImage.blurScore != null ? (selectedImage.blurScore >= 200 ? 'text-green-600' : selectedImage.blurScore >= 80 ? 'text-yellow-600' : 'text-red-500') : 'text-gray-400'}>
+                      {selectedImage.blurScore != null ? selectedImage.blurScore.toFixed(0) : '–'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Kantendichte:</span>
+                    <span>{selectedImage.edgeEnergy != null ? (selectedImage.edgeEnergy * 100).toFixed(1) + '%' : '–'}</span>
+                  </div>
+                  {selectedImage.importQuery && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Import-Query:</span>
+                      <span className="text-indigo-500 truncate max-w-32">{selectedImage.importQuery}</span>
+                    </div>
+                  )}
+                </div>
               </div>
               {/* 15D LAB Feature Vectors */}
               <div className="mt-2 pt-2 border-t border-gray-100">
@@ -5230,8 +5278,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         )}
       </div>
 
-      {/* ── Semantic Auto-Tagger ────────────────────────────────────────────────────── */}
-      <SemanticTaggerPanel onMessage={onMessage} />
+      {/* Semantic Auto-Tagger entfernt – kein Mehrwert */}
 
       {/* ── KI-Bildanalyse (Gemini Vision Batch) ────────────────────────────────── */}
       <AiAnalysisPanel onMessage={onMessage} />
