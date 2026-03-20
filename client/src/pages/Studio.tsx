@@ -4,7 +4,8 @@ import { Link } from "react-router-dom";
 import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
   Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check,
-  ImagePlus, Images, Sparkles
+  ImagePlus, Images, Sparkles, Grid3X3, Palette, BarChart3,
+  Save, FolderOpen, Info, Search
 } from "lucide-react";
 import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
 import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
@@ -263,6 +264,21 @@ export default function Studio() {
     // Timing
     generationMs: number;
   } | null>(null);
+
+  // -- Tile Detail Popup: click on mosaic to see individual tile ----------------
+  const [tileDetail, setTileDetail] = useState<{
+    col: number; row: number; tileIdx: number;
+    tileUrl: string; cellColor: string;
+  } | null>(null);
+  const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
+  // -- Project Save/Restore (localStorage) ------------------------------------
+  const [hasSavedProject, setHasSavedProject] = useState<boolean>(() => {
+    try { return !!localStorage.getItem('mosaicprint_saved_project'); } catch { return false; }
+  });
+  const [showRestoreBanner, setShowRestoreBanner] = useState<boolean>(() => {
+    try { return !!localStorage.getItem('mosaicprint_saved_project'); } catch { return false; }
+  });
 
   // Update cache size display
   useEffect(() => {
@@ -3141,6 +3157,7 @@ export default function Studio() {
   }, []);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     isDragging.current = true; lastMouse.current = { x: e.clientX, y: e.clientY };
+    clickStartRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
   }, []);
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isDragging.current) return;
@@ -3148,7 +3165,160 @@ export default function Studio() {
     lastMouse.current = { x: e.clientX, y: e.clientY };
     setPan(p => ({ x: p.x + dx, y: p.y + dy }));
   }, []);
-  const handleMouseUp = useCallback(() => { isDragging.current = false; }, []);
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    isDragging.current = false;
+    // Detect click (vs drag): small movement + short duration
+    const start = clickStartRef.current;
+    if (!start || !ready || !mosaicParamsRef.current || !assignmentRef.current.length) return;
+    const dist = Math.sqrt((e.clientX - start.x) ** 2 + (e.clientY - start.y) ** 2);
+    const duration = Date.now() - start.time;
+    if (dist > 5 || duration > 300) return; // was a drag, not a click
+
+    // Calculate which tile was clicked
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const { cols, rows, tilePx, canvasW, canvasH } = mosaicParamsRef.current;
+    const displayScale = (mosaicParamsRef.current as any)._displayScale ?? 0.5;
+    const displayW = canvasW * displayScale;
+    const displayH = canvasH * displayScale;
+
+    // Center of container
+    const cx = rect.width / 2 + pan.x;
+    const cy = rect.height / 2 + pan.y;
+    // Mouse position relative to canvas origin (accounting for zoom + pan)
+    const mouseX = (e.clientX - rect.left - cx) / zoom + displayW / 2;
+    const mouseY = (e.clientY - rect.top - cy) / zoom + displayH / 2;
+    // Convert display coords to canvas coords
+    const canvasX = mouseX / displayScale;
+    const canvasY = mouseY / displayScale;
+    const col = Math.floor(canvasX / tilePx);
+    const row = Math.floor(canvasY / tilePx);
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return;
+
+    const ci = row * cols + col;
+    const tileIdx = assignmentRef.current[ci];
+    if (tileIdx < 0) return;
+
+    // Get tile URL
+    let tileUrl = '';
+    if (tileIdsRef.current.length > 0) {
+      const tileId = tileIdsRef.current[tileIdx];
+      tileUrl = `/api/tile/${tileId}?size=256`;
+    } else if (validImgsRef.current[tileIdx]) {
+      tileUrl = validImgsRef.current[tileIdx].src;
+    }
+
+    // Get cell target color from snapshot
+    let cellColor = '#888';
+    if (snapshotRef.current) {
+      const px = col * tilePx + Math.floor(tilePx / 2);
+      const py = row * tilePx + Math.floor(tilePx / 2);
+      const pi = (py * canvasW + px) * 4;
+      const d = snapshotRef.current.data;
+      if (pi + 2 < d.length) {
+        cellColor = `rgb(${d[pi]}, ${d[pi + 1]}, ${d[pi + 2]})`;
+      }
+    }
+
+    setTileDetail({ col, row, tileIdx, tileUrl, cellColor });
+  }, [ready, zoom, pan]);
+
+  // Project save handler
+  const saveProject = useCallback(() => {
+    try {
+      const data: Record<string, unknown> = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        userPhoto,
+        assignment: assignmentRef.current,
+        tileIds: tileIdsRef.current,
+        mosaicParams: mosaicParamsRef.current,
+        qualityMetrics,
+        selectedFormat,
+        selectedMaterial,
+        selectedTheme,
+        tileSourceMode,
+      };
+      // Save mosaic canvas as data URL
+      if (canvasRef.current) {
+        data.mosaicImage = canvasRef.current.toDataURL('image/jpeg', 0.7);
+      }
+      localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
+      setHasSavedProject(true);
+    } catch (e) {
+      console.warn('[Project Save] Failed:', e);
+    }
+  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode]);
+
+  // Project restore handler
+  const restoreProject = useCallback(() => {
+    try {
+      const raw = localStorage.getItem('mosaicprint_saved_project');
+      if (!raw) return;
+      const data = JSON.parse(raw);
+
+      if (data.userPhoto) setUserPhoto(data.userPhoto);
+      if (data.selectedFormat !== undefined) setSelectedFormat(data.selectedFormat);
+      if (data.selectedMaterial !== undefined) setSelectedMaterial(data.selectedMaterial);
+      if (data.selectedTheme) { setSelectedTheme(data.selectedTheme); selectedThemeRef.current = data.selectedTheme; }
+      if (data.tileSourceMode) { setTileSourceMode(data.tileSourceMode); tileSourceModeRef.current = data.tileSourceMode; }
+      if (data.qualityMetrics) setQualityMetrics(data.qualityMetrics);
+      if (data.assignment) assignmentRef.current = data.assignment;
+      if (data.tileIds) tileIdsRef.current = data.tileIds;
+      if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+
+      // Restore mosaic image to canvas
+      if (data.mosaicImage && data.mosaicParams) {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const { canvasW, canvasH } = data.mosaicParams;
+          canvas.width = canvasW;
+          canvas.height = canvasH;
+          const displayScale = (data.mosaicParams as any)._displayScale ?? 0.5;
+          canvas.style.width = `${Math.round(canvasW * displayScale)}px`;
+          canvas.style.height = `${Math.round(canvasH * displayScale)}px`;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvasW, canvasH);
+            snapshotRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+          }
+          setReady(true);
+          setShowOrderPanel(true);
+          // Auto-zoom
+          const containerW = canvas.parentElement?.clientWidth ?? 700;
+          const containerH = window.innerHeight * 0.65;
+          const displayW2 = canvasW * displayScale;
+          const displayH2 = canvasH * displayScale;
+          const fitZoom = Math.min(containerW / displayW2, containerH / displayH2) * 0.92;
+          setZoom(Math.min(Math.max(fitZoom, 0.3), 1.5));
+          setPan({ x: 0, y: 0 });
+        };
+        img.src = data.mosaicImage;
+      }
+
+      // Restore user photo as image element
+      if (data.userPhoto) {
+        const uImg = new Image();
+        uImg.onload = () => setUserPhotoImg(uImg);
+        uImg.src = data.userPhoto;
+      }
+
+      setShowRestoreBanner(false);
+    } catch (e) {
+      console.warn('[Project Restore] Failed:', e);
+    }
+  }, []);
+
+  const clearSavedProject = useCallback(() => {
+    try { localStorage.removeItem('mosaicprint_saved_project'); } catch {}
+    setHasSavedProject(false);
+    setShowRestoreBanner(false);
+  }, []);
 
   // Print Export: high-quality render with 128px tiles
   // Two modes:
@@ -3507,6 +3677,31 @@ export default function Studio() {
           </div>
         )}
 
+        {/* Restore saved project banner */}
+        {showRestoreBanner && !userPhoto && !loading && (
+          <div className="max-w-xl mx-auto mb-6 bg-green-50 border border-green-200 rounded-2xl p-4 flex items-center gap-3">
+            <FolderOpen className="w-6 h-6 text-green-600 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-green-800">Gespeichertes Projekt gefunden</p>
+              <p className="text-xs text-green-600">Dein letztes Mosaik kann wiederhergestellt werden.</p>
+            </div>
+            <button
+              onClick={restoreProject}
+              className="flex items-center gap-1.5 bg-green-600 text-white text-xs font-bold px-3 py-2 rounded-xl hover:bg-green-700 transition-colors"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              Laden
+            </button>
+            <button
+              onClick={clearSavedProject}
+              className="text-green-400 hover:text-green-700 transition-colors"
+              title="Verwerfen"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Upload area (when no photo) */}
         {!userPhoto && !loading && (
           <div
@@ -3723,6 +3918,9 @@ export default function Studio() {
                     <button onClick={() => { if (userPhotoImg) { setReady(false); setLoading(true); setProgress(0); renderMosaic(userPhotoImg); } }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Neu generieren">
                       <RefreshCw className="w-4 h-4" />
                     </button>
+                    <button onClick={saveProject} className="p-2.5 rounded-xl bg-green-50 border border-green-200 shadow-sm hover:shadow-md transition-all text-green-600 hover:text-green-800" title="Projekt speichern">
+                      <Save className="w-4 h-4" />
+                    </button>
                   </>
                 )}
                 <span className="text-xs font-semibold text-gray-500 bg-white border border-gray-200 rounded-xl px-3 py-2">
@@ -3825,6 +4023,46 @@ export default function Studio() {
                   </svg>
                   Photos powered by Unsplash
                 </a>
+              </div>
+            )}
+
+            {/* Mosaik-Statistik-Leiste */}
+            {ready && qualityMetrics && (
+              <div className="mb-4 bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <BarChart3 className="w-4 h-4 text-gray-500" />
+                  <p className="text-sm font-bold text-gray-800">Mosaik-Statistik</p>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <div className="text-lg font-extrabold text-gray-900">{qualityMetrics.totalTiles.toLocaleString('de-CH')}</div>
+                    <div className="text-[11px] text-gray-500 font-medium">Kacheln total</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <div className="text-lg font-extrabold text-teal-700">{qualityMetrics.uniqueTiles.toLocaleString('de-CH')}</div>
+                    <div className="text-[11px] text-gray-500 font-medium">Unique Bilder</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <div className="text-lg font-extrabold text-blue-700">{qualityMetrics.avgDeltaE.toFixed(1)}</div>
+                    <div className="text-[11px] text-gray-500 font-medium">Farbtreue (dE)</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <div className="text-lg font-extrabold text-coral-600">{Math.round(qualityMetrics.reuseRate * 100)}%</div>
+                    <div className="text-[11px] text-gray-500 font-medium">Pool-Nutzung</div>
+                  </div>
+                </div>
+                {/* Saturation distribution bar */}
+                <div className="mt-3">
+                  <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                    <span>Saettigung</span>
+                    <span>Gedaempft {Math.round(qualityMetrics.satLow)}% | Mittel {Math.round(qualityMetrics.satMid)}% | Lebendig {Math.round(qualityMetrics.satHigh)}%</span>
+                  </div>
+                  <div className="flex h-2 rounded-full overflow-hidden">
+                    <div className="bg-gray-300" style={{ width: `${qualityMetrics.satLow}%` }} />
+                    <div className="bg-amber-400" style={{ width: `${qualityMetrics.satMid}%` }} />
+                    <div className="bg-emerald-500" style={{ width: `${qualityMetrics.satHigh}%` }} />
+                  </div>
+                </div>
               </div>
             )}
 
@@ -4202,6 +4440,67 @@ export default function Studio() {
             <p className="text-xs text-center text-gray-400">
               Gesichert durch Stripe . Kreditkarte, TWINT, PayPal
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Tile Detail Modal */}
+      {tileDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.75)" }}
+          onClick={() => setTileDetail(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 relative"
+            onClick={e => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setTileDetail(null)}
+              className="absolute top-3 right-3 text-gray-400 hover:text-gray-700 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="flex items-center gap-2 mb-4">
+              <Search className="w-4 h-4 text-gray-500" />
+              <p className="text-sm font-bold text-gray-800">Kachel-Detail</p>
+            </div>
+
+            {/* Tile image */}
+            <div className="rounded-xl overflow-hidden border border-gray-200 mb-4 bg-gray-50">
+              {tileDetail.tileUrl ? (
+                <img
+                  src={tileDetail.tileUrl}
+                  alt={`Tile ${tileDetail.col},${tileDetail.row}`}
+                  className="w-full aspect-square object-cover"
+                />
+              ) : (
+                <div className="w-full aspect-square flex items-center justify-center text-gray-400 text-sm">
+                  Kein Bild
+                </div>
+              )}
+            </div>
+
+            {/* Tile info grid */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-gray-50 rounded-lg p-2.5">
+                <span className="text-gray-400 block">Position</span>
+                <span className="font-bold text-gray-800">Spalte {tileDetail.col + 1}, Zeile {tileDetail.row + 1}</span>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2.5">
+                <span className="text-gray-400 block">Tile-Index</span>
+                <span className="font-bold text-gray-800">#{tileDetail.tileIdx}</span>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2.5 col-span-2">
+                <span className="text-gray-400 block mb-1">Zielfarbe an dieser Stelle</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md border border-gray-300" style={{ backgroundColor: tileDetail.cellColor }} />
+                  <span className="font-mono font-bold text-gray-800">{tileDetail.cellColor}</span>
+                </div>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-gray-400 mt-3 text-center">Klick auf eine Kachel im Mosaik um Details zu sehen</p>
           </div>
         </div>
       )}
