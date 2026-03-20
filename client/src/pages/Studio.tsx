@@ -420,35 +420,125 @@ export default function Studio() {
   // Debounce timer for hi-res rendering
   const hiResTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Hi-res viewport offset for mobile (CSS positioning of viewport-cropped canvas)
+  const [hiResViewport, setHiResViewport] = useState<{
+    offsetX: number; offsetY: number; // CSS px offset from canvas origin
+    colStart: number; rowStart: number; colEnd: number; rowEnd: number;
+  } | null>(null);
+
   // Render hi-res canvas when zoom crosses threshold or tier changes (debounced)
+  // MOBILE: viewport-based rendering - only renders visible tiles to stay within
+  // iOS Safari's ~16MP canvas limit. Canvas is positioned with CSS offset.
+  // DESKTOP: full-canvas rendering as before.
   useEffect(() => {
     if (!showHiRes) return;
     if (!assignmentRef.current.length || !validImgsRef.current.length || !mosaicParamsRef.current) return;
-    // Only re-render if tile size tier changed (avoid redundant renders)
-    if (hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
     if (hiResLoading) return;
 
-    // Debounce: wait 300ms after zoom stabilizes before starting hi-res render
+    const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+
+    // On desktop, only re-render if tile size tier changed
+    // On mobile, always allow re-render (viewport may have moved) - debounce handles throttling
+    if (!isMobileDevice && hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
+    // On mobile, mark as not ready so the debounced render fires
+    if (isMobileDevice) setHiResReady(false);
+
+    // Debounce: wait 300ms after zoom/pan stabilizes
     if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current);
     hiResTimerRef.current = setTimeout(() => {
       const renderHiRes = async () => {
-        const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
         setHiResLoading(true);
         const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
+        const displayScale = (mosaicParamsRef.current as any)._displayScale ?? 0.5;
         const HIREZ_PX = hiResTileSize;
-        const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
+
         const hc = hiResCanvasRef.current;
         if (!hc) { setHiResLoading(false); return; }
-        hc.width = hiW; hc.height = hiH;
-        hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
-        hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
+
+        let colStart = 0, rowStart = 0, colEnd = cols, rowEnd = rows;
+
+        if (isMobileDevice) {
+          // MOBILE: Calculate visible tile range from viewport
+          const container = containerRef.current;
+          const containerW = container?.clientWidth ?? window.innerWidth;
+          const containerH = container?.clientHeight ?? window.innerHeight * 0.65;
+          const displayW = canvasW * displayScale;
+          const displayH = canvasH * displayScale;
+
+          // Visible area in display coordinates (center-based)
+          const visLeft = -pan.x / zoom + (containerW / zoom - displayW) / 2 * -1 + (displayW / 2 - containerW / (2 * zoom));
+          const visTop = -pan.y / zoom + (containerH / zoom - displayH) / 2 * -1 + (displayH / 2 - containerH / (2 * zoom));
+          const visRight = visLeft + containerW / zoom;
+          const visBottom = visTop + containerH / zoom;
+
+          // Convert to canvas pixel coords
+          const canvasLeft = visLeft / displayScale;
+          const canvasTop = visTop / displayScale;
+          const canvasRight = visRight / displayScale;
+          const canvasBottom = visBottom / displayScale;
+
+          // Convert to tile grid coords with padding
+          const tilePx = mosaicParamsRef.current!.tilePx;
+          const PAD = 3; // extra tiles around viewport edge
+          colStart = Math.max(0, Math.floor(canvasLeft / tilePx) - PAD);
+          rowStart = Math.max(0, Math.floor(canvasTop / tilePx) - PAD);
+          colEnd = Math.min(cols, Math.ceil(canvasRight / tilePx) + PAD);
+          rowEnd = Math.min(rows, Math.ceil(canvasBottom / tilePx) + PAD);
+
+          // Canvas covers only the visible tile range
+          const visCols = colEnd - colStart;
+          const visRows = rowEnd - rowStart;
+          const hiW = visCols * HIREZ_PX;
+          const hiH = visRows * HIREZ_PX;
+
+          // Safety: cap at ~16MP (iOS limit)
+          const totalPx = hiW * hiH;
+          if (totalPx > 16_000_000) {
+            // Reduce tile size to fit
+            const scale = Math.sqrt(16_000_000 / totalPx);
+            const cappedPx = Math.floor(HIREZ_PX * scale);
+            if (cappedPx < 32) { setHiResLoading(false); return; }
+            // Re-run with capped size would be complex, just skip
+            console.warn(`[HiRes Mobile] Canvas too large (${hiW}x${hiH}), skipping`);
+            setHiResLoading(false);
+            return;
+          }
+
+          hc.width = hiW;
+          hc.height = hiH;
+          // CSS size matches the visible tile range in display coords
+          hc.style.width = `${Math.round(visCols * tilePx * displayScale)}px`;
+          hc.style.height = `${Math.round(visRows * tilePx * displayScale)}px`;
+
+          // Store viewport offset for CSS positioning
+          setHiResViewport({
+            offsetX: colStart * tilePx * displayScale,
+            offsetY: rowStart * tilePx * displayScale,
+            colStart, rowStart, colEnd, rowEnd,
+          });
+        } else {
+          // DESKTOP: full canvas as before
+          const hiW = cols * HIREZ_PX;
+          const hiH = rows * HIREZ_PX;
+          hc.width = hiW;
+          hc.height = hiH;
+          hc.style.width = `${Math.round(canvasW * displayScale)}px`;
+          hc.style.height = `${Math.round(canvasH * displayScale)}px`;
+          setHiResViewport(null);
+        }
+
         const hCtx = hc.getContext('2d')!;
         const assignment = assignmentRef.current;
-        const TOTAL = cols * rows;
 
-        const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
-        const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000;
-        const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
+        // Collect unique tile indices in visible range
+        const visibleIndices = new Set<number>();
+        for (let r = rowStart; r < rowEnd; r++) {
+          for (let c = colStart; c < colEnd; c++) {
+            const ci = r * cols + c;
+            if (assignment[ci] >= 0) visibleIndices.add(assignment[ci]);
+          }
+        }
+        const uniqueIndices = Array.from(visibleIndices);
 
         let allUrls: string[];
         if (tileIdsRef.current.length > 0) {
@@ -474,7 +564,7 @@ export default function Studio() {
           }
         }
 
-        // Only fetch tiles that aren't cached yet
+        // Fetch tiles not yet cached
         const BATCH = isMobileDevice ? 30 : 80;
         for (let i = 0; i < toLoad.length; i += BATCH) {
           const batchIndices = toLoad.slice(i, i + BATCH);
@@ -493,29 +583,38 @@ export default function Studio() {
           await new Promise(r => setTimeout(r, 0));
         }
 
-        // Draw hi-res tiles using the deduplicated map
-        for (let ci = 0; ci < TOTAL; ci++) {
-          const col = ci % cols, row = Math.floor(ci / cols);
-          const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
-          if (img && img.complete && img.naturalWidth > 0) {
-            try {
-              hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
-            } catch (e) {
-              hCtx.fillStyle = '#888888';
-              hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+        // Draw tiles (offset by colStart/rowStart for mobile viewport)
+        for (let r = rowStart; r < rowEnd; r++) {
+          for (let c = colStart; c < colEnd; c++) {
+            const ci = r * cols + c;
+            const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
+            if (img && img.complete && img.naturalWidth > 0) {
+              try {
+                hCtx.drawImage(img,
+                  (c - colStart) * HIREZ_PX,
+                  (r - rowStart) * HIREZ_PX,
+                  HIREZ_PX, HIREZ_PX);
+              } catch {
+                hCtx.fillStyle = '#888888';
+                hCtx.fillRect(
+                  (c - colStart) * HIREZ_PX,
+                  (r - rowStart) * HIREZ_PX,
+                  HIREZ_PX, HIREZ_PX);
+              }
             }
           }
         }
+
         lastHiResTileSizeRef.current = HIREZ_PX;
         setHiResReady(true);
         setHiResLoading(false);
       };
       renderHiRes().catch(() => setHiResLoading(false));
-    }, 300);
+    }, isMobileDevice ? 400 : 300);
 
     return () => { if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showHiRes, hiResTileSize]);
+  }, [showHiRes, hiResTileSize, pan.x, pan.y]);
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => { setHiResReady(false); setHiResLoading(false); hiResCacheRef.current.clear(); lastHiResTileSizeRef.current = 0; };
@@ -4048,21 +4147,49 @@ export default function Studio() {
                     }}
                   />
                 )}
-                {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
-                {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
+                {/* Hi-Res canvas overlay - viewport-based on mobile, full on desktop */}
                 <canvas
                   ref={hiResCanvasRef}
-                  style={{
-                    display: showHiRes ? "block" : "none",
-                    position: "absolute",
-                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                    transformOrigin: "center center",
-                    transition: isDragging.current ? "none" : "transform 0.1s ease",
-                    maxWidth: "none",
-                    opacity: hiResOpacity,
-                    pointerEvents: "none",
-                    imageRendering: zoom > 1 ? "pixelated" : "auto",  // crisp hi-res tiles when zoomed
-                  }}
+                  style={(() => {
+                    const base = {
+                      display: showHiRes ? "block" as const : "none" as const,
+                      position: "absolute" as const,
+                      transition: isDragging.current ? "none" : "transform 0.1s ease",
+                      maxWidth: "none" as const,
+                      opacity: hiResOpacity,
+                      pointerEvents: "none" as const,
+                      imageRendering: zoom > 1 ? "pixelated" as const : "auto" as const,
+                    };
+                    if (hiResViewport) {
+                      // MOBILE viewport mode: position the small canvas over the correct tiles
+                      const mainW = canvasRef.current?.style.width ? parseFloat(canvasRef.current.style.width) : 0;
+                      const mainH = canvasRef.current?.style.height ? parseFloat(canvasRef.current.style.height) : 0;
+                      const cW = containerRef.current?.clientWidth ?? 0;
+                      const cH = containerRef.current?.clientHeight ?? 0;
+                      // Main canvas is flex-centered, so its top-left is:
+                      const mainLeft = (cW - mainW) / 2;
+                      const mainTop = (cH - mainH) / 2;
+                      // Viewport canvas left/top = main canvas offset + tile offset
+                      const vpLeft = mainLeft + hiResViewport.offsetX;
+                      const vpTop = mainTop + hiResViewport.offsetY;
+                      // Transform origin relative to the main canvas center (so zoom matches)
+                      const originX = (mainW / 2) - hiResViewport.offsetX;
+                      const originY = (mainH / 2) - hiResViewport.offsetY;
+                      return {
+                        ...base,
+                        left: vpLeft,
+                        top: vpTop,
+                        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                        transformOrigin: `${originX}px ${originY}px`,
+                      };
+                    }
+                    // DESKTOP: full canvas, same transform as main
+                    return {
+                      ...base,
+                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                      transformOrigin: "center center",
+                    };
+                  })()}
                 />
                 {hiResLoading && showHiRes && (
                   <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.6)", color: "white", fontSize: 11, padding: "3px 8px", borderRadius: 6, pointerEvents: "none" }}>
