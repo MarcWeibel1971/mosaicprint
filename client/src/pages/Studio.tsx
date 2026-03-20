@@ -2130,6 +2130,13 @@ export default function Studio() {
     for (let i = 0; i < filteredTileIds.length; i++) {
       tileIdToIdx.set(filteredTileIds[i], i);
     }
+    // Pre-collect user tile indices (negative IDs) for mix mode injection
+    const userTileFilteredIndices: number[] = [];
+    if (currentTileSourceMode === 'mix') {
+      for (const [tid, idx] of tileIdToIdx) {
+        if (tid < 0) userTileFilteredIndices.push(idx);
+      }
+    }
 
     const useCount = new Array(filteredValidImgs.length).fill(0);
     // DYNAMIC MAX_REUSE: Analyse Pool-Diversität pro Helligkeitsbereich
@@ -2233,6 +2240,14 @@ export default function Studio() {
         candidateIndices = cellCandidates[ci]
           .map(c => tileIdToIdx.get(c.tileId) ?? -1)
           .filter(idx => idx >= 0);
+        // MIX mode: inject user tile indices into every candidate set
+        // User tiles have negative tileIds and are not in the server LAB index,
+        // so they must be added here to compete in Stage B (SSD matching)
+        if (userTileFilteredIndices.length > 0) {
+          for (const idx of userTileFilteredIndices) {
+            candidateIndices.push(idx);
+          }
+        }
         // If too few candidates loaded (e.g., all filtered), fall back to legacy
         if (candidateIndices.length < 5) {
           candidateIndices = Array.from({ length: Math.min(30, filteredValidImgs.length) }, (_, i) => i);
@@ -3388,47 +3403,6 @@ export default function Studio() {
           </div>
         )}
 
-        {/* Theme filter chips */}
-        {!userPhoto && !loading && (
-          <div className="max-w-xl mx-auto mb-6">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 text-center">Kachel-Thema waehlen</p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {[
-                { key: 'alle', label: 'Alle', emoji: '🌈' },
-                { key: 'sunset', label: 'Sunset', emoji: '🌅' },
-                { key: 'nature', label: 'Natur', emoji: '🌿' },
-                { key: 'urban', label: 'Urban', emoji: '🏙️' },
-                { key: 'portrait', label: 'Portrait', emoji: '👤' },
-                { key: 'abstract', label: 'Abstrakt', emoji: '🎨' },
-                { key: 'food', label: 'Food', emoji: '🍕' },
-                { key: 'travel', label: 'Reise', emoji: '✈️' },
-                { key: 'ocean', label: 'Ozean', emoji: '🌊' },
-                { key: 'winter', label: 'Winter', emoji: '❄️' },
-                { key: 'animals', label: 'Tiere', emoji: '🐾' },
-                { key: 'flowers', label: 'Blumen', emoji: '🌸' },
-                { key: 'space', label: 'Space', emoji: '🌌' },
-              ].map(({ key, label, emoji }) => (
-                <button
-                  key={key}
-                  onClick={() => { setSelectedTheme(key); selectedThemeRef.current = key; }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
-                    selectedTheme === key
-                      ? 'bg-coral-500 text-white border-coral-500 shadow-sm'
-                      : 'bg-white text-gray-600 border-gray-200 hover:border-coral-300 hover:text-coral-600'
-                  }`}
-                >
-                  <span>{emoji}</span>
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
-            {selectedTheme !== 'alle' && (
-              <p className="text-xs text-center text-coral-600 mt-2 font-medium">
-                Mosaik wird aus <strong>{selectedTheme}</strong>-Kacheln erstellt
-              </p>
-            )}
-          </div>
-        )}
         {/* Tile source mode selector */}
         {!userPhoto && !loading && (
           <div className="max-w-xl mx-auto mb-6">
@@ -3696,17 +3670,6 @@ export default function Studio() {
                   {score > 1.5 && <span className="text-xs opacity-70 ml-0.5">✓</span>}
                 </button>
               ))}
-              <button
-                onClick={() => { setSelectedTheme('alle'); selectedThemeRef.current = 'alle'; }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
-                  selectedTheme === 'alle'
-                    ? 'bg-gray-600 text-white border-gray-600'
-                    : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
-                }`}
-              >
-                <span>🌈</span>
-                <span>Alle Themen</span>
-              </button>
             </div>
           </div>
         )}
@@ -3729,14 +3692,6 @@ export default function Studio() {
                     </button>
                     <button onClick={() => { setUserPhoto(null); setUserPhotoImg(null); setReady(false); setLoading(false); setShowOrderPanel(false); }} className="text-gray-400 hover:text-gray-700 ml-1">
                       <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-                {selectedTheme !== 'alle' && (
-                  <div className="flex items-center gap-1.5 bg-coral-50 border border-coral-200 rounded-xl px-3 py-1.5">
-                    <span className="text-xs font-semibold text-coral-700">Thema: {selectedTheme}</span>
-                    <button onClick={() => { setSelectedTheme('alle'); selectedThemeRef.current = 'alle'; }} className="text-coral-400 hover:text-coral-700 ml-0.5">
-                      <X className="w-3 h-3" />
                     </button>
                   </div>
                 )}
