@@ -1279,6 +1279,9 @@ export default function Studio() {
       }
     }
 
+    // Free targetCanvas memory (data already extracted into targetRegions)
+    targetCanvas.width = 0; targetCanvas.height = 0;
+
     // Also keep a 1px-per-cell version for overlay/fallback
     const offscreen = document.createElement("canvas");
     offscreen.width = COLS; offscreen.height = ROWS;
@@ -1364,6 +1367,10 @@ export default function Studio() {
       edgeMap[ci] = rawEdge[ci] * edgeNorm;
       saliency[ci] = edgeMap[ci]; // saliency = edge strength
     }
+
+    // Free temporary canvases to reduce memory pressure on mobile
+    edgeOffscreen.width = 0; edgeOffscreen.height = 0;
+    offscreen.width = 0; offscreen.height = 0;
 
     // Step 2: 2-STAGE MATCHING
     // Stage A: LAB k-NN over ALL tiles in DB (no image loading needed)
