@@ -645,7 +645,6 @@ export default function Admin() {
   const [activeJob, setActiveJob] = useState<string | null>(null)
   const [activeJobs, setActiveJobs] = useState<Set<string>>(new Set())
   const [importProgress, setImportProgress] = useState<Record<string, ImportJob>>({})
-  const [cronStatus, setCronStatus] = useState<CronStatus | null>(null)
   const [smartJob, setSmartJob] = useState<SmartImportJob | null>(null)
   const [smartSource, setSmartSource] = useState<'unsplash' | 'pexels' | 'pixabay'>('pexels')
   const [importAllBatch, setImportAllBatch] = useState(500)
@@ -682,14 +681,6 @@ export default function Admin() {
   // Mirror Tiles
   const [mirrorBatch, setMirrorBatch] = useState(500)
   const [mirrorResult, setMirrorResult] = useState<string>('')
-
-  const fetchCronStatus = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trpc/getCronStatus')
-      const data = await res.json()
-      setCronStatus(data.result?.data?.json ?? data.result?.data ?? data)
-    } catch { /* ignore */ }
-  }, [])
 
   const startSmartImport = async (sourceId: 'unsplash' | 'pexels' | 'pixabay') => {
     if (activeJob) return
@@ -853,7 +844,6 @@ export default function Admin() {
 
   // fetchStats is declared above (before startAnalysisImportMain) to avoid TDZ
   useEffect(() => { fetchStats() }, [fetchStats])
-  useEffect(() => { fetchCronStatus() }, [fetchCronStatus])
   useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
   // Sync lastAnalysis when switching to import tab (in case Quality tab updated it)
   useEffect(() => {
@@ -931,7 +921,6 @@ export default function Admin() {
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
           fetchStats()
-          fetchCronStatus()
           fetchRecommendations()
           if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
           else if ((job as any).sessionId && (job.imported ?? 0) > 0) {
@@ -943,7 +932,7 @@ export default function Admin() {
       } catch { /* ignore */ }
     }, 1500)
     return () => clearInterval(interval)
-  }, [activeJob, fetchStats, fetchCronStatus, fetchRecommendations, openImportReview])
+  }, [activeJob, fetchStats, fetchRecommendations, openImportReview])
 
   // Poll recsJobs (Gezielte Importe - all sources in parallel)
   useEffect(() => {
@@ -978,7 +967,6 @@ export default function Admin() {
               if (allDone) {
                 setRecsRunning(false)
                 fetchStats()
-                fetchCronStatus()
                 fetchRecommendations()
                 const total = Object.values(updated).reduce((sum, j) => sum + (j.imported ?? 0), 0)
                 setMessage({ text: `Gezielte Importe abgeschlossen: ${total} neue Bilder importiert`, type: 'success' })
@@ -991,7 +979,7 @@ export default function Admin() {
       intervals.push(interval)
     })
     return () => intervals.forEach(clearInterval)
-  }, [recsRunning, recsJobs, fetchStats, fetchCronStatus, fetchRecommendations])
+  }, [recsRunning, recsJobs, fetchStats, fetchRecommendations])
 
   const startImport = async (sourceId: string, batchSize: number) => {
     if (activeJob) return
@@ -1458,54 +1446,6 @@ export default function Admin() {
             {/* R2 Migration Panel */}
             <R2MigrationPanel />
 
-            {/* Cron Job Status */}
-            {cronStatus && (
-              <div className={`bg-white rounded-2xl p-5 border ${cronStatus.enabled ? 'border-indigo-200' : 'border-green-200'}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="font-bold text-gray-900 flex items-center gap-2">
-                    <RefreshCw className={`w-5 h-5 ${cronStatus.enabled ? 'text-indigo-500' : 'text-green-500'}`} />
-                    Automatischer Import (stündlicher Cron-Job)
-                  </h2>
-                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${cronStatus.enabled ? 'bg-indigo-100 text-indigo-700' : 'bg-green-100 text-green-700'}`}>
-                    {cronStatus.enabled ? 'Aktiv' : 'Ziel erreicht ✓'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-4 mb-3">
-                  <div className="flex-1">
-                    <div className="flex justify-between text-xs text-gray-500 mb-1">
-                      <span>{cronStatus.current.toLocaleString()} Bilder</span>
-                      <span>Ziel: {cronStatus.target.toLocaleString()}</span>
-                    </div>
-                    <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all ${cronStatus.enabled ? 'bg-indigo-400' : 'bg-green-400'}`}
-                        style={{ width: `${Math.min(100, Math.round((cronStatus.current / cronStatus.target) * 100))}%` }}
-                      />
-                    </div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-2xl font-bold text-gray-900">{Math.min(100, Math.round((cronStatus.current / cronStatus.target) * 100))}%</div>
-                    <div className="text-xs text-gray-400">{cronStatus.remaining.toLocaleString()} fehlen noch</div>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-xs text-gray-500">
-                    {cronStatus.enabled
-                      ? `Der Server importiert automatisch bis zu 300 neue Bilder pro Stunde, priorisiert unterrepräsentierte Farben (Gap-basiert).`
-                      : `Alle ${cronStatus.target.toLocaleString()} Bilder erreicht! Der Cron-Job ist pausiert.`}
-                  </p>
-                  {cronStatus.cronRunning && (
-                    <p className="text-xs text-indigo-600 font-medium">⚙️ Import läuft gerade...</p>
-                  )}
-                  {cronStatus.lastCronResult && (
-                    <p className="text-xs text-gray-400">Letztes Ergebnis: {cronStatus.lastCronResult}</p>
-                  )}
-                  {cronStatus.lastCronRun && (
-                    <p className="text-xs text-gray-400">Letzter Lauf: {new Date(cronStatus.lastCronRun).toLocaleString('de-CH')}</p>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* Gezielte Importe (Empfehlungen) – ENTFERNT: zu viele Optionen, Keyword-Generator ist die bessere Alternative */}
             {false && <div className="bg-white rounded-2xl p-6 border border-amber-200">
