@@ -1240,10 +1240,11 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     }
 
     // PRINT_TILE_PX: client sends outW/cols (= target tile size at 300 DPI)
-    // Clamp between 64 (minimum for visible detail) and 400 (memory limit)
+    // Clamp between 64 (minimum for visible detail) and 600 (optimized for max print quality)
     // At 128px: 100 cols × 128px = 12800px wide (fine for 30cm @ 300 DPI)
-    // At 300px: 50 cols × 300px = 15000px wide (excellent for 50cm @ 300 DPI)
-    const TILE_PX = Math.min(Math.max(tilePx, 64), 400);
+    // At 400px: 50 cols × 400px = 20000px wide (excellent for 70cm @ 300 DPI)
+    // At 600px: 50 cols × 600px = 30000px wide (maximum quality for large prints)
+    const TILE_PX = Math.min(Math.max(tilePx, 64), 600);
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
     console.log(`[print-render] Request: cols=${cols} rows=${rows} tilePx=${tilePx} → clamped=${TILE_PX} output=${outW}×${outH}px`);
@@ -1361,7 +1362,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
       })
         .composite(sharpCompositeInputs)
-        .jpeg({ quality: 92 })
+        .jpeg({ quality: 95, mozjpeg: true })
         .toBuffer();
       stripBuffers.push(stripJpeg);
       console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
@@ -1387,7 +1388,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
       })
         .composite(compositeStrips)
-        .jpeg({ quality: 92 })
+        .jpeg({ quality: 95, mozjpeg: true })
         .toBuffer();
     }
     console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
