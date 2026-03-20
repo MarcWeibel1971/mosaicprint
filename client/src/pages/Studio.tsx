@@ -165,6 +165,7 @@ export default function Studio() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [sharpness, setSharpness] = useState(80);
+  const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
   const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
@@ -388,91 +389,110 @@ export default function Studio() {
 
   // Track the last rendered hi-res tile size to re-render when zoom tier changes
   const lastHiResTileSizeRef = useRef<number>(0);
+  // Cache loaded hi-res images across zoom tier changes (persist between renders)
+  const hiResCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Debounce timer for hi-res rendering
+  const hiResTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Render hi-res canvas when zoom crosses threshold or tier changes
+  // Render hi-res canvas when zoom crosses threshold or tier changes (debounced)
   useEffect(() => {
-    if (!showHiRes || hiResLoading) return;
+    if (!showHiRes) return;
     if (!assignmentRef.current.length || !validImgsRef.current.length || !mosaicParamsRef.current) return;
     // Only re-render if tile size tier changed (avoid redundant renders)
     if (hiResReady && lastHiResTileSizeRef.current === hiResTileSize) return;
-    const renderHiRes = async () => {
-      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-      setHiResLoading(true);
-      const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
-      const HIREZ_PX = hiResTileSize; // 128px at medium zoom, 200px at high zoom
-      const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
-      const hc = hiResCanvasRef.current;
-      if (!hc) { setHiResLoading(false); return; }
-      hc.width = hiW; hc.height = hiH;
-      hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
-      hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
-      const hCtx = hc.getContext('2d')!;
-      const assignment = assignmentRef.current;
-      const TOTAL = cols * rows;
+    if (hiResLoading) return;
 
-      // FIX A: Load only UNIQUE tile indices (deduplicate) - massive speedup
-      // A 60x60 mosaic has 3600 cells but only ~800-1500 unique tiles assigned
-      const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
-      // Mobile: limit unique tiles to avoid loading too many images at once
-      const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000; // Mobile: 800 tiles (was 300)
-      const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
+    // Debounce: wait 300ms after zoom stabilizes before starting hi-res render
+    if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current);
+    hiResTimerRef.current = setTimeout(() => {
+      const renderHiRes = async () => {
+        const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+        setHiResLoading(true);
+        const { cols, rows, canvasW, canvasH } = mosaicParamsRef.current!;
+        const HIREZ_PX = hiResTileSize;
+        const hiW = cols * HIREZ_PX, hiH = rows * HIREZ_PX;
+        const hc = hiResCanvasRef.current;
+        if (!hc) { setHiResLoading(false); return; }
+        hc.width = hiW; hc.height = hiH;
+        hc.style.width = `${Math.round(canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
+        hc.style.height = `${Math.round(canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px`;
+        const hCtx = hc.getContext('2d')!;
+        const assignment = assignmentRef.current;
+        const TOTAL = cols * rows;
 
-      // PERF: Use /api/tile/:id?size=N proxy for all tiles
-      // This ensures CORS-safe loading for all sources (Unsplash, Pexels, Pixabay)
-      // The server proxy handles all external URLs without CORS issues
-      let allUrls: string[];
-      if (tileIdsRef.current.length > 0) {
-        // Use server proxy for all tiles - avoids CORS issues with external URLs
-        // The proxy serves tile128_url for size<=128, source_url for size>128
-        allUrls = tileIdsRef.current.map(id => {
-          if (id <= 0) return '';
-          return `/api/tile/${id}?size=${HIREZ_PX}`;
-        });
-      } else {
-        allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
-      }
+        const allUniqueIndices = Array.from(new Set(assignment.filter(i => i >= 0)));
+        const MAX_HIRES_TILES = isMobileDevice ? 800 : 2000;
+        const uniqueIndices = allUniqueIndices.slice(0, MAX_HIRES_TILES);
 
-      // Map: tile index -> loaded hi-res image
-      const hiResImgMap = new Map<number, HTMLImageElement>();
-      const BATCH = isMobileDevice ? 20 : 60; // smaller batch on mobile to avoid memory pressure
-      for (let i = 0; i < uniqueIndices.length; i += (BATCH)) {
-        const batchIndices = uniqueIndices.slice(i, i + BATCH);
-        const batchImgs = await Promise.all(
-          batchIndices.map(idx => {
-            const u = allUrls[idx];
-            return u ? loadImageCached(u, 10000) : Promise.resolve(null);
-          })
-        );
-        for (let j = 0; j < batchIndices.length; j++) {
-          if (batchImgs[j]) hiResImgMap.set(batchIndices[j], batchImgs[j]!);
+        let allUrls: string[];
+        if (tileIdsRef.current.length > 0) {
+          allUrls = tileIdsRef.current.map(id => {
+            if (id <= 0) return '';
+            return `/api/tile/${id}?size=${HIREZ_PX}`;
+          });
+        } else {
+          allUrls = validImgsRef.current.map(img => toHiResUrl(img.dataset.originalSrc || img.src, HIREZ_PX));
         }
-        await new Promise(r => setTimeout(r, 0));
-      }
 
-      // Draw hi-res tiles using the deduplicated map
-      for (let ci = 0; ci < (TOTAL); ci++) {
-        const col = ci % cols, row = Math.floor(ci / cols);
-        const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
-        if (img && img.complete && img.naturalWidth > 0) {
-          try {
-            hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
-          } catch (e) {
-            // Broken image - fill with neutral grey placeholder
-            hCtx.fillStyle = '#888888';
-            hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+        // Use persistent cache: only load tiles not yet cached at this size
+        const cache = hiResCacheRef.current;
+        const hiResImgMap = new Map<number, HTMLImageElement>();
+        const toLoad: number[] = [];
+        for (const idx of uniqueIndices) {
+          const cacheKey = `${idx}_${HIREZ_PX}`;
+          const cached = cache.get(cacheKey);
+          if (cached) {
+            hiResImgMap.set(idx, cached);
+          } else {
+            toLoad.push(idx);
           }
         }
-      }
-      lastHiResTileSizeRef.current = HIREZ_PX;
-      setHiResReady(true);
-      setHiResLoading(false);
-    };
-    renderHiRes().catch(() => setHiResLoading(false));
+
+        // Only fetch tiles that aren't cached yet
+        const BATCH = isMobileDevice ? 30 : 80;
+        for (let i = 0; i < toLoad.length; i += BATCH) {
+          const batchIndices = toLoad.slice(i, i + BATCH);
+          const batchImgs = await Promise.all(
+            batchIndices.map(idx => {
+              const u = allUrls[idx];
+              return u ? loadImageCached(u, 10000) : Promise.resolve(null);
+            })
+          );
+          for (let j = 0; j < batchIndices.length; j++) {
+            if (batchImgs[j]) {
+              hiResImgMap.set(batchIndices[j], batchImgs[j]!);
+              cache.set(`${batchIndices[j]}_${HIREZ_PX}`, batchImgs[j]!);
+            }
+          }
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        // Draw hi-res tiles using the deduplicated map
+        for (let ci = 0; ci < TOTAL; ci++) {
+          const col = ci % cols, row = Math.floor(ci / cols);
+          const img = hiResImgMap.get(assignment[ci]) || validImgsRef.current[assignment[ci]];
+          if (img && img.complete && img.naturalWidth > 0) {
+            try {
+              hCtx.drawImage(img, col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+            } catch (e) {
+              hCtx.fillStyle = '#888888';
+              hCtx.fillRect(col * HIREZ_PX, row * HIREZ_PX, HIREZ_PX, HIREZ_PX);
+            }
+          }
+        }
+        lastHiResTileSizeRef.current = HIREZ_PX;
+        setHiResReady(true);
+        setHiResLoading(false);
+      };
+      renderHiRes().catch(() => setHiResLoading(false));
+    }, 300);
+
+    return () => { if (hiResTimerRef.current) clearTimeout(hiResTimerRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHiRes, hiResTileSize]);
 
   // Reset hi-res when new mosaic is rendered
-  const resetHiRes = () => { setHiResReady(false); setHiResLoading(false); };
+  const resetHiRes = () => { setHiResReady(false); setHiResLoading(false); hiResCacheRef.current.clear(); lastHiResTileSizeRef.current = 0; };
 
   const tilesRef = useRef<Array<{ x: number; y: number; px: number; url?: string }>>([]);
 
@@ -3786,6 +3806,26 @@ export default function Studio() {
                     maxWidth: "none",
                   }}
                 />
+                {/* User overlay - original photo shown on top with user-controlled opacity */}
+                {userPhotoImg && userOverlay > 0 && ready && (
+                  <img
+                    src={userPhotoImg.src}
+                    alt=""
+                    style={{
+                      display: "block",
+                      position: "absolute",
+                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                      transformOrigin: "center center",
+                      transition: isDragging.current ? "none" : "transform 0.1s ease",
+                      maxWidth: "none",
+                      width: canvasRef.current?.style.width,
+                      height: canvasRef.current?.style.height,
+                      opacity: userOverlay / 100,
+                      pointerEvents: "none",
+                      mixBlendMode: "normal",
+                    }}
+                  />
+                )}
                 {/* Hi-Res canvas overlay - rendered once when zoom crosses threshold */}
                 {/* Positioned exactly over the preview canvas, fades in with sharpness slider */}
                 <canvas
@@ -3833,6 +3873,29 @@ export default function Studio() {
               </div>
             )}
 
+            {/* Overlay slider */}
+            {ready && userPhotoImg && (
+              <div className="mb-4 bg-white rounded-2xl border border-blue-100 shadow-sm p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <p className="text-sm font-bold text-gray-800">Foto-Overlay</p>
+                    <p className="text-xs text-gray-500">Originalfoto ueber dem Mosaik einblenden</p>
+                  </div>
+                  <span className="text-xs font-bold text-blue-600 bg-blue-50 rounded px-2 py-0.5">{userOverlay}%</span>
+                </div>
+                <input
+                  type="range" min={0} max={80} step={5} value={userOverlay}
+                  onChange={e => setUserOverlay(Number(e.target.value))}
+                  className="w-full h-2 rounded-full cursor-pointer"
+                  style={{ accentColor: '#3B82F6' }}
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>Nur Mosaik</span>
+                  <span>Mehr Originalfoto</span>
+                </div>
+              </div>
+            )}
+
             {/* Sharpness slider */}
             {ready && (
               <div className="mb-4 bg-white rounded-2xl border border-coral-100 shadow-sm p-4">
@@ -3853,7 +3916,8 @@ export default function Studio() {
                 <input
                   type="range" min={0} max={100} step={5} value={sharpness}
                   onChange={e => setSharpness(Number(e.target.value))}
-                  className="w-full h-2 rounded-full accent-coral-500 cursor-pointer"
+                  className="w-full h-2 rounded-full cursor-pointer"
+                  style={{ accentColor: '#FF6B6B' }}
                 />
                 <div className="flex justify-between text-xs text-gray-400 mt-1">
                   <span>Kein Hi-Res</span>
