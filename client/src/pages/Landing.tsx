@@ -54,8 +54,8 @@ function HeroSection() {
   const scrollTo = (id: string) => document.querySelector(id)?.scrollIntoView({ behavior: "smooth" });
   return (
     <section style={{ minHeight: "calc(100vh - 64px)", display: "flex", alignItems: "center", background: "#FAFAF8" }} id="hero">
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem", width: "100%" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5rem", alignItems: "center", padding: "6rem 0" }}>
+      <div className="section-container" style={{ width: "100%" }}>
+        <div className="grid-1-2" style={{ alignItems: "center", padding: "3rem 0" }}>
           {/* Left */}
           <div>
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.1 }}>
@@ -124,11 +124,11 @@ function HeroSection() {
               ))}
             </motion.div>
 
-            <motion.div style={{ display: "flex", gap: 32, alignItems: "center" }}
+            <motion.div className="stats-row"
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.55 }}>
               {[{ val: "100×100", label: "Tiles pro Mosaik" }, { val: "300 dpi", label: "Druckauflösung" }, { val: "48h", label: "Lieferzeit CH" }].map((s, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                  {i > 0 && <div style={{ width: 1, height: 32, background: "#E8E8E4" }} />}
+                  {i > 0 && <div style={{ width: 1, height: 32, background: "#E8E8E4" }} className="hidden sm:block" />}
                   <div>
                     <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 26, color: "#1a1a2e", lineHeight: 1 }}>{s.val}</div>
                     <div style={{ fontSize: 11, color: "#6B7280", marginTop: 4, fontWeight: 500 }}>{s.label}</div>
@@ -196,7 +196,7 @@ const USE_CASES = [
 function UseCasesSection() {
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }} id="studio">
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
+      <div className="section-container">
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="coral">Anlässe</SectionLabel>
           <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e", marginBottom: 16 }}>
@@ -206,18 +206,15 @@ function UseCasesSection() {
             Von der Hochzeit bis zum Haustier – jedes Motiv wird zum einzigartigen Kunstwerk.
           </p>
         </FadeIn>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20 }}>
+        <div className="grid-1-2-4">
           {USE_CASES.map((c, i) => (
             <FadeIn key={i} delay={i * 0.08}>
-              <a href={STUDIO_URL} style={{
+              <a href={STUDIO_URL} className="card-hover" style={{
                 display: "block", borderRadius: 16, padding: "2rem", textAlign: "center",
                 background: c.bg, border: `1.5px solid ${c.border}`, textDecoration: "none",
-                transition: "transform 0.3s, box-shadow 0.3s",
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-8px)"; e.currentTarget.style.boxShadow = "0 12px 40px rgba(0,0,0,0.1)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+              }}>
                 <div style={{ width: 100, height: 100, borderRadius: "50%", overflow: "hidden", margin: "0 auto 20px", border: `2px solid ${c.border}` }}>
-                  <img src={c.img} alt={c.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  <img src={c.img} alt={c.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" />
                 </div>
                 <h3 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, marginBottom: 8, color: "#1a1a2e" }}>{c.title}</h3>
                 <p style={{ fontSize: 14, color: "#6B7280", lineHeight: 1.6 }}>{c.desc}</p>
@@ -234,7 +231,7 @@ function UseCasesSection() {
 function GallerySection() {
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }} id="gallery">
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
+      <div className="section-container">
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="teal">Galerie</SectionLabel>
           <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e", marginBottom: 16 }}>
@@ -244,13 +241,11 @@ function GallerySection() {
             Jedes Mosaik ist ein Unikat – zusammengesetzt aus deinen persönlichsten Momenten.
           </p>
         </FadeIn>
-        <div style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: 24, alignItems: "start" }}>
+        <div className="grid-gallery">
           <FadeIn delay={0.1}>
-            <div style={{ position: "relative", borderRadius: 24, overflow: "hidden", boxShadow: "0 12px 48px rgba(0,0,0,0.12)", aspectRatio: "4/3" }}>
+            <div className="img-zoom" style={{ position: "relative", borderRadius: 24, overflow: "hidden", boxShadow: "0 12px 48px rgba(0,0,0,0.12)", aspectRatio: "4/3" }}>
               <img src={WEDDING_MOSAIC_IMG} alt="Hochzeits-Mosaik"
-                style={{ width: "100%", height: "100%", objectFit: "cover", transition: "transform 0.7s" }}
-                onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.05)")}
-                onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")} />
+                style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" />
               <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,0.4), transparent)" }} />
               <div style={{ position: "absolute", bottom: 20, left: 20, background: "rgba(255,255,255,0.9)", backdropFilter: "blur(8px)", borderRadius: 12, padding: "10px 16px" }}>
                 <p style={{ fontSize: 13, fontWeight: 600, color: "#1a1a2e" }}>Hochzeits-Mosaik</p>
@@ -269,14 +264,14 @@ function GallerySection() {
               </div>
             </FadeIn>
             <FadeIn delay={0.3}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16 }}>
                 {[
                   { val: "10'000+", label: "Mosaike erstellt", color: "#FF6B6B" },
                   { val: "4.9 ★", label: "Kundenbewertung", color: "#FFD93D" },
                   { val: "20–100 cm", label: "Druckformate", color: "#00C9B1" },
                   { val: "CH", label: "Produktion & Versand", color: "#9B59B6" },
                 ].map((s, i) => (
-                  <div key={i} style={{ background: "white", borderRadius: 16, padding: 16, border: "1px solid #E8E8E4", textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.04)" }}>
+                  <div key={i} className="card-hover-subtle" style={{ background: "white", borderRadius: 16, padding: 16, border: "1px solid #E8E8E4", textAlign: "center" }}>
                     <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, fontWeight: 700, color: s.color, marginBottom: 4 }}>{s.val}</div>
                     <div style={{ fontSize: 11, color: "#6B7280", fontWeight: 500 }}>{s.label}</div>
                   </div>
@@ -300,13 +295,13 @@ function HowItWorksSection() {
   return (
     <section id="how-it-works" style={{ padding: "6rem 0", position: "relative", overflow: "hidden", background: "#1a1a2e" }}>
       <div style={{ position: "absolute", inset: 0, opacity: 0.2, backgroundImage: `url(${PROCESS_BG_IMG})`, backgroundSize: "cover", backgroundPosition: "center" }} />
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem", position: "relative", zIndex: 10 }}>
+      <div className="section-container" style={{ position: "relative", zIndex: 10 }}>
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="orange">Prozess</SectionLabel>
           <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "white", marginBottom: 16 }}>So einfach geht's</h2>
           <p style={{ fontSize: 16, color: "rgba(255,255,255,0.5)", maxWidth: 440, margin: "0 auto", lineHeight: 1.75 }}>In drei Schritten zum fertigen Kunstwerk.</p>
         </FadeIn>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 24, maxWidth: 960, margin: "0 auto" }}>
+        <div className="grid-1-2-3" style={{ maxWidth: 960, margin: "0 auto" }}>
           {steps.map((step, i) => (
             <FadeIn key={i} delay={i * 0.12}>
               <div style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: "2rem", backdropFilter: "blur(8px)" }}>
@@ -336,8 +331,8 @@ function WhySection() {
   ];
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }} id="why">
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 64, alignItems: "start", marginBottom: 64 }}>
+      <div className="section-container">
+        <div className="grid-1-2" style={{ alignItems: "start", marginBottom: 64 }}>
           <FadeIn>
             <SectionLabel color="teal">Warum wir</SectionLabel>
             <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e" }}>Warum MosaicPrint?</h2>
@@ -348,14 +343,12 @@ function WhySection() {
             </p>
           </FadeIn>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
+        <div className="grid-1-2-3">
           {features.map((f, i) => {
             const Icon = f.icon;
             return (
               <FadeIn key={i} delay={i * 0.07}>
-                <div style={{ background: "white", border: "1px solid #E8E8E4", borderRadius: 16, padding: "1.75rem", transition: "transform 0.3s, box-shadow 0.3s" }}
-                  onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,0.08)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+                <div className="card-hover-subtle" style={{ background: "white", border: "1px solid #E8E8E4", borderRadius: 16, padding: "1.75rem" }}>
                   <div style={{ width: 48, height: 48, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20, background: f.bg }}>
                     <Icon size={22} style={{ color: f.color }} />
                   </div>
@@ -392,7 +385,7 @@ const MATERIALS = [
 function PricingSection() {
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }} id="pricing">
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
+      <div className="section-container">
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="purple">Preise</SectionLabel>
           <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e", marginBottom: 16 }}>
@@ -404,17 +397,14 @@ function PricingSection() {
         </FadeIn>
 
         {/* Format grid */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20, maxWidth: 960, margin: "0 auto 48px" }}>
+        <div className="grid-1-2-3" style={{ maxWidth: 960, margin: "0 auto 48px" }}>
           {FORMATS.map((fmt, i) => (
             <FadeIn key={i} delay={i * 0.07}>
-              <div style={{
+              <div className="card-hover" style={{
                 position: "relative", background: "white", borderRadius: 20, padding: "1.75rem",
                 border: fmt.popular ? "1.5px solid rgba(255,107,107,0.4)" : "1px solid #E8E8E4",
                 boxShadow: fmt.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none",
-                transition: "transform 0.3s, box-shadow 0.3s",
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-6px)"; e.currentTarget.style.boxShadow = fmt.popular ? "0 16px 60px rgba(255,107,107,0.2)" : "0 8px 32px rgba(0,0,0,0.08)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = fmt.popular ? "0 8px 40px rgba(255,107,107,0.1)" : "none"; }}>
+              }}>
                 {fmt.popular && (
                   <div style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)" }}>
                     <span style={{ background: "linear-gradient(135deg, #FF6B6B, #FF9F43)", color: "white", fontSize: 11, fontWeight: 700, padding: "6px 16px", borderRadius: 9999, letterSpacing: "1px", textTransform: "uppercase" }}>
@@ -445,7 +435,7 @@ function PricingSection() {
         <FadeIn delay={0.1}>
           <div style={{ maxWidth: 960, margin: "0 auto", background: "white", borderRadius: 20, padding: "2rem", border: "1px solid #E8E8E4" }}>
             <h3 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, color: "#1a1a2e", marginBottom: 20 }}>Materialien</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+            <div className="grid-1-2-4" style={{ gap: 16 }}>
               {MATERIALS.map((m, i) => (
                 <div key={i} style={{ background: "#FAFAF8", borderRadius: 14, padding: "1.25rem", border: "1px solid #E8E8E4" }}>
                   <div style={{ fontSize: 28, marginBottom: 10 }}>{m.icon}</div>
@@ -481,12 +471,12 @@ function TestimonialsSection() {
   ];
   return (
     <section style={{ padding: "6rem 0", background: "#FAFAF8" }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1.5rem" }}>
+      <div className="section-container">
         <FadeIn style={{ textAlign: "center", marginBottom: 64 }}>
           <SectionLabel color="coral">Kundenstimmen</SectionLabel>
           <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(32px,4vw,48px)", color: "#1a1a2e" }}>Was unsere Kunden sagen</h2>
         </FadeIn>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 24, maxWidth: 900, margin: "0 auto" }}>
+        <div className="grid-1-2-3" style={{ maxWidth: 900, margin: "0 auto" }}>
           {testimonials.map((t, i) => (
             <FadeIn key={i} delay={i * 0.1}>
               <div style={{ background: "white", border: "1px solid #E8E8E4", borderRadius: 16, padding: "1.75rem" }}>
@@ -530,15 +520,12 @@ function CtaSection() {
             <p style={{ fontSize: 17, color: "rgba(255,255,255,0.8)", marginBottom: 40, maxWidth: 440, margin: "0 auto 40px", lineHeight: 1.75 }}>
               Erstelle jetzt dein persönliches Mosaik – in wenigen Minuten online.
             </p>
-            <a href={STUDIO_URL} style={{
+            <a href={STUDIO_URL} className="card-hover-subtle" style={{
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               background: "white", color: "#FF6B6B", borderRadius: 9999,
               padding: "0 2.5rem", height: 52, fontSize: 16, fontWeight: 700,
               boxShadow: "0 8px 32px rgba(0,0,0,0.2)", textDecoration: "none",
-              transition: "transform 0.15s, box-shadow 0.2s",
-            }}
-              onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 16px 48px rgba(0,0,0,0.25)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,0.2)"; }}>
+            }}>
               Jetzt Mosaik erstellen
             </a>
           </div>

@@ -6,7 +6,7 @@ const PACKAGES = [
     name: "Starter",
     subtitle: "Perfekt für ein erstes Mosaik",
     price: 49,
-    color: "#0f172a",
+    color: "#1a1a2e",
     highlight: false,
     tileCount: "50×50",
     tileLabel: "2’500 Tiles",
@@ -26,7 +26,7 @@ const PACKAGES = [
     name: "Premium",
     subtitle: "Das beliebteste Paket",
     price: 89,
-    color: "#f97316",
+    color: "#FF6B6B",
     highlight: true,
     badge: "BELIEBTESTE WAHL",
     tileCount: "100×100",
@@ -91,41 +91,38 @@ const TESTIMONIALS = [
 
 export default function Pricing() {
   return (
-    <div style={{ background: "#fff", minHeight: "100vh" }}>
+    <div style={{ background: "#FAFAF8", minHeight: "100vh" }}>
 
-      {/* ── HERO: Preise ── light background */}
-      <section style={{ background: "#f8fafc", padding: "80px 24px 100px", textAlign: "center" }}>
+      {/* ── HERO: Preise ── */}
+      <section style={{ background: "#FAFAF8", padding: "80px 24px 100px", textAlign: "center" }}>
         <div style={{ maxWidth: 700, margin: "0 auto" }}>
-          <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+          <p style={{ color: "#FF6B6B", fontWeight: 700, letterSpacing: "3px", fontSize: 11, textTransform: "uppercase", marginBottom: 12 }}>
             PREISE
           </p>
-          <h1 style={{ fontSize: "clamp(2rem, 5vw, 3.2rem)", fontWeight: 800, color: "#0f172a", marginBottom: 20, lineHeight: 1.1 }}>
+          <h1 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(2rem, 5vw, 3.2rem)", color: "#1a1a2e", marginBottom: 20, lineHeight: 1.15 }}>
             Einfache, transparente Preise
           </h1>
-          <p style={{ color: "#64748b", fontSize: 18, maxWidth: 500, margin: "0 auto" }}>
+          <p style={{ color: "#6B7280", fontSize: 18, maxWidth: 500, margin: "0 auto", lineHeight: 1.75 }}>
             Keine versteckten Kosten. Wähle das Paket, das zu deinem Projekt passt.
           </p>
         </div>
       </section>
 
       {/* ── PRICING CARDS ── */}
-      <section style={{ background: "#f8fafc", padding: "0 24px 80px" }}>
-        <div style={{
+      <section style={{ background: "#FAFAF8", padding: "0 24px 80px" }}>
+        <div className="grid-1-2-3" style={{
           maxWidth: 1000,
           margin: "0 auto",
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          gap: 24,
           alignItems: "start",
         }}>
           {PACKAGES.map((pkg) => (
-            <div key={pkg.name} style={{
-              background: "#fff",
-              border: pkg.highlight ? `2px solid ${pkg.color}` : "1px solid #e2e8f0",
+            <div key={pkg.name} className="card-hover" style={{
+              background: "white",
+              border: pkg.highlight ? "2px solid rgba(255,107,107,0.4)" : "1px solid #E8E8E4",
               borderRadius: 20,
               padding: "32px 28px",
               position: "relative",
-              boxShadow: pkg.highlight ? "0 8px 32px rgba(249,115,22,0.15)" : "none",
+              boxShadow: pkg.highlight ? "0 8px 32px rgba(255,107,107,0.12)" : "none",
             }}>
               {pkg.badge && (
                 <div style={{
@@ -133,7 +130,7 @@ export default function Pricing() {
                   top: -14,
                   left: "50%",
                   transform: "translateX(-50%)",
-                  background: "linear-gradient(135deg, #f97316, #ec4899)",
+                  background: "linear-gradient(135deg, #FF6B6B, #FF9F43)",
                   color: "#fff",
                   fontSize: 11,
                   fontWeight: 800,
@@ -146,30 +143,30 @@ export default function Pricing() {
                 </div>
               )}
 
-              <h2 style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>
+              <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, color: "#1a1a2e", marginBottom: 4 }}>
                 {pkg.name}
               </h2>
-              <p style={{ color: "#64748b", fontSize: 14, marginBottom: 16 }}>
+              <p style={{ color: "#6B7280", fontSize: 14, marginBottom: 16 }}>
                 {pkg.subtitle}
               </p>
 
               {/* Qualitäts-Balken: Tile-Anzahl als Qualitätsmerkmal */}
               <div style={{ marginBottom: 20 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>{(pkg as any).tileLabel}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#6B7280" }}>{(pkg as any).tileLabel}</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: pkg.color }}>{(pkg as any).qualityLabel}</span>
                 </div>
-                <div style={{ height: 6, background: "#e2e8f0", borderRadius: 9999, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${(pkg as any).qualityBar}%`, background: pkg.highlight ? "linear-gradient(90deg, #f97316, #ec4899)" : `linear-gradient(90deg, ${pkg.color}99, ${pkg.color})`, borderRadius: 9999, transition: "width 0.6s ease" }} />
+                <div style={{ height: 6, background: "#E8E8E4", borderRadius: 9999, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${(pkg as any).qualityBar}%`, background: pkg.highlight ? "linear-gradient(90deg, #FF6B6B, #FF9F43)" : `linear-gradient(90deg, ${pkg.color}99, ${pkg.color})`, borderRadius: 9999, transition: "width 0.6s ease" }} />
                 </div>
-                <p style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>Mehr Tiles = feinere Details &amp; schärfere Konturen</p>
+                <p style={{ fontSize: 11, color: "#6B7280", marginTop: 4 }}>Mehr Tiles = feinere Details &amp; schärfere Konturen</p>
               </div>
 
               <div style={{ marginBottom: 28 }}>
                 <span style={{ fontSize: 42, fontWeight: 800, color: pkg.color }}>
                   CHF {pkg.price}
                 </span>
-                <span style={{ color: "#94a3b8", fontSize: 14, marginLeft: 6 }}>pro Mosaik</span>
+                <span style={{ color: "#6B7280", fontSize: 14, marginLeft: 6 }}>pro Mosaik</span>
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 32 }}>
@@ -183,7 +180,7 @@ export default function Pricing() {
                     }}>
                       <Check size={11} color={pkg.color} strokeWidth={3} />
                     </div>
-                    <span style={{ color: "#374151", fontSize: 14 }}>{f}</span>
+                    <span style={{ color: "#1a1a2e", fontSize: 14 }}>{f}</span>
                   </div>
                 ))}
               </div>
@@ -200,15 +197,15 @@ export default function Pricing() {
                 textDecoration: "none",
                 ...(pkg.ctaStyle === "filled"
                   ? {
-                      background: "linear-gradient(135deg, #f97316, #ec4899)",
+                      background: "linear-gradient(135deg, #FF6B6B, #FF9F43)",
                       color: "#fff",
                       border: "none",
                       boxShadow: "0 4px 16px rgba(249,115,22,0.3)",
                     }
                   : {
                       background: "transparent",
-                      color: "#0f172a",
-                      border: "1.5px solid #e2e8f0",
+                      color: "#1a1a2e",
+                      border: "1.5px solid #E8E8E4",
                     }),
               }}>
                 {pkg.cta} <ArrowRight size={15} />
@@ -220,8 +217,8 @@ export default function Pricing() {
         {/* Upsell-Erklärungsbanner: Warum mehr Tiles besser sind */}
         <div style={{ maxWidth: 1000, margin: "40px auto 0", background: "linear-gradient(135deg, rgba(249,115,22,0.06), rgba(99,102,241,0.06))", border: "1px solid rgba(249,115,22,0.2)", borderRadius: 16, padding: "24px 32px", display: "flex", gap: 32, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200 }}>
-            <p style={{ fontWeight: 800, fontSize: 16, color: "#0f172a", marginBottom: 6 }}>Warum sind mehr Tiles besser?</p>
-            <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6 }}>Je mehr Tiles, desto feiner die Details und desto schärfer die Konturen. Bei 40’000 Tiles sind selbst Augen und Haare gestochen scharf erkennbar.</p>
+            <p style={{ fontWeight: 800, fontSize: 16, color: "#1a1a2e", marginBottom: 6 }}>Warum sind mehr Tiles besser?</p>
+            <p style={{ fontSize: 14, color: "#6B7280", lineHeight: 1.6 }}>Je mehr Tiles, desto feiner die Details und desto schärfer die Konturen. Bei 40’000 Tiles sind selbst Augen und Haare gestochen scharf erkennbar.</p>
           </div>
           <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
             {[
@@ -231,8 +228,8 @@ export default function Pricing() {
             ].map((t, i) => (
               <div key={i} style={{ textAlign: "center", minWidth: 80 }}>
                 <div style={{ fontSize: 28, marginBottom: 4 }}>{t.emoji}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a" }}>{t.tiles}</div>
-                <div style={{ fontSize: 11, color: "#94a3b8" }}>{t.detail}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1a2e" }}>{t.tiles}</div>
+                <div style={{ fontSize: 11, color: "#6B7280" }}>{t.detail}</div>
               </div>
             ))}
           </div>
@@ -241,23 +238,23 @@ export default function Pricing() {
 
       {/* ── MATERIALIEN ── dark background */}
       <section style={{
-        background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+        background: "#1a1a2e",
         padding: "80px 24px",
       }}>
         <div style={{ maxWidth: 1000, margin: "0 auto" }}>
           <div style={{ textAlign: "center", marginBottom: 48 }}>
-            <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+            <p style={{ color: "#FF6B6B", fontWeight: 700, letterSpacing: "3px", fontSize: 11, textTransform: "uppercase", marginBottom: 12 }}>
               MATERIALIEN
             </p>
-            <h2 style={{ color: "#fff", fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontWeight: 800, marginBottom: 12 }}>
+            <h2 style={{ fontFamily: "'DM Serif Display', serif", color: "#fff", fontSize: "clamp(1.8rem, 4vw, 2.5rem)", marginBottom: 12 }}>
               Wähle dein Material
             </h2>
-            <p style={{ color: "#94a3b8", fontSize: 16 }}>
+            <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 16 }}>
               Alle Materialien sind UV-beständig und für die Ewigkeit gemacht.
             </p>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 20 }}>
+          <div className="grid-1-2-4" style={{ gap: 20 }}>
             {[
               { icon: "🖼️", name: "Leinwand", desc: "Klassisch & warm. Gespannt auf Holzrahmen.", price: "Im Preis" },
               { icon: "✨", name: "Acrylglas", desc: "Modern & glänzend. Brillante Farben.", price: "+CHF 20" },
@@ -273,9 +270,9 @@ export default function Pricing() {
               }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>{m.icon}</div>
                 <h3 style={{ color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{m.name}</h3>
-                <p style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.5, marginBottom: 12 }}>{m.desc}</p>
+                <p style={{ color: "#6B7280", fontSize: 13, lineHeight: 1.5, marginBottom: 12 }}>{m.desc}</p>
                 <span style={{
-                  color: m.price.startsWith("+") ? "#f97316" : m.price.startsWith("−") ? "#22c55e" : "#94a3b8",
+                  color: m.price.startsWith("+") ? "#FF6B6B" : m.price.startsWith("−") ? "#6BCB77" : "#6B7280",
                   fontSize: 13, fontWeight: 700,
                 }}>
                   {m.price}
@@ -287,13 +284,13 @@ export default function Pricing() {
       </section>
 
       {/* ── TESTIMONIALS ── light background */}
-      <section style={{ background: "#f8fafc", padding: "80px 24px" }}>
+      <section style={{ background: "#FAFAF8", padding: "80px 24px" }}>
         <div style={{ maxWidth: 1000, margin: "0 auto" }}>
           <div style={{ textAlign: "center", marginBottom: 48 }}>
-            <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+            <p style={{ color: "#FF6B6B", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
               KUNDENSTIMMEN
             </p>
-            <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontWeight: 800, color: "#0f172a" }}>
+            <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontFamily: "'DM Serif Display', serif", color: "#1a1a2e" }}>
               Was unsere Kunden sagen
             </h2>
           </div>
@@ -302,21 +299,21 @@ export default function Pricing() {
             {TESTIMONIALS.map((t) => (
               <div key={t.name} style={{
                 background: "#fff",
-                border: "1px solid #e2e8f0",
+                border: "1px solid #E8E8E4",
                 borderRadius: 16,
                 padding: "28px 24px",
               }}>
                 <div style={{ display: "flex", gap: 2, marginBottom: 16 }}>
                   {Array.from({ length: t.rating }).map((_, i) => (
-                    <span key={i} style={{ color: "#f97316", fontSize: 16 }}>★</span>
+                    <span key={i} style={{ color: "#FF6B6B", fontSize: 16 }}>★</span>
                   ))}
                 </div>
-                <p style={{ color: "#374151", fontSize: 15, lineHeight: 1.7, marginBottom: 20, fontStyle: "italic" }}>
+                <p style={{ color: "#1a1a2e", fontSize: 15, lineHeight: 1.7, marginBottom: 20, fontStyle: "italic" }}>
                   "{t.text}"
                 </p>
                 <div>
-                  <span style={{ fontWeight: 700, color: "#0f172a", fontSize: 14 }}>{t.name}</span>
-                  <span style={{ color: "#94a3b8", fontSize: 13, marginLeft: 6 }}>— {t.location}</span>
+                  <span style={{ fontWeight: 700, color: "#1a1a2e", fontSize: 14 }}>{t.name}</span>
+                  <span style={{ color: "#6B7280", fontSize: 13, marginLeft: 6 }}>— {t.location}</span>
                 </div>
               </div>
             ))}
@@ -324,10 +321,10 @@ export default function Pricing() {
         </div>
       </section>
 
-      {/* ── INKLUSIVE ── white */}
-      <section style={{ background: "#fff", padding: "60px 24px" }}>
+      {/* ── INKLUSIVE ── */}
+      <section style={{ background: "#FAFAF8", padding: "60px 24px" }}>
         <div style={{ maxWidth: 700, margin: "0 auto", textAlign: "center" }}>
-          <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2rem)", fontWeight: 800, color: "#0f172a", marginBottom: 32 }}>
+          <h2 style={{ fontSize: "clamp(1.5rem, 3vw, 2rem)", fontFamily: "'DM Serif Display', serif", color: "#1a1a2e", marginBottom: 32 }}>
             Immer inklusive
           </h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 48 }}>
@@ -342,28 +339,26 @@ export default function Pricing() {
               <div key={item} style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left" }}>
                 <div style={{
                   width: 22, height: 22, borderRadius: "50%",
-                  background: "linear-gradient(135deg, #f97316, #ec4899)",
+                  background: "linear-gradient(135deg, #FF6B6B, #FF9F43)",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   flexShrink: 0,
                 }}>
                   <Check size={12} color="#fff" strokeWidth={3} />
                 </div>
-                <span style={{ color: "#374151", fontSize: 14 }}>{item}</span>
+                <span style={{ color: "#1a1a2e", fontSize: 14 }}>{item}</span>
               </div>
             ))}
           </div>
 
-          <Link to="/studio" style={{
+          <Link to="/studio" className="btn-gradient" style={{
             display: "inline-flex", alignItems: "center", gap: 8,
-            background: "linear-gradient(135deg, #f97316, #ec4899)",
-            color: "#fff", fontWeight: 700, fontSize: 17,
+            fontSize: 17,
             padding: "16px 36px", borderRadius: 50,
             textDecoration: "none",
-            boxShadow: "0 8px 24px rgba(249,115,22,0.3)",
           }}>
             Kostenlose Vorschau erstellen <ArrowRight size={18} />
           </Link>
-          <p style={{ color: "#94a3b8", fontSize: 13, marginTop: 12 }}>
+          <p style={{ color: "#6B7280", fontSize: 13, marginTop: 12 }}>
             Keine Registrierung · Vorschau kostenlos · Erst beim Bestellen zahlen
           </p>
         </div>

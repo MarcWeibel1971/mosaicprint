@@ -3,11 +3,11 @@ import { Zap, Printer, Clock, Heart, Star, CheckCircle, ArrowRight } from "lucid
 
 export default function HowItWorks() {
   return (
-    <div style={{ background: "#fff", minHeight: "100vh" }}>
+    <div style={{ background: "#FAFAF8", minHeight: "100vh" }}>
 
       {/* ── HERO: So einfach geht's ── dark background */}
       <section style={{
-        background: "linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)",
+        background: "#1a1a2e",
         padding: "80px 24px 100px",
         position: "relative",
         overflow: "hidden",
@@ -25,13 +25,13 @@ export default function HowItWorks() {
         }} />
 
         <div style={{ maxWidth: 1100, margin: "0 auto", textAlign: "center", position: "relative" }}>
-          <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+          <p style={{ color: "#FF6B6B", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
             PROZESS
           </p>
           <h1 style={{ color: "#fff", fontSize: "clamp(2rem, 5vw, 3.5rem)", fontWeight: 800, marginBottom: 20, lineHeight: 1.1 }}>
             So einfach geht's
           </h1>
-          <p style={{ color: "#94a3b8", fontSize: 18, maxWidth: 500, margin: "0 auto 64px" }}>
+          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 18, maxWidth: 500, margin: "0 auto 64px" }}>
             In drei Schritten zum fertigen Kunstwerk.
           </p>
 
@@ -77,7 +77,7 @@ export default function HowItWorks() {
                 <h3 style={{ color: "#fff", fontSize: 20, fontWeight: 700, marginBottom: 12 }}>
                   {step.title}
                 </h3>
-                <p style={{ color: "#94a3b8", fontSize: 15, lineHeight: 1.6 }}>
+                <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 15, lineHeight: 1.6 }}>
                   {step.desc}
                 </p>
               </div>
@@ -93,7 +93,7 @@ export default function HowItWorks() {
       </section>
 
       {/* ── WARUM WIR ── light background */}
-      <section style={{ background: "#f8fafc", padding: "80px 24px" }}>
+      <section style={{ background: "#FAFAF8", padding: "80px 24px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
           <div style={{
             display: "grid",
@@ -106,12 +106,12 @@ export default function HowItWorks() {
               <p style={{ color: "#14b8a6", fontWeight: 700, letterSpacing: "0.15em", fontSize: 12, textTransform: "uppercase", marginBottom: 12 }}>
                 WARUM WIR
               </p>
-              <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontWeight: 800, color: "#0f172a", lineHeight: 1.2 }}>
+              <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontFamily: "'DM Serif Display', serif", color: "#1a1a2e", lineHeight: 1.2 }}>
                 Warum MosaicPrint?
               </h2>
             </div>
             <div style={{ paddingTop: 16 }}>
-              <p style={{ color: "#475569", fontSize: 17, lineHeight: 1.7 }}>
+              <p style={{ color: "#6B7280", fontSize: 17, lineHeight: 1.7 }}>
                 Wir verbinden modernste KI-Technologie mit professionellem Fotodruck – für ein Ergebnis, das begeistert und in Erinnerung bleibt.
               </p>
             </div>
@@ -164,7 +164,7 @@ export default function HowItWorks() {
             ].map((item, i) => (
               <div key={i} style={{
                 background: "#fff",
-                border: "1px solid #e2e8f0",
+                border: "1px solid #E8E8E4",
                 borderRadius: 16,
                 padding: "28px 24px",
               }}>
@@ -177,10 +177,10 @@ export default function HowItWorks() {
                 }}>
                   {item.icon}
                 </div>
-                <h3 style={{ fontSize: 17, fontWeight: 700, color: "#0f172a", marginBottom: 8 }}>
+                <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1a1a2e", marginBottom: 8 }}>
                   {item.title}
                 </h3>
-                <p style={{ color: "#64748b", fontSize: 14, lineHeight: 1.6 }}>
+                <p style={{ color: "#6B7280", fontSize: 14, lineHeight: 1.6 }}>
                   {item.desc}
                 </p>
               </div>
@@ -191,12 +191,12 @@ export default function HowItWorks() {
 
       {/* ── DETAILLIERTER PROZESS ── dark background */}
       <section style={{
-        background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+        background: "#1a1a2e",
         padding: "80px 24px",
       }}>
         <div style={{ maxWidth: 800, margin: "0 auto" }}>
           <div style={{ textAlign: "center", marginBottom: 56 }}>
-            <p style={{ color: "#f97316", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
+            <p style={{ color: "#FF6B6B", fontWeight: 700, letterSpacing: "0.15em", fontSize: 13, textTransform: "uppercase", marginBottom: 16 }}>
               DETAILS
             </p>
             <h2 style={{ color: "#fff", fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontWeight: 800 }}>
@@ -226,7 +226,7 @@ export default function HowItWorks() {
               },
               {
                 num: "04",
-                color: "#f97316",
+                color: "#FF6B6B",
                 title: "Vorschau & Bestellen",
                 desc: "Überprüfe das Ergebnis in der Vorschau. Zufrieden? Dann direkt bestellen – wir drucken und liefern in 48h.",
               },
@@ -250,7 +250,7 @@ export default function HowItWorks() {
                   <h3 style={{ color: "#fff", fontSize: 18, fontWeight: 700, marginBottom: 8, marginTop: 10 }}>
                     {step.title}
                   </h3>
-                  <p style={{ color: "#94a3b8", fontSize: 15, lineHeight: 1.7 }}>
+                  <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 15, lineHeight: 1.7 }}>
                     {step.desc}
                   </p>
                 </div>
@@ -261,21 +261,19 @@ export default function HowItWorks() {
       </section>
 
       {/* ── CTA ── */}
-      <section style={{ background: "#fff", padding: "80px 24px", textAlign: "center" }}>
+      <section style={{ background: "#FAFAF8", padding: "80px 24px", textAlign: "center" }}>
         <div style={{ maxWidth: 600, margin: "0 auto" }}>
-          <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.5rem)", fontWeight: 800, color: "#0f172a", marginBottom: 16 }}>
+          <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: "clamp(1.8rem, 4vw, 2.5rem)", color: "#1a1a2e", marginBottom: 16 }}>
             Bereit für dein Mosaik?
           </h2>
-          <p style={{ color: "#64748b", fontSize: 17, marginBottom: 32 }}>
+          <p style={{ color: "#6B7280", fontSize: 17, marginBottom: 32, lineHeight: 1.75 }}>
             Erstelle jetzt dein persönliches Kunstwerk – kostenlose Vorschau, kein Risiko.
           </p>
-          <Link to="/studio" style={{
+          <Link to="/studio" className="btn-gradient" style={{
             display: "inline-flex", alignItems: "center", gap: 8,
-            background: "linear-gradient(135deg, #f97316, #ec4899)",
-            color: "#fff", fontWeight: 700, fontSize: 17,
+            fontSize: 17,
             padding: "16px 36px", borderRadius: 50,
             textDecoration: "none",
-            boxShadow: "0 8px 24px rgba(249,115,22,0.3)",
           }}>
             Mosaik erstellen <ArrowRight size={18} />
           </Link>
