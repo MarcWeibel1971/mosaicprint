@@ -681,6 +681,25 @@ export default function Admin() {
   // Mirror Tiles
   const [mirrorBatch, setMirrorBatch] = useState(500)
   const [mirrorResult, setMirrorResult] = useState<string>('')
+  // Rebuild/Reclassify Job Status (for progress bar)
+  const [rebuildStatus, setRebuildStatus] = useState<{ running: boolean; log: string[]; startedAt: string | null; finishedAt: string | null; error: string | null } | null>(null)
+  const rebuildPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startRebuildPolling = useCallback(() => {
+    if (rebuildPollRef.current) return
+    rebuildPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/trpc/getRebuildStatus')
+        const data = await res.json()
+        const status = data.result?.data ?? data
+        setRebuildStatus(status)
+        if (!status?.running) {
+          clearInterval(rebuildPollRef.current!)
+          rebuildPollRef.current = null
+          fetchStats()
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+  }, [fetchStats])
 
   const startSmartImport = async (sourceId: 'unsplash' | 'pexels' | 'pixabay') => {
     if (activeJob) return
@@ -1059,7 +1078,9 @@ export default function Admin() {
       const data = await res.json()
       const parsed = data.result?.data?.json ?? data.result?.data ?? data
       if (parsed?.started) {
-        setMessage({ text: '⏳ Reklassifizierung läuft im Hintergrund. Fortschritt unter "Rebuild-Status" sichtbar.', type: 'info' })
+        setRebuildStatus({ running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null })
+        startRebuildPolling()
+        setMessage({ text: '⏳ Reklassifizierung läuft – Fortschrittsbalken wird aktualisiert.', type: 'info' })
       } else {
         setMessage({ text: parsed?.message ?? 'Reklassifizierung gestartet', type: 'info' })
       }
@@ -2675,12 +2696,32 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       onClick={handleBatchReclassify}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium rounded-lg transition-colors"
+                      disabled={rebuildStatus?.running === true}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition-colors"
                     >
-                      🔄 Alle Tiles neu klassifizieren
+                      {rebuildStatus?.running ? '⏳ Läuft...' : '🔄 Alle Tiles neu klassifizieren'}
                     </button>
                     <span className="text-xs text-gray-400">Neuer Score: Sobel-Kanten + Chroma-Varianz + Pixel-Diversität</span>
                   </div>
+                  {rebuildStatus?.running && (
+                    <div className="mt-2 p-2 bg-violet-50 border border-violet-200 rounded-lg">
+                      <div className="flex items-center justify-between text-xs text-violet-700 mb-1">
+                        <span>🔄 Reklassifizierung läuft...</span>
+                        <span className="text-violet-400">Aktualisiert alle 2s</span>
+                      </div>
+                      <div className="w-full bg-violet-100 rounded-full h-2 overflow-hidden">
+                        <div className="bg-violet-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
+                      </div>
+                      {rebuildStatus.log.length > 0 && (
+                        <div className="mt-1 text-xs text-violet-600 font-mono truncate">{rebuildStatus.log[rebuildStatus.log.length - 1]}</div>
+                      )}
+                    </div>
+                  )}
+                  {rebuildStatus && !rebuildStatus.running && rebuildStatus.finishedAt && (
+                    <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">
+                      ✅ Reklassifizierung abgeschlossen ({new Date(rebuildStatus.finishedAt).toLocaleTimeString('de-CH')})
+                    </div>
+                  )}
                 </div>
               )
             })()}

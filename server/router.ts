@@ -1309,9 +1309,10 @@ export const appRouter = router({
       const pool = db.getPool();
       const totalRes = await pool.query("SELECT COUNT(*) FROM mosaic_images");
       const labRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE avg_l IS NOT NULL");
-      // Count tiles with real quadrant data (not just default zeros)
+      // Count tiles with real quadrant data: tl_l IS NOT NULL AND avg_l IS NOT NULL
+      // (grayscale tiles legitimately have tl_a≈0 and tl_b≈0, so we use avg_l presence instead)
       const quadRes = await pool.query(
-        "SELECT COUNT(*) FROM mosaic_images WHERE NOT (tl_a = 0 AND tl_b = 0 AND tr_a = 0 AND tr_b = 0)"
+        "SELECT COUNT(*) FROM mosaic_images WHERE tl_l IS NOT NULL AND avg_l IS NOT NULL"
       );
       const r2Res = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE r2_url IS NOT NULL");
       const mirrorRes = await pool.query("SELECT COUNT(*) FROM mosaic_images WHERE source_url LIKE '%#mirror'");
