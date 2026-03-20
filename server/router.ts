@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import { router, publicProcedure } from "./trpc.js";
 import * as db from "./db.js";
 import { renderMosaicOnServer, type TileData } from "./mosaicExport.js";
@@ -1515,7 +1516,7 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
       if (status.running) return { started: false, message: "Import läuft bereits" };
-      const importSessionId = crypto.randomUUID();
+      const importSessionId = randomUUID();
       status.running = true; status.startedAt = new Date().toISOString(); status.log = []; status.imported = 0; status.total = input.count; status.error = null; status.sessionId = importSessionId;
       const log = (msg: string) => { status.log.push(msg); if (status.log.length > 200) status.log = status.log.slice(-200); };
       (async () => {
@@ -1727,7 +1728,7 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const jobKey = input.keywords?.length ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
       if (smartImportJobs[jobKey]?.running) return { started: false };
-      const smartSessionId = crypto.randomUUID();
+      const smartSessionId = randomUUID();
       smartImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, sessionId: smartSessionId };
       const log = (msg: string) => { smartImportJobs[jobKey].log.push(msg); if (smartImportJobs[jobKey].log.length > 500) smartImportJobs[jobKey].log = smartImportJobs[jobKey].log.slice(-500); };
       (async () => {
@@ -2053,7 +2054,7 @@ export const appRouter = router({
       for (const source of sources) {
         const status = getImportStatus(source);
         if (status.running) { results[source] = false; continue; }
-        const importAllSessionId = crypto.randomUUID();
+        const importAllSessionId = randomUUID();
         status.running = true;
         status.startedAt = new Date().toISOString();
         status.log = [];
@@ -2512,7 +2513,7 @@ export const appRouter = router({
         : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
       // Init job tracking
-      const targetedSessionId = crypto.randomUUID();
+      const targetedSessionId = randomUUID();
       targetedImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, query: input.query, sourceId: input.sourceId, sessionId: targetedSessionId };
       // Register in session if provided
       if (input.sessionId && keywordSessions[input.sessionId]) {
