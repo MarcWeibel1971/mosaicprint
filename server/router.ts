@@ -3297,10 +3297,9 @@ export const appRouter = router({
 
   // ── Bereinigungsassistent ──────────────────────────────────────────────────────────────────────────────────────
   /**
-   * Analysiert den Tile-Pool und gibt Kandidaten für jede der 3 Bereinigungsstufen zurück.
-   * Stufe 1: Automatisch löschbar (rejected + URL-Duplikate)
-   * Stufe 2: Bulk-Delete mit Vorschau (grau+busy, fast-weiss, general+low-score)
-   * Stufe 3: Manuelles Review (zu gesättigte Hauttöne, Gesichter als Tiles)
+   * Analysiert den Tile-Pool und gibt Kandidaten für jede der 2 Bereinigungsstufen zurück.
+   * Stufe 1: Automatisch löschbar (rejected inkl. Gemini-Rejects + URL-Duplikate + Pixabay-Hotlinks)
+   * Stufe 2: Bulk-Delete mit Vorschau (grau+busy, fast-weiss, tiefer Quality-Score)
    */
   getCleanupCandidates: publicProcedure.query(async () => {
     const pool = db.getPool();
@@ -3308,23 +3307,22 @@ export const appRouter = router({
     // Alle Counts in einem einzigen Query (deutlich schneller auf grosser DB)
     const statsRes = await pool.query(`
       SELECT
-        COUNT(*) FILTER (WHERE quality_status = 'rejected') AS rejected,
+        COUNT(*) FILTER (WHERE quality_status = 'rejected' OR ai_suitability = 'reject') AS rejected,
         COUNT(*) FILTER (WHERE id NOT IN (
           SELECT MIN(id) FROM mosaic_images GROUP BY source_url
         )) AS url_duplicates,
         COUNT(*) FILTER (WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
-          AND tile_type = 'busy' AND quality_status != 'rejected') AS gray_busy,
+          AND tile_type = 'busy'
+          AND quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS gray_busy,
         COUNT(*) FILTER (WHERE avg_l > 92
-          AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5 AND quality_status != 'rejected') AS near_white,
+          AND SQRT(avg_a*avg_a + avg_b*avg_b) < 5
+          AND quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS near_white,
         COUNT(*) FILTER (WHERE quality_score < 40
-          AND quality_status != 'rejected') AS low_score,
-        COUNT(*) FILTER (WHERE semantic_theme LIKE 'portrait%'
-          AND SQRT(avg_a*avg_a + avg_b*avg_b) > 35 AND quality_status != 'rejected') AS oversaturated_skin,
-        COUNT(*) FILTER (WHERE semantic_theme LIKE 'portrait%'
-          AND tile_type = 'busy' AND quality_status != 'rejected') AS portrait_busy,
+          AND quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS low_score,
         COUNT(*) FILTER (WHERE COALESCE(source_provider, '') = 'pixabay'
-          AND r2_url IS NULL AND quality_status != 'rejected') AS pixabay_hotlink,
-        COUNT(*) FILTER (WHERE quality_status != 'rejected') AS total_active
+          AND r2_url IS NULL
+          AND quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS pixabay_hotlink,
+        COUNT(*) FILTER (WHERE quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS total_active
       FROM mosaic_images
     `);
     const s = statsRes.rows[0];
@@ -3334,27 +3332,10 @@ export const appRouter = router({
     const grayBusyCount = Number(s.gray_busy);
     const nearWhiteCount = Number(s.near_white);
     const lowScoreCount = Number(s.low_score);
-    const oversaturatedSkinCount = Number(s.oversaturated_skin);
-    const portraitBusyCount = Number(s.portrait_busy);
     const pixabayHotlinkCount = Number(s.pixabay_hotlink);
-
-    const themeDistRes = await pool.query(`
-      SELECT semantic_theme, COUNT(*) as cnt
-      FROM mosaic_images
-      WHERE quality_status != 'rejected'
-      GROUP BY semantic_theme
-      ORDER BY cnt DESC
-      LIMIT 12
-    `);
-    const themeDistribution = themeDistRes.rows.map((r: {semantic_theme: string; cnt: string}) => ({
-      theme: r.semantic_theme ?? 'null',
-      count: Number(r.cnt),
-      pct: totalActive > 0 ? Math.round(Number(r.cnt) / totalActive * 100) : 0,
-    }));
 
     return {
       totalActive,
-      themeDistribution,
       stage1: {
         rejected: rejectedCount,
         urlDuplicates: urlDupCount,
@@ -3366,11 +3347,6 @@ export const appRouter = router({
         nearWhite: nearWhiteCount,
         lowScore: lowScoreCount,
         total: grayBusyCount + nearWhiteCount + lowScoreCount,
-      },
-      stage3: {
-        oversaturatedSkin: oversaturatedSkinCount,
-        portraitBusy: portraitBusyCount,
-        total: oversaturatedSkinCount + portraitBusyCount,
       },
     };
   }),

@@ -4920,7 +4920,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 }
 
 // ── Bereinigungsassistent ────────────────────────────────────────────────
-type CleanupCategory = 'rejected' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore' | 'oversaturatedSkin' | 'portraitBusy'
+type CleanupCategory = 'rejected' | 'urlDuplicates' | 'pixabayHotlink' | 'grayBusy' | 'nearWhite' | 'lowScore'
 
 interface CleanupTile {
   id: number
@@ -4939,10 +4939,8 @@ interface CleanupTile {
 
 interface CleanupCandidates {
   totalActive: number
-  themeDistribution: Array<{ theme: string; count: number; pct: number }>
   stage1: { rejected: number; urlDuplicates: number; pixabayHotlink: number; total: number }
   stage2: { grayBusy: number; nearWhite: number; lowScore: number; total: number }
-  stage3: { oversaturatedSkin: number; portraitBusy: number; total: number }
 }
 
 function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
@@ -5029,12 +5027,10 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     grayBusy: { label: 'Grau + Busy', desc: 'Chroma < 3 UND tile_type = busy – strukturlos und unruhig', stage: 2, color: 'gray', icon: '🌫️' },
     nearWhite: { label: 'Fast-Weiss', desc: 'L > 92 UND Chroma < 5 – kein Mehrwert für Mosaike', stage: 2, color: 'blue', icon: '⬜' },
     lowScore: { label: 'Tiefer Qualitäts-Score', desc: 'quality_score < 40 – schlechte Textur/Farbvielfalt', stage: 2, color: 'yellow', icon: '📉' },
-    oversaturatedSkin: { label: 'Übersättigte Hauttöne', desc: 'Portrait-Theme UND Chroma > 35 – zu intensiv für Mosaike', stage: 3, color: 'pink', icon: '🎨' },
-    portraitBusy: { label: 'Portrait-Tiles schwacher Qualität', desc: 'Portrait-Thema UND tile_type = busy UND quality_score < 55 – unruhig und unterdurchschnittlich', stage: 3, color: 'purple', icon: '🎭' },
   }
 
-  const stageColors = { 1: 'bg-red-50 border-red-200', 2: 'bg-amber-50 border-amber-200', 3: 'bg-blue-50 border-blue-200' }
-  const stageTitles = { 1: '🔴 Stufe 1 – Automatisch löschbar', 2: '🟡 Stufe 2 – Bulk-Delete mit Vorschau', 3: '🔵 Stufe 3 – Manuelles Review' }
+  const stageColors = { 1: 'bg-red-50 border-red-200', 2: 'bg-amber-50 border-amber-200' }
+  const stageTitles = { 1: '🔴 Stufe 1 – Automatisch löschbar', 2: '🟡 Stufe 2 – Bulk-Delete mit Vorschau' }
 
   const countForCat = (cat: CleanupCategory): number => {
     if (!candidates) return 0
@@ -5044,8 +5040,6 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     if (cat === 'grayBusy') return candidates.stage2.grayBusy
     if (cat === 'nearWhite') return candidates.stage2.nearWhite
     if (cat === 'lowScore') return candidates.stage2.lowScore
-    if (cat === 'oversaturatedSkin') return candidates.stage3.oversaturatedSkin
-    if (cat === 'portraitBusy') return candidates.stage3.portraitBusy
     return 0
   }
 
@@ -5061,14 +5055,14 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
           <div>
             <h3 className="font-bold text-gray-900">Bereinigungsassistent</h3>
             <p className="text-xs text-gray-500">
-              Ungeeignete Tiles gezielt identifizieren und löschen – 3-stufiger Workflow mit Vorschau
+              Ungeeignete Tiles gezielt identifizieren und löschen – 2-stufiger Workflow mit Vorschau
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {candidates && (
             <span className="text-xs font-semibold bg-red-100 text-red-700 px-2 py-1 rounded-full">
-              {candidates.stage1.total + candidates.stage2.total + candidates.stage3.total} Kandidaten
+              {candidates.stage1.total + candidates.stage2.total} Kandidaten
             </span>
           )}
           <span className="text-gray-400 text-sm">{expanded ? '▲ Einklappen' : '▼ Ausklappen'}</span>
@@ -5077,55 +5071,21 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
 
       {expanded && (
         <div className="border-t border-gray-100 p-5 space-y-6">
-          {/* Kandidaten laden */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={fetchCandidates}
-              disabled={loadingCandidates}
-              className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-white font-semibold px-4 py-2 rounded-xl transition-colors text-sm"
-            >
-              {loadingCandidates ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              Kandidaten analysieren
-            </button>
-            {candidates && (
-              <span className="text-sm text-gray-600">
-                Gesamt: <strong>{candidates.stage1.total + candidates.stage2.total + candidates.stage3.total}</strong> Tiles
-                ({candidates.stage1.total} auto · {candidates.stage2.total} bulk · {candidates.stage3.total} manuell)
-              </span>
-            )}
-          </div>
-
-          {/* Pool-Statistik */}
-          {candidates && candidates.themeDistribution && candidates.themeDistribution.length > 0 && (
-            <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
-              <h4 className="text-xs font-bold text-gray-600 uppercase tracking-wider mb-3">Pool-Verteilung ({candidates.totalActive.toLocaleString('de-CH')} aktive Tiles)</h4>
-              <div className="space-y-1.5">
-                {candidates.themeDistribution.map(t => (
-                  <div key={t.theme} className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600 w-44 truncate shrink-0">{t.theme ?? '(kein Tag)'}</span>
-                    <div className="flex-1 bg-gray-200 rounded-full h-2 overflow-hidden">
-                      <div
-                        className={`h-2 rounded-full ${t.pct > 30 ? 'bg-red-400' : t.pct > 15 ? 'bg-amber-400' : 'bg-blue-400'}`}
-                        style={{ width: `${Math.min(t.pct, 100)}%` }}
-                      />
-                    </div>
-                    <span className={`text-xs font-semibold w-10 text-right shrink-0 ${t.pct > 30 ? 'text-red-600' : t.pct > 15 ? 'text-amber-600' : 'text-gray-600'}`}>
-                      {t.pct}%
-                    </span>
-                    <span className="text-xs text-gray-400 w-16 text-right shrink-0">{t.count.toLocaleString('de-CH')}</span>
-                  </div>
-                ))}
-              </div>
-              {candidates.themeDistribution.some(t => t.pct > 30) && (
-                <p className="text-xs text-red-600 mt-2 font-medium">
-                  ⚠️ Dominante Kategorie (&gt;30%) erkannt – Semantic Tagger neu ausführen empfohlen, um Pool-Verteilung zu korrigieren.
-                </p>
-              )}
+          {/* Kandidaten-Übersicht */}
+          {loadingCandidates && (
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <RefreshCw className="w-4 h-4 animate-spin" /> Analysiere...
             </div>
+          )}
+          {candidates && (
+            <p className="text-sm text-gray-600">
+              Gesamt: <strong>{candidates.stage1.total + candidates.stage2.total}</strong> Kandidaten
+              ({candidates.stage1.total} automatisch · {candidates.stage2.total} mit Vorschau)
+            </p>
           )}
 
           {/* Stufen */}
-          {([1, 2, 3] as const).map(stage => {
+          {([1, 2] as const).map(stage => {
             const cats = (Object.entries(categoryMeta) as [CleanupCategory, typeof categoryMeta[CleanupCategory]][])
               .filter(([, m]) => m.stage === stage)
             return (
