@@ -8,7 +8,7 @@
 
 //// ── Layer 1: In-Memory cache (LRU with mobile-aware size limit) ──────────────
 const isMobileDevice = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
-const MAX_MEMORY_CACHE = isMobileDevice ? 400 : 2000; // Mobile: 400 tiles × ~20KB = ~8 MB
+const MAX_MEMORY_CACHE = isMobileDevice ? 250 : 2000; // Mobile: 250 tiles × ~20KB = ~5 MB (reduced to prevent OOM)
 const memoryCache = new Map<string, HTMLImageElement>(); // insertion order = LRU
 export function getMemoryCached(url: string): HTMLImageElement | undefined {
   const img = memoryCache.get(url);
@@ -151,6 +151,32 @@ export async function clearIDBCache(): Promise<void> {
   }
 }
 
+// ── Throttled IDB write queue ─────────────────────────────────────────────────
+// On mobile, 1500+ concurrent fetchAndStoreBlob calls cause massive memory pressure
+// (each re-fetches the image as a blob + writes to IDB). Throttle to small batches.
+const idbWriteQueue: string[] = [];
+let idbWriteRunning = false;
+const IDB_WRITE_BATCH = isMobileDevice ? 5 : 20;
+const IDB_WRITE_DELAY = isMobileDevice ? 500 : 100; // ms between batches
+
+function queueIDBWrite(url: string) {
+  idbWriteQueue.push(url);
+  if (!idbWriteRunning) drainIDBWriteQueue();
+}
+
+async function drainIDBWriteQueue() {
+  if (idbWriteRunning) return;
+  idbWriteRunning = true;
+  while (idbWriteQueue.length > 0) {
+    const batch = idbWriteQueue.splice(0, IDB_WRITE_BATCH);
+    await Promise.allSettled(batch.map(url => fetchAndStoreBlob(url)));
+    if (idbWriteQueue.length > 0) {
+      await new Promise(r => setTimeout(r, IDB_WRITE_DELAY));
+    }
+  }
+  idbWriteRunning = false;
+}
+
 // ── Combined loader ───────────────────────────────────────────────────────────
 /**
  * Load an image with three-layer caching:
@@ -186,8 +212,8 @@ export async function loadImageCached(
     // Tag with original URL so Hi-Res overlay can reconstruct the high-res version
     img.dataset.originalSrc = url;
     setMemoryCached(url, img);
-    // Store in IndexedDB asynchronously (fire-and-forget)
-    fetchAndStoreBlob(url).catch(() => {});
+    // Store in IndexedDB asynchronously - throttled on mobile to prevent memory pressure
+    queueIDBWrite(url);
     return img;
   }
 
