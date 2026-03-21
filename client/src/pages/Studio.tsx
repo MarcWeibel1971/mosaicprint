@@ -1345,13 +1345,10 @@ export default function Studio() {
       // targetSat 0-1: at sat=0.3 (moderately colorful), W_A/W_B = 3.2; at sat=0.6+, W_A/W_B = 5.0
       const satBoost = Math.min(3.0, targetSat * 5.0); // 0 at gray, up to +3.0 at fully saturated
       const W_L = 1.2, W_A = 2.0 + satBoost, W_B = 2.0 + satBoost; // Dynamic: 2.0 (gray) to 5.0 (saturated)
-      // W_QUAD: Leichtes Quadrant-a/b-Matching in Stage A.
-      // Begründung: Ziel-Zellen sind 1px, daher targetQuadA/B = [targetA, targetA, targetA, targetA].
-      // Das Quadrant-Matching vergleicht Tile-interne Farbverteilung mit dem Zielwert –
-      // Tiles mit starken Farbgradienten (z.B. blauer Himmel oben / grünes Gras unten) werden
-      // leicht benachteiligt wenn der Zielbereich einfarbig ist. Kleines Gewicht = subtile Verbesserung.
-      // Stage C (SSD) ist weiterhin der primäre Ort für Quadrant-Matching.
-      const W_QUAD = IS_14D ? 0.15 * edgeQuadBoost : 0; // Edge cells get boosted quadrant matching
+      // W_QUAD: Quadrant-a/b-Matching in Stage A (spatial color distribution).
+      // For edge cells, edgeQuadBoost pushes gradient-matching tiles into the Top-K candidates.
+      // Higher base (0.35) ensures quadrant color matters even for non-edge cells.
+      const W_QUAD = IS_14D ? 0.35 * edgeQuadBoost : 0;
       // W_EDGE: active for all index types - edge energy drives contour sharpness
       const W_EDGE = IS_7D ? 25.0 : 22.0;
       // W_BRIGHT: brightness matching - prevents dark tiles in bright areas
@@ -1530,11 +1527,10 @@ export default function Studio() {
       // For edge cells (contours), compute quadrant target colors from neighboring cells
       // using the Sobel gradient direction. This lets the kNN find two-tone/gradient tiles
       // that match the actual color transition (e.g., skin→background at chin line).
-      const EDGE_QUAD_THRESHOLD = 0.25; // edgeMap > 0.25 → use directional quadrants
+      const EDGE_QUAD_THRESHOLD = 0.15; // lowered from 0.25: more cells get edge-aware treatment
       for (let ci = 0; ci < (TOTAL_TILES); ci++) {
         const [tL, tA, tB] = cellLab[ci];
         // FIX: targetEdge/targetBright/targetSat must be active for ALL index types (7D, 14D, 15D)!
-        // Previously they were 0 for 14D/15D -> Gray-Penalty in kNN was completely disabled -> gray patches!
         const targetEdge = edgeMap[ci]; // always active
         const targetBright = tL / 100;  // always active
         const targetSat = Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60); // always active
@@ -1545,35 +1541,36 @@ export default function Studio() {
         if (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD) {
           // EDGE CELL: Compute directional quadrant targets from neighbors
           // Sobel gx>0 = brighter to the right, gy>0 = brighter below
-          // Use gradient direction to sample "before" and "after" colors from neighbors
+          // Sample 2 neighbors in each direction for more reliable color estimates
           const col = ci % COLS, row = Math.floor(ci / COLS);
           const gx = sobelGx[ci], gy = sobelGy[ci];
           const mag = Math.sqrt(gx * gx + gy * gy);
 
           if (mag > 0) {
-            // Normalize gradient direction
             const nx = gx / mag, ny = gy / mag;
-            // Sample neighbor cells in the gradient direction (+ and -)
-            // "plus" = brighter side, "minus" = darker side
-            const plusCol = Math.min(COLS - 1, Math.max(0, Math.round(col + nx)));
-            const plusRow = Math.min(ROWS - 1, Math.max(0, Math.round(row + ny)));
-            const minusCol = Math.min(COLS - 1, Math.max(0, Math.round(col - nx)));
-            const minusRow = Math.min(ROWS - 1, Math.max(0, Math.round(row - ny)));
-            const plusLab = cellLab[plusRow * COLS + plusCol];
-            const minusLab = cellLab[minusRow * COLS + minusCol];
+            // Sample 2 neighbors in gradient direction for more stable color estimate
+            const sampleLab = (dirX: number, dirY: number): [number, number, number] => {
+              let sL = 0, sA = 0, sB = 0, sN = 0;
+              for (let step = 1; step <= 2; step++) {
+                const sc = Math.min(COLS - 1, Math.max(0, Math.round(col + dirX * step)));
+                const sr = Math.min(ROWS - 1, Math.max(0, Math.round(row + dirY * step)));
+                const lab = cellLab[sr * COLS + sc];
+                sL += lab[0]; sA += lab[1]; sB += lab[2]; sN++;
+              }
+              return [sL / sN, sA / sN, sB / sN];
+            };
+            const plusLab = sampleLab(nx, ny);   // brighter side
+            const minusLab = sampleLab(-nx, -ny); // darker side
 
-            // Assign quadrants based on gradient direction:
-            // Each quadrant gets the color of the neighbor it faces
-            // Quads: [TL(0), TR(1), BL(2), BR(3)]
-            // dot product of quad center direction with gradient tells which side each quad faces
-            // TL center=(-0.5,-0.5), TR=(+0.5,-0.5), BL=(-0.5,+0.5), BR=(+0.5,+0.5)
+            // Assign quadrants: dot product with gradient direction determines
+            // which side of the edge each quadrant faces
             const quadDirs: [number, number][] = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]];
             tQuadA = [0, 0, 0, 0];
             tQuadB = [0, 0, 0, 0];
             for (let q = 0; q < 4; q++) {
               const dot = quadDirs[q][0] * nx + quadDirs[q][1] * ny;
-              // Blend: dot>0 → plus side, dot<0 → minus side, dot≈0 → center color
-              const blend = Math.max(-1, Math.min(1, dot * 2)); // scale for stronger effect
+              // Stronger blending (×3) for more pronounced color separation at edges
+              const blend = Math.max(-1, Math.min(1, dot * 3));
               const t = (blend + 1) / 2; // 0=minus, 0.5=center, 1=plus
               tQuadA[q] = minusLab[1] * (1 - t) + plusLab[1] * t;
               tQuadB[q] = minusLab[2] * (1 - t) + plusLab[2] * t;
@@ -1588,9 +1585,12 @@ export default function Studio() {
           tQuadB = [tB, tB, tB, tB];
         }
 
-        // Edge cells: boost W_QUAD 6× so gradient tiles rank higher in candidates
-        // Non-edge cells: default 1.0 (no boost)
-        const eqBoost = (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD) ? 6.0 : 1.0;
+        // Edge cells: boost W_QUAD 12× so gradient tiles rank much higher in candidates
+        // Scaled by edge strength: stronger edges get more boost
+        const edgeStrength = targetEdge;
+        const eqBoost = (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD)
+          ? 4.0 + edgeStrength * 16.0  // 4-20× boost, proportional to edge strength
+          : 1.0;
         const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB, eqBoost);
         cellCandidates.push(candidates);
         candidates.forEach(c => neededTileIds.add(c.tileId));
@@ -2432,7 +2432,7 @@ export default function Studio() {
         const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
         // 5. Edge Priority Matching: adaptive weight 0.05-0.50 based on cell edge strength
         const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
-        const edgeWeight = 0.05 + cellEdge * 0.45; // 0.05 (flat) to 0.50 (sharp edge)
+        const edgeWeight = 0.05 + cellEdge * 0.75; // 0.05 (flat) to 0.80 (sharp edge) — increased for crisper contours
         // 6. Saturation difference
         // Prevents gray tiles in colorful areas and vice versa
         // saturation = sqrt(a^2+b^2), range 0-100
@@ -2765,8 +2765,12 @@ export default function Studio() {
         } // end if (inFace) / else
 
         // ── Rotation loop: only quadDist is rotation-dependent ────────────────────────────────────
-        // 2. Quadrant LAB distances (spatial color accuracy) - the only term that varies per rotation.
-        // All other scoring (SSD, CIEDE2000, penalties) was computed once above in baseDist.
+        // Quadrant LAB distances (spatial color accuracy) - the only term that varies per rotation.
+        // Edge-adaptive weight: edge cells get much higher quadrant weight to prefer gradient tiles
+        // that match the actual color transition direction.
+        const wQuadSSD = cellEdge > 0.15
+          ? 0.15 + cellEdge * 0.60  // edge cells: 0.24 (weak edge) to 0.75 (strong edge)
+          : 0.15;                    // flat cells: baseline 0.15
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
           let quadDist = 0;
@@ -2775,7 +2779,7 @@ export default function Studio() {
             quadDist += Math.sqrt(ql*ql + qa*qa + qb*qb);
           }
           quadDist /= 4;
-          const dist = baseDist + 0.15 * quadDist;
+          const dist = baseDist + wQuadSSD * quadDist;
           if (dist < bestDist) { bestDist = dist; bestIdx = j; bestRot = rot; }
         }
       }
