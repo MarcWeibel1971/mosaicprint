@@ -879,6 +879,107 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     }
   }
 
+  // ── Step 2i: Critical LAB-color gaps (high priority for underrepresented colors) ──
+  // Pool analysis shows certain LAB color categories are critically low (<5% of total).
+  // These need targeted imports with higher priority than generic color buckets.
+  {
+    const colorCountRes = await pool.query(`
+      SELECT
+        CASE
+          WHEN avg_l < 25 THEN 'schwarz'
+          WHEN avg_l > 80 THEN 'weiss'
+          WHEN ABS(avg_a) < 8 AND ABS(avg_b) < 8 THEN 'grau'
+          WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b < -15 THEN 'blau'
+          WHEN ABS(avg_b) >= ABS(avg_a) AND avg_b > 20 THEN 'gelb'
+          WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 AND avg_b < -5 THEN 'cyan'
+          WHEN ABS(avg_b) >= ABS(avg_a) AND avg_a < -10 THEN 'gruen'
+          WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 20 THEN 'rot'
+          WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 AND avg_b < 0 THEN 'violett'
+          WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 AND avg_b > 10 THEN 'orange'
+          WHEN ABS(avg_a) > ABS(avg_b) AND avg_a > 10 THEN 'pink'
+          ELSE 'grau'
+        END as color_cat,
+        COUNT(*) as cnt
+      FROM mosaic_images
+      GROUP BY color_cat
+    `);
+    const colorCounts = new Map<string, number>();
+    for (const row of colorCountRes.rows) {
+      colorCounts.set(row.color_cat, Number(row.cnt));
+    }
+
+    // Target: each color should have at least 5% of total (or minimum 800 tiles)
+    const minPerColor = Math.max(800, Math.round(total * 0.05));
+    const COLOR_GAP_KEYWORDS: Record<string, { emoji: string; label: string; keywords: string[] }> = {
+      cyan: {
+        emoji: '🩵', label: 'Cyan/Türkis',
+        keywords: [
+          "turquoise water surface tropical", "teal wall texture smooth", "swimming pool surface blue",
+          "tropical water turquoise", "cyan abstract gradient", "teal blue ocean surface",
+          "turquoise blue abstract smooth", "aqua water color gradient", "seafoam green smooth",
+          "teal fabric texture", "turquoise stone texture", "cyan neon abstract",
+        ],
+      },
+      gruen: {
+        emoji: '🟢', label: 'Grün',
+        keywords: [
+          "green leaves close texture", "grass texture macro closeup", "moss surface texture green",
+          "emerald fabric texture", "green abstract gradient smooth", "forest green bokeh",
+          "green plant leaves texture", "dark green nature abstract", "lime green abstract bright",
+          "sage green smooth wall", "olive green texture", "mint green abstract",
+        ],
+      },
+      orange: {
+        emoji: '🟠', label: 'Orange',
+        keywords: [
+          "sunset gradient orange sky", "terracotta wall texture", "rust texture surface orange",
+          "copper metal texture", "orange abstract gradient smooth", "amber warm abstract",
+          "orange peel texture macro", "burnt orange fabric", "tangerine color abstract",
+          "peach orange gradient smooth", "apricot color bokeh", "warm orange abstract",
+        ],
+      },
+      violett: {
+        emoji: '🟣', label: 'Violett',
+        keywords: [
+          "lavender field purple", "purple fabric texture smooth", "violet abstract gradient",
+          "amethyst crystal purple", "purple bokeh abstract", "indigo blue purple gradient",
+          "lilac flower purple", "deep violet abstract smooth", "purple neon abstract",
+          "mauve purple texture smooth", "plum purple abstract", "wisteria purple bokeh",
+        ],
+      },
+      pink: {
+        emoji: '🩷', label: 'Pink',
+        keywords: [
+          "pink roses flower closeup", "magenta abstract gradient", "pink fabric texture smooth",
+          "fuchsia bright abstract", "pink sky sunset gradient", "blush pink smooth bokeh",
+          "hot pink neon abstract", "rose pink gradient smooth", "pink cherry blossom",
+          "pink tulip flower macro", "salmon pink abstract", "coral pink texture",
+        ],
+      },
+      rot: {
+        emoji: '🔴', label: 'Rot',
+        keywords: [
+          "red brick wall texture", "cherry red fruit closeup", "poppy field red flowers",
+          "crimson fabric texture", "red abstract gradient smooth", "dark red wine color",
+          "ruby red crystal", "red rose macro closeup", "bright red abstract",
+          "scarlet red texture", "vermilion red abstract", "blood red gradient smooth",
+        ],
+      },
+    };
+
+    for (const [colorKey, { emoji, label, keywords }] of Object.entries(COLOR_GAP_KEYWORDS)) {
+      const cnt = colorCounts.get(colorKey) ?? 0;
+      const deficit = Math.max(0, minPerColor - cnt);
+      if (deficit > 0) {
+        // Priority scales with severity: 2.0 if completely missing, decreasing as we approach target
+        const priority = Math.min(2.0, (deficit / minPerColor) * 2.0);
+        for (const kw of keywords) {
+          tasks.push({ query: kw, priority, deficit, label: `${emoji} ${label} (${cnt} → Ziel ${minPerColor})`, subject: `color_${colorKey}` });
+        }
+      }
+    }
+  }
+
   // ── Step 3: Color bucket gaps (lower priority, fills color diversity) ──
   const res = await pool.query(`
     SELECT
@@ -943,7 +1044,12 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
     const bIsCalm = calmSubjects.includes(b.subject);
     if (aIsCalm && !bIsCalm) return -1;
     if (!aIsCalm && bIsCalm) return 1;
-    // Structural categories second (texture, architecture, urban, plants)
+    // Color-gap categories second (critically underrepresented LAB colors)
+    const aIsColorGap = a.subject.startsWith('color_');
+    const bIsColorGap = b.subject.startsWith('color_');
+    if (aIsColorGap && !bIsColorGap) return -1;
+    if (!aIsColorGap && bIsColorGap) return 1;
+    // Structural categories third (texture, architecture, urban, plants)
     const structuralSubjects = ['texture', 'architecture', 'urban', 'plants'];
     const aIsStructural = structuralSubjects.includes(a.subject);
     const bIsStructural = structuralSubjects.includes(b.subject);

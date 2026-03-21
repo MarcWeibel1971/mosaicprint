@@ -2015,6 +2015,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const [shutterstockLoading, setShutterstockLoading] = useState(false)
   const [shutterstockResult, setShutterstockResult] = useState<string | null>(null)
+  const [grayCleanupLoading, setGrayCleanupLoading] = useState(false)
+  const [grayCleanupResult, setGrayCleanupResult] = useState<string | null>(null)
+  const [poolOptimizeRunning, setPoolOptimizeRunning] = useState(false)
+  const [poolOptimizeResult, setPoolOptimizeResult] = useState<string | null>(null)
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const [pdfExporting, setPdfExporting] = useState(false)
@@ -2162,6 +2166,70 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setShutterstockLoading(false)
     }
   }, [fetchDbStats, fetchImages])
+
+  const runGrayCleanup = useCallback(async () => {
+    if (!confirm('Überschüssige Grau/Neutrale Tiles entfernen?\n\nBehält mindestens 5 Tiles pro LAB-Region und reduziert den Grau-Anteil auf ~35%.\n\nDieser Vorgang kann nicht rückgängig gemacht werden.')) return
+    setGrayCleanupLoading(true)
+    setGrayCleanupResult(null)
+    try {
+      const res = await fetch('/api/admin/cleanup-gray', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPct: 0.35 }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setGrayCleanupResult(`✅ ${data.message}`)
+        fetchDbStats()
+        fetchImages(1)
+      } else {
+        setGrayCleanupResult(`❌ Fehler: ${data.error}`)
+      }
+    } catch (e) {
+      setGrayCleanupResult(`❌ Netzwerkfehler: ${String(e)}`)
+    } finally {
+      setGrayCleanupLoading(false)
+    }
+  }, [fetchDbStats, fetchImages])
+
+  const runPoolOptimize = useCallback(async () => {
+    if (poolOptimizeRunning) return
+    setPoolOptimizeRunning(true)
+    setPoolOptimizeResult(null)
+    try {
+      // Trigger smart import with gap analysis (uses analyzeDbGaps automatically)
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: 'pexels', count: 3000, targetPerBucket: 500, jobLabel: 'Pool-Optimierung' }),
+      })
+      // Poll status
+      let done = false
+      let attempts = 0
+      while (!done && attempts < 180) {
+        await new Promise(r => setTimeout(r, 3000))
+        attempts++
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: 'pexels', isAnalysis: false }))
+          const statusRes = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
+          const statusData = await statusRes.json()
+          const job = statusData.result?.data ?? statusData
+          if (!job.running) {
+            done = true
+            setPoolOptimizeResult(`✅ Pool-Optimierung abgeschlossen: ${job.imported ?? 0} Tiles importiert`)
+            fetchDbStats()
+          }
+        } catch { /* retry */ }
+      }
+      if (!done) {
+        setPoolOptimizeResult('⏳ Import läuft im Hintergrund weiter...')
+      }
+    } catch (e) {
+      setPoolOptimizeResult(`❌ Fehler: ${String(e)}`)
+    } finally {
+      setPoolOptimizeRunning(false)
+    }
+  }, [poolOptimizeRunning, fetchDbStats])
 
   const runQuickImport = useCallback(async (query: string, label: string) => {
     setQuickImportLoading(query)
@@ -2817,6 +2885,39 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                 </div>
               )
             })()}
+
+            {/* Pool-Optimierung: One-click actions */}
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">🚀 Pool-Optimierung</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Gezielter Import für unterrepräsentierte Farben und Helligkeitsbereiche.
+                Nutzt die Lückenanalyse um ~3'000 Tiles in den kritischsten Bereichen zu importieren.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  onClick={runPoolOptimize}
+                  disabled={poolOptimizeRunning}
+                  className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+                >
+                  {poolOptimizeRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {poolOptimizeRunning ? 'Importiere...' : 'Farblücken füllen (~3\'000 Tiles)'}
+                </button>
+                <button
+                  onClick={runGrayCleanup}
+                  disabled={grayCleanupLoading}
+                  className="flex items-center justify-center gap-2 bg-gray-600 hover:bg-gray-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+                >
+                  {grayCleanupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  {grayCleanupLoading ? 'Bereinige...' : 'Grau-Überschuss bereinigen'}
+                </button>
+              </div>
+              {poolOptimizeResult && (
+                <p className={`text-xs mt-2 font-medium ${poolOptimizeResult.startsWith('✅') ? 'text-green-700' : poolOptimizeResult.startsWith('❌') ? 'text-red-700' : 'text-indigo-700'}`}>{poolOptimizeResult}</p>
+              )}
+              {grayCleanupResult && (
+                <p className={`text-xs mt-2 font-medium ${grayCleanupResult.startsWith('✅') ? 'text-green-700' : 'text-red-700'}`}>{grayCleanupResult}</p>
+              )}
+            </div>
 
           </div>
         )}
