@@ -3642,13 +3642,13 @@ export default function Studio() {
       const { cols, rows } = mosaicParamsRef.current;
       // Dynamic tile size: each tile = exactly 1cm x 1cm at 300 DPI in the chosen format
       // Formula: tilePx = formatWidthCm / cols * (300 / 2.54)
-      // Minimum 200px per tile: ensures tiles are clearly recognizable even at small print sizes
-      // At 200px: 60 cols x 200px = 12000px wide → 300 DPI at 101cm, excellent for all formats
-      // Clamped to [200, 400]: min=200px for clear detail, max=400px (server memory limit)
+      // Minimum 400px per tile: ensures tiles are crisp and recognizable when zoomed
+      // At 400px: 60 cols x 400px = 24000px wide → 300 DPI at 203cm, excellent for all print sizes
+      // Clamped to [400, 600]: min=400px for sharp detail, max=600px (server memory limit)
       const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
       const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM); // px for 1:1 at 300dpi
-      const PRINT_TILE_PX = Math.min(600, Math.max(200, naturalTilePx)); // min 200px, max 600px for highest print quality
+      const PRINT_TILE_PX = Math.min(600, Math.max(400, naturalTilePx)); // min 400px, max 600px for highest print quality
       // Actual output dimensions (= format at 300 DPI, aspect-ratio preserved)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
@@ -3701,7 +3701,7 @@ export default function Studio() {
         setProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
         const dlLink = document.createElement('a');
         dlLink.href = downloadUrl;
-        dlLink.download = filename.endsWith('.jpg') ? filename : filename + '.jpg';
+        dlLink.download = filename;
         dlLink.style.display = 'none';
         document.body.appendChild(dlLink);
         dlLink.click();
@@ -3711,17 +3711,17 @@ export default function Studio() {
         console.error('[Print] Server render failed:', e);
         setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
         // Fallback: scale existing canvas (lower quality but works offline)
-        const jpegCanvas2 = document.createElement('canvas');
-        jpegCanvas2.width = outW; jpegCanvas2.height = outH;
-        const jCtx2 = jpegCanvas2.getContext('2d')!;
-        jCtx2.fillStyle = '#ffffff'; jCtx2.fillRect(0, 0, outW, outH);
-        jCtx2.drawImage(canvas, 0, 0, outW, outH);
+        const fallbackCanvas = document.createElement('canvas');
+        fallbackCanvas.width = outW; fallbackCanvas.height = outH;
+        const fbCtx = fallbackCanvas.getContext('2d')!;
+        fbCtx.fillStyle = '#ffffff'; fbCtx.fillRect(0, 0, outW, outH);
+        fbCtx.drawImage(canvas, 0, 0, outW, outH);
         const fallbackBlob = await new Promise<Blob>((resolve) => {
-          jpegCanvas2.toBlob((b) => resolve(b!), 'image/jpeg', 0.92);
+          fallbackCanvas.toBlob((b) => resolve(b!), 'image/png');
         });
         const url2 = URL.createObjectURL(fallbackBlob);
         const link2 = document.createElement('a');
-        link2.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
+        link2.download = `mosaicprint-${outW}x${outH}-druckbereit.png`;
         link2.href = url2;
         document.body.appendChild(link2);
         link2.click();
@@ -3758,17 +3758,10 @@ export default function Studio() {
     }
     outCtx.restore();
 
-    // Download as JPEG (much smaller files, print-compatible)
-    const jpegCanvas = document.createElement('canvas');
-    jpegCanvas.width = outW;
-    jpegCanvas.height = outH;
-    const jpegCtx = jpegCanvas.getContext('2d')!;
-    jpegCtx.fillStyle = '#ffffff';
-    jpegCtx.fillRect(0, 0, outW, outH);
-    jpegCtx.drawImage(outCanvas, 0, 0);
+    // Download as PNG (lossless quality, no compression artifacts)
     const link = document.createElement('a');
-    link.download = `mosaicprint-${outW}x${outH}-vorschau.jpg`;
-    link.href = jpegCanvas.toDataURL('image/jpeg', 0.85);
+    link.download = `mosaicprint-${outW}x${outH}-vorschau.png`;
+    link.href = outCanvas.toDataURL('image/png');
     link.click();
   }, [selectedFormat]);
 
