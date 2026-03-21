@@ -1324,12 +1324,11 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // PRINT_TILE_PX: client sends outW/cols (= target tile size at 300 DPI)
-    // Clamp between 64 (minimum for visible detail) and 600 (optimized for max print quality)
-    // At 128px: 100 cols × 128px = 12800px wide (fine for 30cm @ 300 DPI)
+    // PRINT_TILE_PX: client sends target tile size (min 400px for sharp detail)
+    // Clamp between 128 (absolute minimum) and 600 (server memory limit)
     // At 400px: 50 cols × 400px = 20000px wide (excellent for 70cm @ 300 DPI)
     // At 600px: 50 cols × 600px = 30000px wide (maximum quality for large prints)
-    const TILE_PX = Math.min(Math.max(tilePx, 64), 600);
+    const TILE_PX = Math.min(Math.max(tilePx, 128), 600);
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
     console.log(`[print-render] Request: cols=${cols} rows=${rows} tilePx=${tilePx} → clamped=${TILE_PX} output=${outW}×${outH}px`);
@@ -1365,7 +1364,7 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         const urls = urlMap[id];
         if (!urls) return;
         // Check disk cache first (keyed by tile id + size to avoid stale smaller tiles)
-        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.jpg`);
+        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.png`);
         if (fs.existsSync(cacheFile)) {
           try {
             tileBuffers[id] = fs.readFileSync(cacheFile);
@@ -1386,8 +1385,12 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
             });
             if (resp.ok) {
               const buf = Buffer.from(await resp.arrayBuffer());
-              // Resize to TILE_PX and cache to disk
-              const resized = await resizeTileJimp(buf, TILE_PX);
+              // Resize to TILE_PX with high quality (PNG for lossless tile caching)
+              const resized = await sharp(buf)
+                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
+                .png()
+                .toBuffer()
+                .catch(() => null);
               if (resized) {
                 tileBuffers[id] = resized;
                 // Save to disk cache (async, don't await)
@@ -1407,13 +1410,11 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
     const totalCells = cols * rows;
     console.log(`[print-render] Building ${totalCells} tile composites at ${TILE_PX}px → ${outW}×${outH}px (${Math.ceil(rows/STRIP_ROWS)} strips)`);
 
-    // Pre-resize all unique tile buffers to TILE_PX (they may already be cached at this size)
+    // Tiles are already resized to TILE_PX during download (with disk cache).
+    // No need to re-resize — that would cause double JPEG compression and quality loss.
     const resizedBuffers: Record<number, Buffer> = {};
     for (const [id, buf] of Object.entries(tileBuffers)) {
-      try {
-        const rBuf = await resizeTileJimp(buf, TILE_PX);
-        if (rBuf) resizedBuffers[Number(id)] = rBuf;
-      } catch { /* skip bad tiles */ }
+      resizedBuffers[Number(id)] = buf;
     }
 
     // Render strips and collect them
@@ -1443,24 +1444,20 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         top: ci.top,
         left: ci.left,
       }));
-      const stripJpeg = await sharp({
+      const stripPng = await sharp({
         create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
       })
         .composite(sharpCompositeInputs)
-        .jpeg({ quality: 95, mozjpeg: true })
+        .png({ compressionLevel: 6 })
         .toBuffer();
-      stripBuffers.push(stripJpeg);
+      stripBuffers.push(stripPng);
       console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
     }
     // Join strips vertically using Sharp
-    let mosaicJpeg: Buffer;
+    let mosaicPng: Buffer;
     if (stripBuffers.length === 1) {
-      mosaicJpeg = stripBuffers[0];
+      mosaicPng = stripBuffers[0];
     } else {
-      const stripImages = await Promise.all(stripBuffers.map(async (buf, i) => {
-        const meta = await sharp(buf).metadata();
-        return { input: buf, top: i * (meta.height ?? 0), left: 0 };
-      }));
       // Calculate cumulative offsets
       let yOff = 0;
       const compositeStrips = [];
@@ -1469,45 +1466,48 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         compositeStrips.push({ input: buf, top: yOff, left: 0 });
         yOff += meta.height ?? 0;
       }
-      mosaicJpeg = await sharp({
+      mosaicPng = await sharp({
         create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
       })
         .composite(compositeStrips)
-        .jpeg({ quality: 95, mozjpeg: true })
+        .png({ compressionLevel: 6 })
         .toBuffer();
     }
-    console.log(`[print-render] Done: ${(mosaicJpeg.length / 1024 / 1024).toFixed(1)} MB`);
+    console.log(`[print-render] Done: ${(mosaicPng.length / 1024 / 1024).toFixed(1)} MB`);
 
     // Save to temp file and return a download token.
-    // This allows the client to open a direct HTTP URL (window.location.href = url)
-    // which forces Edge/Chrome to treat it as a binary file download,
-    // bypassing Adobe Acrobat's file association that intercepts Blob downloads.
     const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const tmpDir = '/tmp/mosaicprint-downloads';
     if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = path.join(tmpDir, `${token}.jpg`);
-    fs.writeFileSync(tmpFile, mosaicJpeg);
+    const tmpFile = path.join(tmpDir, `${token}.png`);
+    fs.writeFileSync(tmpFile, mosaicPng);
     // Auto-delete after 10 minutes
     setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10 * 60 * 1000);
 
-    const filename = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
-    res.json({ token, filename, size: mosaicJpeg.length, width: outW, height: outH });
+    const filename = `mosaicprint-${outW}x${outH}-druckbereit.png`;
+    res.json({ token, filename, size: mosaicPng.length, width: outW, height: outH });
   } catch (e) {
     console.error('[print-render] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });
 
-// GET /api/print-download/:token – serve the pre-rendered JPEG file
-// Client opens this URL directly (window.location.href) to force a binary download
+// GET /api/print-download/:token – serve the pre-rendered PNG file
+// Client opens this URL directly to force a binary download (PNG avoids Adobe Acrobat interception)
 app.get('/api/print-download/:token', (req, res) => {
   const { token } = req.params;
   // Validate token: only alphanumeric, dash, dot
   if (!/^[\w.-]+$/.test(token)) return res.status(400).send('Invalid token');
-  const tmpFile = path.join('/tmp/mosaicprint-downloads', `${token}.jpg`);
-  if (!fs.existsSync(tmpFile)) return res.status(404).send('File not found or expired');
-  const filename = req.query.filename as string || 'mosaicprint-druckbereit.jpg';
-  res.setHeader('Content-Type', 'image/jpeg');
+  // Check for PNG first (new format), fallback to JPG (legacy)
+  let tmpFile = path.join('/tmp/mosaicprint-downloads', `${token}.png`);
+  let contentType = 'image/png';
+  if (!fs.existsSync(tmpFile)) {
+    tmpFile = path.join('/tmp/mosaicprint-downloads', `${token}.jpg`);
+    contentType = 'image/jpeg';
+    if (!fs.existsSync(tmpFile)) return res.status(404).send('File not found or expired');
+  }
+  const filename = req.query.filename as string || 'mosaicprint-druckbereit.png';
+  res.setHeader('Content-Type', contentType);
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'no-store');
