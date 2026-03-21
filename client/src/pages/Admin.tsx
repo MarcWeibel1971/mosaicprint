@@ -638,7 +638,7 @@ export default function Admin() {
   useEffect(() => {
     try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
   }, []);
-  const [activeTab, setActiveTab] = useState<'database' | 'import' | 'algorithm' | 'quality' | 'events'>('database')
+  const [activeTab, setActiveTab] = useState<'database' | 'import' | 'algorithm' | 'quality'>('database')
   const [stats, setStats] = useState<DbStats | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1397,7 +1397,6 @@ export default function Admin() {
               { id: 'import', label: 'Import', icon: Upload },
               { id: 'algorithm', label: 'Algorithmus', icon: Settings },
               { id: 'quality', label: 'Qualität & Statistik', icon: BarChart2 },
-              { id: 'events', label: 'Events', icon: Users },
             ] as const).map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -1994,9 +1993,7 @@ export default function Admin() {
           <QualityAssurance onMessage={setMessage} />
         )}
 
-        {activeTab === 'events' && (
-          <EventsTab onMessage={setMessage} />
-        )}
+
       </div>
 
       {/* ── Import Review Modal ── */}
@@ -2132,197 +2129,6 @@ export default function Admin() {
                   )}
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Events Tab ────────────────────────────────────────────────────────────────
-function EventsTab({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const [events, setEvents] = useState<Array<{ id: number; slug: string; name: string; status: string; photo_count: number; max_photos: number; created_at: string }>>([])
-  const [eventName, setEventName] = useState('')
-  const [eventMaxPhotos, setEventMaxPhotos] = useState(500)
-  const [eventCreating, setEventCreating] = useState(false)
-  const [qrEvent, setQrEvent] = useState<{ slug: string; qrDataUrl: string; eventUrl: string } | null>(null)
-
-  const showQrCode = useCallback(async (slug: string) => {
-    try {
-      const res = await fetch(`/api/events/${slug}/qr-data`)
-      const data = await res.json()
-      if (data.ok) {
-        setQrEvent({ slug, qrDataUrl: data.qrDataUrl, eventUrl: data.eventUrl })
-      }
-    } catch { /* ignore */ }
-  }, [])
-
-  const fetchEvents = useCallback(async () => {
-    try {
-      const res = await fetch('/api/events')
-      const data = await res.json()
-      if (data.ok) setEvents(data.events ?? [])
-    } catch { /* ignore */ }
-  }, [])
-
-  const createEvent = useCallback(async () => {
-    if (!eventName.trim() || eventCreating) return
-    setEventCreating(true)
-    try {
-      const res = await fetch('/api/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: eventName.trim(), maxPhotos: eventMaxPhotos }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setEventName('')
-        fetchEvents()
-        onMessage({ text: `Event "${data.event.name}" erstellt! Link: /event/${data.event.slug}`, type: 'success' })
-      } else {
-        onMessage({ text: `Fehler: ${data.error}`, type: 'error' })
-      }
-    } catch (e) {
-      onMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
-    } finally {
-      setEventCreating(false)
-    }
-  }, [eventName, eventMaxPhotos, eventCreating, fetchEvents, onMessage])
-
-  const deleteEvent = useCallback(async (slug: string) => {
-    if (!confirm(`Event "${slug}" wirklich loeschen? Alle Gaestfotos werden entfernt.`)) return
-    try {
-      await fetch(`/api/events/${slug}`, { method: 'DELETE' })
-      fetchEvents()
-    } catch { /* ignore */ }
-  }, [fetchEvents])
-
-  useEffect(() => { fetchEvents() }, [fetchEvents])
-
-  return (
-    <div className="space-y-6">
-      {/* Create Event */}
-      <div className="bg-white rounded-2xl p-6 border border-indigo-200 shadow-sm">
-        <h2 className="font-bold text-gray-900 flex items-center gap-2 mb-4">
-          <Plus className="w-5 h-5 text-indigo-500" />
-          Neues Event erstellen
-        </h2>
-        <div className="flex flex-col sm:flex-row gap-3">
-          <input
-            type="text"
-            placeholder="Event-Name (z.B. Hochzeit Meier)"
-            value={eventName}
-            onChange={e => setEventName(e.target.value)}
-            className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-          />
-          <input
-            type="number"
-            placeholder="Max Fotos"
-            value={eventMaxPhotos}
-            onChange={e => setEventMaxPhotos(Number(e.target.value))}
-            className="w-32 px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-          />
-          <button
-            onClick={createEvent}
-            disabled={eventCreating || !eventName.trim()}
-            className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-6 py-2.5 rounded-xl transition-colors"
-          >
-            {eventCreating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            Erstellen
-          </button>
-        </div>
-      </div>
-
-      {/* Event List */}
-      {events.length === 0 ? (
-        <div className="bg-white rounded-2xl p-8 border border-gray-200 text-center">
-          <Users className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-500">Noch keine Events erstellt</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {events.map(event => (
-            <div key={event.id} className="bg-white rounded-2xl p-5 border border-gray-200 shadow-sm flex items-center gap-4">
-              <div className="flex-shrink-0 w-12 h-12 rounded-xl bg-indigo-100 flex items-center justify-center text-indigo-600">
-                <Camera className="w-6 h-6" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h3 className="font-bold text-gray-900">{event.name}</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  {event.photo_count} / {event.max_photos} Fotos
-                  {' | '}
-                  <span className={event.status === 'active' ? 'text-green-600' : 'text-gray-400'}>
-                    {event.status === 'active' ? 'Aktiv' : 'Beendet'}
-                  </span>
-                  {' | '}
-                  {new Date(event.created_at).toLocaleDateString('de-CH')}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => showQrCode(event.slug)}
-                  className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                  title="QR-Code anzeigen"
-                >
-                  <QrCode className="w-3.5 h-3.5" />
-                  QR
-                </button>
-                <button
-                  onClick={() => {
-                    const url = `${window.location.origin}/event/${event.slug}`
-                    navigator.clipboard.writeText(url)
-                    onMessage({ text: `Link kopiert: ${url}`, type: 'success' })
-                  }}
-                  className="flex items-center gap-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                >
-                  <Link className="w-3.5 h-3.5" />
-                  Link
-                </button>
-                <a
-                  href={`/event/${event.slug}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 bg-green-50 hover:bg-green-100 text-green-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                >
-                  <ImageIcon className="w-3.5 h-3.5" />
-                  Oeffnen
-                </a>
-                <button
-                  onClick={() => deleteEvent(event.slug)}
-                  className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* QR Code Modal */}
-      {qrEvent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setQrEvent(null)}>
-          <div className="bg-white rounded-2xl p-8 max-w-sm mx-4 text-center shadow-2xl" onClick={e => e.stopPropagation()}>
-            <h3 className="font-bold text-lg text-gray-900 mb-2">QR-Code</h3>
-            <p className="text-sm text-gray-500 mb-4">Gaeste scannen diesen Code, um Fotos hochzuladen.</p>
-            <img src={qrEvent.qrDataUrl} alt="QR Code" className="w-64 h-64 mx-auto mb-4 rounded-xl border border-gray-200" />
-            <p className="text-xs text-gray-400 break-all mb-4">{qrEvent.eventUrl}</p>
-            <div className="flex gap-2 justify-center">
-              <a
-                href={`/api/events/${qrEvent.slug}/qr?format=png`}
-                download={`qr-${qrEvent.slug}.png`}
-                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
-              >
-                <Download className="w-3.5 h-3.5" />
-                PNG herunterladen
-              </a>
-              <button
-                onClick={() => setQrEvent(null)}
-                className="text-xs text-gray-500 hover:text-gray-700 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
-              >
-                Schliessen
-              </button>
             </div>
           </div>
         </div>
