@@ -2169,6 +2169,9 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [grayCleanupResult, setGrayCleanupResult] = useState<string | null>(null)
   const [poolOptimizeRunning, setPoolOptimizeRunning] = useState(false)
   const [poolOptimizeResult, setPoolOptimizeResult] = useState<string | null>(null)
+  const [poolImportProgress, setPoolImportProgress] = useState<{
+    imported: number; total: number; log: string[]; startedAt: string | null; error: string | null; report: any | null
+  } | null>(null)
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const [pdfExporting, setPdfExporting] = useState(false)
@@ -2346,28 +2349,54 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     if (poolOptimizeRunning) return
     setPoolOptimizeRunning(true)
     setPoolOptimizeResult(null)
+    setPoolImportProgress({ imported: 0, total: 3000, log: ['⏳ Import wird gestartet...'], startedAt: new Date().toISOString(), error: null, report: null })
     try {
-      // Trigger smart import with gap analysis (uses analyzeDbGaps automatically)
       await fetch('/api/trpc/smartImport', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sourceId: 'pexels', count: 3000, targetPerBucket: 500, jobLabel: 'Pool-Optimierung' }),
       })
-      // Poll status
+      // Poll status with live progress updates
       let done = false
       let attempts = 0
       while (!done && attempts < 180) {
-        await new Promise(r => setTimeout(r, 3000))
+        await new Promise(r => setTimeout(r, 2000))
         attempts++
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: 'pexels', isAnalysis: false }))
           const statusRes = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
           const statusData = await statusRes.json()
           const job = statusData.result?.data ?? statusData
+          setPoolImportProgress(prev => ({
+            imported: job.imported ?? prev?.imported ?? 0,
+            total: job.total ?? prev?.total ?? 3000,
+            log: job.log ?? prev?.log ?? [],
+            startedAt: job.startedAt ?? prev?.startedAt ?? null,
+            error: job.error ?? null,
+            report: job.report ?? null,
+          }))
           if (!job.running) {
             done = true
             setPoolOptimizeResult(`✅ Pool-Optimierung abgeschlossen: ${job.imported ?? 0} Tiles importiert`)
             fetchDbStats()
+            fetchImages(1)
+            // Auto-trigger Gemini analysis for newly imported tiles
+            if ((job.imported ?? 0) > 0) {
+              try {
+                const geminiRes = await fetch('/api/admin/ai-analyze-batch', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ limit: job.imported ?? 500 }),
+                })
+                const geminiData = await geminiRes.json()
+                if (geminiData.started) {
+                  setPoolImportProgress(prev => prev ? {
+                    ...prev,
+                    log: [...prev.log, `🤖 Gemini-Analyse gestartet für ${geminiData.count ?? job.imported} Tiles...`]
+                  } : prev)
+                }
+              } catch { /* Gemini optional */ }
+            }
           }
         } catch { /* retry */ }
       }
@@ -2376,10 +2405,11 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       }
     } catch (e) {
       setPoolOptimizeResult(`❌ Fehler: ${String(e)}`)
+      setPoolImportProgress(prev => prev ? { ...prev, error: String(e) } : prev)
     } finally {
       setPoolOptimizeRunning(false)
     }
-  }, [poolOptimizeRunning, fetchDbStats])
+  }, [poolOptimizeRunning, fetchDbStats, fetchImages])
 
   const runQuickImport = useCallback(async (query: string, label: string) => {
     setQuickImportLoading(query)
@@ -3042,6 +3072,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <p className="text-xs text-gray-500 mb-3">
                 Gezielter Import für unterrepräsentierte Farben und Helligkeitsbereiche.
                 Nutzt die Lückenanalyse um ~3'000 Tiles in den kritischsten Bereichen zu importieren.
+                Inkl. Gradient/Edge-Tiles für Konturerkennung.
               </p>
               <div className="flex flex-col sm:flex-row gap-2">
                 <button
@@ -3061,7 +3092,117 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   {grayCleanupLoading ? 'Bereinige...' : 'Grau-Überschuss bereinigen'}
                 </button>
               </div>
-              {poolOptimizeResult && (
+
+              {/* Live Import Progress Panel */}
+              {poolImportProgress && (poolOptimizeRunning || poolImportProgress.report) && (
+                <div className="mt-3 bg-white rounded-lg border border-indigo-200 p-3">
+                  {/* Progress bar */}
+                  <div className="mb-2">
+                    <div className="flex justify-between text-xs text-gray-600 mb-1">
+                      <span className="font-medium">
+                        {poolOptimizeRunning ? '⏳ Import läuft...' : '✅ Import abgeschlossen'}
+                      </span>
+                      <span className="font-mono">{poolImportProgress.imported} / {poolImportProgress.total}</span>
+                    </div>
+                    <div className="h-2.5 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${poolOptimizeRunning ? 'bg-indigo-500 animate-pulse' : 'bg-green-500'}`}
+                        style={{ width: `${Math.min(100, (poolImportProgress.imported / Math.max(1, poolImportProgress.total)) * 100)}%` }}
+                      />
+                    </div>
+                    {poolImportProgress.startedAt && (
+                      <div className="text-[10px] text-gray-400 mt-1">
+                        Gestartet: {new Date(poolImportProgress.startedAt).toLocaleTimeString('de-CH')}
+                        {!poolOptimizeRunning && ` | Dauer: ${poolImportProgress.report?.duration ? `${Math.floor(poolImportProgress.report.duration / 60)}m ${poolImportProgress.report.duration % 60}s` : '—'}`}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Keyword progress from log */}
+                  {poolImportProgress.log.length > 0 && (
+                    <div className="mt-2">
+                      <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Keywords & Fortschritt</div>
+                      <div className="max-h-48 overflow-y-auto space-y-0.5 text-[11px] font-mono bg-gray-50 rounded p-2 border border-gray-100">
+                        {poolImportProgress.log.slice(-30).map((line, i) => {
+                          const isSuccess = line.startsWith('✓') || line.startsWith('✅')
+                          const isWarning = line.startsWith('⚠️')
+                          const isError = line.startsWith('✗') || line.startsWith('❌')
+                          const isInfo = line.startsWith('🔍') || line.startsWith('📊') || line.startsWith('🤖')
+                          const isRateLimit = line.startsWith('⏳')
+                          return (
+                            <div key={i} className={`leading-tight ${
+                              isSuccess ? 'text-green-700' :
+                              isWarning ? 'text-amber-600' :
+                              isError ? 'text-red-600' :
+                              isInfo ? 'text-indigo-600' :
+                              isRateLimit ? 'text-orange-500' :
+                              'text-gray-600'
+                            }`}>
+                              {line}
+                            </div>
+                          )
+                        })}
+                        {poolOptimizeRunning && (
+                          <div className="text-gray-400 animate-pulse">▌</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Import report summary */}
+                  {poolImportProgress.report && (
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Import-Bericht</div>
+                      <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div className="bg-green-50 rounded p-1.5 text-center">
+                          <div className="font-bold text-green-700">{poolImportProgress.report.imported}</div>
+                          <div className="text-green-600 text-[10px]">Importiert</div>
+                        </div>
+                        <div className="bg-blue-50 rounded p-1.5 text-center">
+                          <div className="font-bold text-blue-700">{poolImportProgress.report.totalTilesAfter?.toLocaleString()}</div>
+                          <div className="text-blue-600 text-[10px]">Total Tiles</div>
+                        </div>
+                        <div className="bg-amber-50 rounded p-1.5 text-center">
+                          <div className="font-bold text-amber-700">{poolImportProgress.report.keywordStats?.length ?? 0}</div>
+                          <div className="text-amber-600 text-[10px]">Keywords</div>
+                        </div>
+                      </div>
+                      {/* Top keywords */}
+                      {poolImportProgress.report.topImported?.length > 0 && (
+                        <div className="mt-2">
+                          <div className="text-[10px] text-gray-500 mb-1">Top Keywords:</div>
+                          <div className="flex flex-wrap gap-1">
+                            {poolImportProgress.report.topImported.slice(0, 8).map((k: any, i: number) => (
+                              <span key={i} className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded-full">
+                                {k.query} (+{k.imported})
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Error display */}
+                  {poolImportProgress.error && (
+                    <div className="mt-2 bg-red-50 rounded p-2 text-xs text-red-700">
+                      {poolImportProgress.error}
+                    </div>
+                  )}
+
+                  {/* Close button when done */}
+                  {!poolOptimizeRunning && (
+                    <button
+                      onClick={() => setPoolImportProgress(null)}
+                      className="mt-2 text-xs text-gray-400 hover:text-gray-600"
+                    >
+                      Schliessen
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {poolOptimizeResult && !poolOptimizeRunning && !poolImportProgress && (
                 <p className={`text-xs mt-2 font-medium ${poolOptimizeResult.startsWith('✅') ? 'text-green-700' : poolOptimizeResult.startsWith('❌') ? 'text-red-700' : 'text-indigo-700'}`}>{poolOptimizeResult}</p>
               )}
               {grayCleanupResult && (
