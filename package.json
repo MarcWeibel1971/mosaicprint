@@ -20,9 +20,6 @@
     "@mediapipe/tasks-vision": "^0.10.32",
     "@trpc/client": "11.7.2",
     "@trpc/server": "11.7.2",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/qrcode": "^1.5.6",
     "axios": "^1.7.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
@@ -46,10 +43,13 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.6",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
