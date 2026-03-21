@@ -2372,7 +2372,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch { /* ignore */ }
   }, [fetchEvents])
 
-  useEffect(() => { if (activeTab === 'events') fetchEvents() }, [activeTab, fetchEvents])
+  useEffect(() => { fetchEvents() }, [fetchEvents])
 
   const runQuickImport = useCallback(async (query: string, label: string) => {
     setQuickImportLoading(query)
@@ -3283,7 +3283,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           </span>
         )}
         {(sourceFilter !== 'alle' || colorFilter !== 'alle' || brightnessFilter !== 'alle' || warmCoolFilter !== 'alle' || saturationFilter !== 'alle' || geminiFilter !== 'alle' || importedSince !== 'alle' || qualityStatusFilter !== 'alle'  || tileTypeFilter !== 'alle') && (
-          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setGeminiFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setSemanticThemeFilter('alle'); setTileTypeFilter('alle') }}
+          <button onClick={() => { setSourceFilter('alle'); setColorFilter('alle'); setBrightnessFilter('alle'); setWarmCoolFilter('alle'); setSaturationFilter('alle'); setGeminiFilter('alle'); setImportedSince('alle'); setQualityStatusFilter('alle'); setTileTypeFilter('alle') }}
             className="text-xs text-red-500 hover:text-red-700">Alle Filter zurücksetzen</button>
         )}
         <span className="ml-auto text-sm text-gray-500">{total.toLocaleString()} Bilder gefunden</span>
