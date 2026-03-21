@@ -2790,31 +2790,84 @@ app.post("/api/events/:slug/send-mosaic", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Keine Teilnehmer registriert" });
     }
 
-    // Get photos
+    // Get photos with LAB colors
     const photosRes = await pool.query(
-      `SELECT thumbnail_url FROM event_photos WHERE event_id = $1 ORDER BY created_at`, [event.id]
+      `SELECT thumbnail_url, avg_l, avg_a, avg_b FROM event_photos WHERE event_id = $1 ORDER BY created_at`, [event.id]
     );
     if (photosRes.rows.length === 0) {
       return res.status(400).json({ ok: false, error: "Keine Fotos vorhanden" });
     }
 
-    // Build mosaic from event photos
-    const photos = photosRes.rows;
+    const photos = photosRes.rows as Array<{ thumbnail_url: string; avg_l: number; avg_a: number; avg_b: number }>;
     const cols = Math.ceil(Math.sqrt(photos.length * 1.5));
     const rows = Math.ceil(photos.length / cols);
+    const totalCells = cols * rows;
     const tilePx = 128;
-    const tiles = photos.map((p: { thumbnail_url: string }, i: number) => ({
-      url: p.thumbnail_url,
-      col: i % cols,
-      row: Math.floor(i / cols),
-    }));
 
-    // Import renderMosaicOnServer dynamically
+    // Smart matching: if target image exists, match photos to target regions by LAB color
+    let tiles: Array<{ url: string; col: number; row: number }>;
+    const { rgbToLab, deltaE2000 } = await import("./colorUtils.js");
+
+    const hasTarget = event.target_image_url?.startsWith('data:');
+    if (hasTarget) {
+      // Extract target image region colors using sharp
+      const targetBase64 = event.target_image_url.split(',')[1];
+      const targetBuffer = Buffer.from(targetBase64, 'base64');
+      const targetResized = await sharp(targetBuffer)
+        .resize(cols, rows, { fit: 'fill' })
+        .raw()
+        .toBuffer();
+
+      // Build LAB color per cell from target image
+      const cellColors: Array<{ l: number; a: number; b: number; col: number; row: number }> = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const idx = (r * cols + c) * 3;
+          const [l, a, b] = rgbToLab(targetResized[idx], targetResized[idx + 1], targetResized[idx + 2]);
+          cellColors.push({ l, a, b, col: c, row: r });
+        }
+      }
+
+      // Greedy matching: assign best photo to each cell (CIEDE2000)
+      const used = new Set<number>();
+      const assigned: Array<{ url: string; col: number; row: number }> = [];
+
+      // Process cells in random order to avoid bias
+      const shuffled = [...cellColors].sort(() => Math.random() - 0.5);
+
+      for (const cell of shuffled) {
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < photos.length; i++) {
+          if (used.has(i) && photos.length >= totalCells) continue; // avoid reuse if enough photos
+          const p = photos[i];
+          const dist = deltaE2000(cell.l, cell.a, cell.b, p.avg_l, p.avg_a, p.avg_b);
+          // Penalty for reuse
+          const reusePenalty = used.has(i) ? 20 : 0;
+          if (dist + reusePenalty < bestDist) {
+            bestDist = dist + reusePenalty;
+            bestIdx = i;
+          }
+        }
+        used.add(bestIdx);
+        assigned.push({ url: photos[bestIdx].thumbnail_url, col: cell.col, row: cell.row });
+      }
+      tiles = assigned;
+    } else {
+      // No target image: simple grid layout
+      tiles = photos.slice(0, totalCells).map((p, i) => ({
+        url: p.thumbnail_url,
+        col: i % cols,
+        row: Math.floor(i / cols),
+      }));
+    }
+
+    // Render mosaic
     const { renderMosaicOnServer } = await import("./mosaicExport.js");
     const mosaicBuffer = await renderMosaicOnServer({
       tiles, cols, rows, tilePx,
-      overlayBase64: event.target_image_url?.startsWith('data:') ? event.target_image_url.split(',')[1] : undefined,
-      overlayAlpha: event.target_image_url ? 0.15 : 0,
+      overlayBase64: hasTarget ? event.target_image_url.split(',')[1] : undefined,
+      overlayAlpha: hasTarget ? 0.15 : 0,
       sharpen: true,
     });
 
