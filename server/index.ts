@@ -1338,9 +1338,74 @@ app.get('/api/print-progress/:jobId', (req, res) => {
   req.on('close', () => clearInterval(interval));
 });
 
-app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) => {
+// Helper: Apply overlay blending to a raw RGB pixel buffer (matches client-side Step 6)
+// Blends the original target photo over the mosaic tiles for better visual coherence.
+function applyOverlay(
+  pixelBuf: Buffer,           // raw RGB buffer (width × height × 3)
+  width: number, height: number,
+  tilePx: number,
+  cols: number, rows: number,
+  stripRowStart: number,      // first tile row in this buffer (for strip-based processing)
+  mode: 'softlight' | 'alphablend',
+  baseOverlayVal: number,     // e.g. 0.15
+  edgeBoostVal: number,       // e.g. 0.20
+  targetColors: number[],     // flat [r,g,b,...] per cell
+  edgeMap: number[],          // edge strength 0-1 per cell
+  faceMask: boolean[],        // face region flag per cell
+): void {
+  const softLight = (base: number, blend: number): number => {
+    const b = blend / 255, s = base / 255;
+    const result = b < 0.5
+      ? s - (1 - 2 * b) * s * (1 - s)
+      : s + (2 * b - 1) * (Math.sqrt(s) - s);
+    return Math.round(Math.max(0, Math.min(255, result * 255)));
+  };
+
+  const stripRows = Math.ceil(height / tilePx);
+  for (let lr = 0; lr < stripRows; lr++) {
+    const row = stripRowStart + lr;
+    if (row >= rows) break;
+    for (let col = 0; col < cols; col++) {
+      const ci = row * cols + col;
+      const tr = targetColors[ci * 3];
+      const tg = targetColors[ci * 3 + 1];
+      const tb = targetColors[ci * 3 + 2];
+      if (tr === undefined) continue; // no target data for this cell
+      const edge = edgeMap[ci] ?? 0;
+      const faceBoost = faceMask[ci] ? 0.25 : 0;
+      const strength = Math.min(0.85, baseOverlayVal + edge * edgeBoostVal + faceBoost);
+
+      const pyStart = lr * tilePx;
+      const pyEnd = Math.min((lr + 1) * tilePx, height);
+      const pxStart = col * tilePx;
+      const pxEnd = Math.min((col + 1) * tilePx, width);
+
+      for (let py = pyStart; py < pyEnd; py++) {
+        for (let px = pxStart; px < pxEnd; px++) {
+          const pi = (py * width + px) * 3;
+          if (mode === 'softlight') {
+            const slR = softLight(pixelBuf[pi], tr);
+            const slG = softLight(pixelBuf[pi + 1], tg);
+            const slB = softLight(pixelBuf[pi + 2], tb);
+            pixelBuf[pi]     = Math.round(pixelBuf[pi]     * (1 - strength) + slR * strength);
+            pixelBuf[pi + 1] = Math.round(pixelBuf[pi + 1] * (1 - strength) + slG * strength);
+            pixelBuf[pi + 2] = Math.round(pixelBuf[pi + 2] * (1 - strength) + slB * strength);
+          } else {
+            pixelBuf[pi]     = Math.round(pixelBuf[pi]     * (1 - strength) + tr * strength);
+            pixelBuf[pi + 1] = Math.round(pixelBuf[pi + 1] * (1 - strength) + tg * strength);
+            pixelBuf[pi + 2] = Math.round(pixelBuf[pi + 2] * (1 - strength) + tb * strength);
+          }
+        }
+      }
+    }
+  }
+}
+
+app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) => {
   try {
-    const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId } = req.body as {
+    const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
+      overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
+    } = req.body as {
       tileIds: number[];
       assignment: number[];
       cols: number;
@@ -1348,6 +1413,13 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       tilePx?: number;
       format?: 'jpg' | 'png';
       jobId?: string;
+      // Overlay parameters (optional - if present, overlay is applied after compositing)
+      overlayMode?: 'softlight' | 'alphablend' | 'none';
+      baseOverlay?: number;
+      edgeBoost?: number;
+      targetColors?: number[];  // flat [r,g,b,...] per cell (cols×rows cells)
+      edgeMap?: number[];       // edge strength 0-1 per cell
+      faceMask?: boolean[];     // face region flag per cell
     };
 
     if (!tileIds?.length || !assignment?.length || !cols || !rows) {
@@ -1478,15 +1550,33 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       }
       updateProgress(70, `Compositing ${compositeInputs.length} tiles...`);
 
-      const pipeline = sharp({
-        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
-      }).composite(compositeInputs);
-
+      // Composite tiles into raw RGB buffer for overlay processing
+      const hasOverlay = overlayMode && overlayMode !== 'none' && targetColors?.length;
       let outputBuf: Buffer;
-      if (useJpeg) {
-        outputBuf = await pipeline.jpeg({ quality: 95 }).toBuffer();
+
+      if (hasOverlay) {
+        // Get raw pixels so we can apply per-pixel overlay blending
+        const rawBuf = await sharp({
+          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+        }).composite(compositeInputs).raw().toBuffer();
+        updateProgress(80, 'Overlay anwenden...');
+        applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
+          overlayMode as 'softlight' | 'alphablend',
+          baseOverlay ?? 0.15, edgeBoost ?? 0.20,
+          targetColors!, clientEdgeMap ?? [], clientFaceMask ?? []);
+        // Encode from raw pixels
+        const encoded = sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 } });
+        outputBuf = useJpeg
+          ? await encoded.jpeg({ quality: 95 }).toBuffer()
+          : await encoded.png({ compressionLevel: 4 }).toBuffer();
       } else {
-        outputBuf = await pipeline.png({ compressionLevel: 4 }).toBuffer();
+        // No overlay: direct encode
+        const pipeline = sharp({
+          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+        }).composite(compositeInputs);
+        outputBuf = useJpeg
+          ? await pipeline.jpeg({ quality: 95 }).toBuffer()
+          : await pipeline.png({ compressionLevel: 4 }).toBuffer();
       }
       updateProgress(90, `Speichere ${(outputBuf.length / 1024 / 1024).toFixed(1)} MB...`);
 
@@ -1520,12 +1610,26 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       }
 
       const stripFile = path.join(tmpDir, `strip-${Date.now()}-${stripStart}.png`);
-      await sharp({
-        create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
-      })
-        .composite(compositeInputs)
-        .png({ compressionLevel: 2 })
-        .toFile(stripFile);
+      const hasStripOverlay = overlayMode && overlayMode !== 'none' && targetColors?.length;
+      if (hasStripOverlay) {
+        // Get raw pixels for overlay processing
+        const rawStrip = await sharp({
+          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+        }).composite(compositeInputs).raw().toBuffer();
+        applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
+          overlayMode as 'softlight' | 'alphablend',
+          baseOverlay ?? 0.15, edgeBoost ?? 0.20,
+          targetColors!, clientEdgeMap ?? [], clientFaceMask ?? []);
+        await sharp(rawStrip, { raw: { width: outW, height: stripH, channels: 3 } })
+          .png({ compressionLevel: 2 }).toFile(stripFile);
+      } else {
+        await sharp({
+          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+        })
+          .composite(compositeInputs)
+          .png({ compressionLevel: 2 })
+          .toFile(stripFile);
+      }
       stripFiles.push(stripFile);
 
       const stripIdx = Math.floor(stripStart / STRIP_ROWS) + 1;

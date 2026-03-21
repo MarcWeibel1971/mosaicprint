@@ -381,6 +381,10 @@ export default function Studio() {
   const tileUrlIndexRef = useRef<Record<string, string> | null>(null);
   const tileUrlIndexLoadedRef = useRef<boolean>(false);
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
+  // Overlay data: stored from renderMosaic for server-side overlay in print/digital downloads
+  const targetColorsRef = useRef<number[]>([]); // flat [r,g,b,r,g,b,...] per cell (COLS×ROWS)
+  const edgeMapRef = useRef<number[]>([]);      // edge strength 0-1 per cell
+  const faceMaskRef = useRef<boolean[]>([]);     // face region flag per cell
 
   // HI-RES ZOOM: server-rendered high-resolution image for sharp zooming
   // When user zooms beyond 1x, we trigger a server-side render at 128px/tile,
@@ -2796,6 +2800,17 @@ export default function Studio() {
     assignmentRef.current = assignment;
     validImgsRef.current = filteredValidImgs;
     tileIdsRef.current = filteredTileIds;
+    // Store overlay data for server-side overlay in print/digital downloads
+    const targetColorsFlat: number[] = new Array(TOTAL_TILES * 3);
+    for (let ci = 0; ci < TOTAL_TILES; ci++) {
+      const i = ci * 4;
+      targetColorsFlat[ci * 3]     = targetData[i];
+      targetColorsFlat[ci * 3 + 1] = targetData[i + 1];
+      targetColorsFlat[ci * 3 + 2] = targetData[i + 2];
+    }
+    targetColorsRef.current = targetColorsFlat;
+    edgeMapRef.current = [...edgeMap];
+    faceMaskRef.current = [...faceMask];
 
     // -- Compute Quality Metrics ----------------------------------------------
     // Compute after matching so we have the final assignment
@@ -3549,6 +3564,13 @@ export default function Studio() {
             tilePx: PRINT_TILE_PX,
             format: 'jpg',
             jobId: printJobId,
+            // Overlay data for server-side blending (matches client-side Step 6)
+            overlayMode: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').overlayMode ?? 'softlight'; } catch { return 'softlight'; } })(),
+            baseOverlay: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').baseOverlay ?? 0.15; } catch { return 0.15; } })(),
+            edgeBoost: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').edgeBoost ?? 0.20; } catch { return 0.20; } })(),
+            targetColors: targetColorsRef.current,
+            edgeMap: edgeMapRef.current,
+            faceMask: faceMaskRef.current,
           }),
           signal: controller.signal,
         });
@@ -3684,6 +3706,11 @@ export default function Studio() {
       const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
+      // Read current overlay settings from localStorage
+      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+      const overlayMode = dlSettings.overlayMode ?? 'softlight';
+      const baseOverlay = dlSettings.baseOverlay ?? 0.15;
+      const edgeBoost = dlSettings.edgeBoost ?? 0.20;
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3695,6 +3722,13 @@ export default function Studio() {
           tilePx: TILE_PX,
           format: useFormat,
           jobId: digJobId,
+          // Overlay data for server-side blending (matches client-side Step 6)
+          overlayMode,
+          baseOverlay,
+          edgeBoost,
+          targetColors: targetColorsRef.current,
+          edgeMap: edgeMapRef.current,
+          faceMask: faceMaskRef.current,
         }),
         signal: controller.signal,
       });
