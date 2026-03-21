@@ -404,11 +404,24 @@ export default function Studio() {
 
     setHiResLoading(true);
     setProgressMsg('Rendere Zoomansicht...');
-    setProgress(10);
+    setProgress(5);
 
     const { cols, rows } = mosaicParamsRef.current;
-    // Target max ~10000px per side for browser compatibility
     const ZOOM_TILE_PX = Math.min(128, Math.floor(10000 / Math.max(cols, rows)));
+    const zoomJobId = `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+    // SSE progress for zoom render
+    let sseSource: EventSource | null = null;
+    try {
+      sseSource = new EventSource(`/api/print-progress/${zoomJobId}`);
+      sseSource.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.progress) setProgress(data.progress);
+          if (data.message) setProgressMsg(data.message);
+        } catch { /* ignore */ }
+      };
+    } catch { /* SSE not critical */ }
 
     try {
       const resp = await fetch('/api/print-render', {
@@ -419,12 +432,15 @@ export default function Studio() {
           assignment: assignmentRef.current,
           cols, rows,
           tilePx: ZOOM_TILE_PX,
+          format: 'jpg',
+          jobId: zoomJobId,
         }),
       });
+      if (sseSource) sseSource.close();
 
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
       const { token } = await resp.json();
-      setProgress(50);
+      setProgress(90);
       setProgressMsg('Lade Zoomansicht...');
 
       // Fetch the PNG as blob
@@ -3478,34 +3494,42 @@ export default function Studio() {
 
     if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
       // PRINT MODE: server-side rendering via /api/print-render
-      // Strategy: use a fixed tile size of 200px per tile for print quality.
-      // This gives each tile enough resolution to show recognizable detail when zoomed.
-      // Final output = cols x 200px (e.g. 100 cols -> 20000px wide = excellent for any print size)
-      // The print service scales down to the requested format (e.g. 30x30cm @ 300 DPI = 3543px)
-      // but the source file at 20000px gives 300 DPI even at 170cm width.
+      // Tile size = exact DPI requirement for the chosen print format.
+      // Each tile gets exactly enough pixels for 300 DPI at its physical size.
+      // No over-rendering: a 70×70cm print needs 8268×8268px, not 40000+.
       const { cols, rows } = mosaicParamsRef.current;
-      // Dynamic tile size: each tile = exactly 1cm x 1cm at 300 DPI in the chosen format
-      // Formula: tilePx = formatWidthCm / cols * (300 / 2.54)
-      // Minimum 400px per tile: ensures tiles are crisp and recognizable when zoomed
-      // At 400px: 60 cols x 400px = 24000px wide → 300 DPI at 203cm, excellent for all print sizes
-      // Clamped to [400, 600]: min=400px for sharp detail, max=600px (server memory limit)
       const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
       const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM); // px for 1:1 at 300dpi
-      const PRINT_TILE_PX = Math.min(600, Math.max(400, naturalTilePx)); // min 400px, max 600px for highest print quality
-      // Actual output dimensions (= format at 300 DPI, aspect-ratio preserved)
+      // Clamp: min 64px (still >200 DPI for small tiles), max 400px (server memory)
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
-      const actualTileCm = (PRINT_TILE_PX / PX_PER_CM).toFixed(2);
-      console.log(`[Print] Format: ${fmt.label}, cols: ${cols}, tileSizeCm: ${tileSizeCm.toFixed(2)}cm, PRINT_TILE_PX: ${PRINT_TILE_PX}px (${actualTileCm}cm@300dpi), output: ${printOutW}x${printOutH}px`);
+      console.log(`[Print] Format: ${fmt.label}, cols=${cols}, rows=${rows}, naturalTilePx=${naturalTilePx}, PRINT_TILE_PX=${PRINT_TILE_PX}, output=${printOutW}x${printOutH}px`);
 
       try {
         setLoading(true);
         setProgressMsg(`Server rendert Druckqualitaet (${printOutW}x${printOutH}px)...`);
-        setProgress(10);
+        setProgress(5);
+
+        // Generate a unique job ID for SSE progress tracking
+        const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+        // Start SSE listener for real-time progress
+        let sseSource: EventSource | null = null;
+        try {
+          sseSource = new EventSource(`/api/print-progress/${printJobId}`);
+          sseSource.onmessage = (ev) => {
+            try {
+              const data = JSON.parse(ev.data);
+              if (data.progress) setProgress(data.progress);
+              if (data.message) setProgressMsg(data.message);
+            } catch { /* ignore parse errors */ }
+          };
+        } catch { /* SSE not critical */ }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 min timeout
+        const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
         const resp = await fetch('/api/print-render', {
           method: 'POST',
@@ -3516,10 +3540,13 @@ export default function Studio() {
             cols,
             rows,
             tilePx: PRINT_TILE_PX,
+            format: 'jpg',
+            jobId: printJobId,
           }),
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
+        if (sseSource) sseSource.close();
 
         if (!resp.ok) {
           const errText = await resp.text().catch(() => '');
@@ -3625,11 +3652,25 @@ export default function Studio() {
     try {
       setLoading(true);
       setProgressMsg(`Rendere ${digFmt.label} (${outW}x${outH}px)...`);
-      setProgress(10);
+      setProgress(5);
+
+      const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      let sseSource: EventSource | null = null;
+      try {
+        sseSource = new EventSource(`/api/print-progress/${digJobId}`);
+        sseSource.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.progress) setProgress(data.progress);
+            if (data.message) setProgressMsg(data.message);
+          } catch { /* ignore */ }
+        };
+      } catch { /* SSE not critical */ }
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
+      const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3639,10 +3680,13 @@ export default function Studio() {
           cols,
           rows,
           tilePx: TILE_PX,
+          format: useFormat,
+          jobId: digJobId,
         }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
+      if (sseSource) sseSource.close();
 
       if (!resp.ok) {
         const errText = await resp.text().catch(() => '');

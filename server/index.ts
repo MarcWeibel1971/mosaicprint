@@ -1303,38 +1303,79 @@ app.get('/api/tile-atlas', async (req, res) => {
 
 // ── Server-side Print Render ──────────────────────────────────────────────────
 // POST /api/print-render
-// Body: { tileIds: number[], assignment: number[], cols: number, rows: number, tilePx?: number }
-// Returns: JPEG of the full-resolution mosaic (no watermark)
-// Uses source_url (original high-res images) for print quality.
+// Body: { tileIds, assignment, cols, rows, tilePx?, format?, jobId? }
+// Returns: { token, filename, size, width, height }
+// Uses source_url (original hi-res images) for print quality.
 // Disk cache at /tmp/mosaicprint-hires/ to avoid re-downloading.
+// Progress updates via GET /api/print-progress/:jobId (SSE).
 const HIRES_CACHE_DIR = '/tmp/mosaicprint-hires';
 if (!fs.existsSync(HIRES_CACHE_DIR)) fs.mkdirSync(HIRES_CACHE_DIR, { recursive: true });
 
+// In-memory progress tracking for SSE
+const printJobs = new Map<string, { progress: number; message: string; done: boolean; error?: string; result?: Record<string, unknown> }>();
+
+// SSE endpoint for real-time progress
+app.get('/api/print-progress/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+
+  const interval = setInterval(() => {
+    const job = printJobs.get(jobId);
+    if (!job) { res.write(`data: ${JSON.stringify({ progress: 0, message: 'Warte...' })}\n\n`); return; }
+    res.write(`data: ${JSON.stringify(job)}\n\n`);
+    if (job.done || job.error) {
+      clearInterval(interval);
+      setTimeout(() => res.end(), 500);
+      // Clean up job after 60s
+      setTimeout(() => printJobs.delete(jobId), 60000);
+    }
+  }, 500);
+
+  req.on('close', () => clearInterval(interval));
+});
+
 app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) => {
   try {
-    const { tileIds, assignment, cols, rows, tilePx = 400 } = req.body as {
+    const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId } = req.body as {
       tileIds: number[];
       assignment: number[];
       cols: number;
       rows: number;
       tilePx?: number;
+      format?: 'jpg' | 'png';
+      jobId?: string;
     };
 
     if (!tileIds?.length || !assignment?.length || !cols || !rows) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // PRINT_TILE_PX: client sends target tile size (min 400px for sharp detail)
-    // Clamp between 128 (absolute minimum) and 600 (server memory limit)
-    // At 400px: 50 cols × 400px = 20000px wide (excellent for 70cm @ 300 DPI)
-    // At 600px: 50 cols × 600px = 30000px wide (maximum quality for large prints)
-    const TILE_PX = Math.min(Math.max(tilePx, 128), 600);
+    // Helper to update progress (SSE + console)
+    const updateProgress = (progress: number, message: string) => {
+      if (jobId) {
+        printJobs.set(jobId, { progress, message, done: false });
+      }
+      console.log(`[print-render] [${progress}%] ${message}`);
+    };
+
+    // Clamp tile size: min 64px, max 400px
+    // Safety cap: max 16000px per output dimension
+    let TILE_PX = Math.min(Math.max(tilePx, 64), 400);
+    const MAX_DIM = 16000;
+    if (cols * TILE_PX > MAX_DIM || rows * TILE_PX > MAX_DIM) {
+      TILE_PX = Math.min(Math.floor(MAX_DIM / cols), Math.floor(MAX_DIM / rows), TILE_PX);
+      TILE_PX = Math.max(32, TILE_PX);
+    }
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
-    console.log(`[print-render] Request: cols=${cols} rows=${rows} tilePx=${tilePx} → clamped=${TILE_PX} output=${outW}×${outH}px`);
+    updateProgress(5, `Start: ${cols}x${rows} tiles @ ${TILE_PX}px → ${outW}x${outH}px`);
     const pool = db.getPool();
 
-    // Fetch unique tile IDs needed – prefer r2_url (permanent), then source_url for hi-res
+    // Fetch unique tile IDs needed
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
     const result = await pool.query(
       `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
@@ -1345,7 +1386,6 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       if (row.r2_url) {
         urlMap[row.id] = { hiRes: row.r2_url, fallback: row.r2_url };
       } else if (row.source_provider === 'pixabay') {
-        // Skip Pixabay tiles without R2 URL (hotlink-protected)
         continue;
       } else {
         urlMap[row.id] = {
@@ -1354,29 +1394,27 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
         };
       }
     }
+    updateProgress(10, `DB: ${uniqueIds.length} unique tiles, ${result.rows.length} URLs gefunden`);
 
     // Load tile images in parallel batches with disk cache
     const tileBuffers: Record<number, Buffer> = {};
-    const CONCURRENCY = 20; // Pro plan: higher concurrency for print rendering
+    const CONCURRENCY = 25;
+    let downloadedCount = 0;
     for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
       const batch = uniqueIds.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (id) => {
         const urls = urlMap[id];
         if (!urls) return;
-        // Check disk cache first (keyed by tile id + size to avoid stale smaller tiles)
-        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.png`);
+        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.jpg`);
         if (fs.existsSync(cacheFile)) {
-          try {
-            tileBuffers[id] = fs.readFileSync(cacheFile);
-            return;
-          } catch { /* fall through to download */ }
+          try { tileBuffers[id] = fs.readFileSync(cacheFile); downloadedCount++; return; } catch { /* fall through */ }
         }
-        // Try source_url (hi-res original), fallback to tile128_url
         const urlsToTry = [urls.hiRes, urls.fallback].filter(Boolean);
         for (const url of urlsToTry) {
           try {
             if (url.startsWith('data:')) {
               tileBuffers[id] = Buffer.from(url.split(',')[1], 'base64');
+              downloadedCount++;
               break;
             }
             const resp = await fetch(url, {
@@ -1385,109 +1423,147 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
             });
             if (resp.ok) {
               const buf = Buffer.from(await resp.arrayBuffer());
-              // Resize to TILE_PX with high quality (PNG for lossless tile caching)
+              // Resize to TILE_PX — use JPEG for cache (smaller, faster)
               const resized = await sharp(buf)
                 .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-                .png()
+                .jpeg({ quality: 92 })
                 .toBuffer()
                 .catch(() => null);
               if (resized) {
                 tileBuffers[id] = resized;
-                // Save to disk cache (async, don't await)
                 fs.writeFile(cacheFile, resized, () => {});
+                downloadedCount++;
               }
               break;
             }
           } catch { /* try next url */ }
         }
       }));
+      const dlPct = Math.round(10 + (downloadedCount / uniqueIds.length) * 40);
+      updateProgress(dlPct, `Tiles laden: ${downloadedCount}/${uniqueIds.length}`);
     }
 
-    // Build composite inputs for Jimp strip rendering
-    // For large images (>8000px), render in row-strips to avoid OOM
-    // Each strip = STRIP_ROWS rows, composited separately, then joined vertically
-    const STRIP_ROWS = Math.max(1, Math.floor(4000 / TILE_PX)); // ~4000px per strip
-    const totalCells = cols * rows;
-    console.log(`[print-render] Building ${totalCells} tile composites at ${TILE_PX}px → ${outW}×${outH}px (${Math.ceil(rows/STRIP_ROWS)} strips)`);
+    // Strip-based compositing to control memory
+    const STRIP_ROWS = Math.max(1, Math.floor(6000 / TILE_PX));
+    const totalStrips = Math.ceil(rows / STRIP_ROWS);
+    updateProgress(55, `Compositing: ${totalStrips} Strips @ ${outW}px breit`);
 
-    // Tiles are already resized to TILE_PX during download (with disk cache).
-    // No need to re-resize — that would cause double JPEG compression and quality loss.
-    const resizedBuffers: Record<number, Buffer> = {};
-    for (const [id, buf] of Object.entries(tileBuffers)) {
-      resizedBuffers[Number(id)] = buf;
+    const tmpDir = '/tmp/mosaicprint-downloads';
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    // For small images (< ~50M pixels), composite in memory
+    // For larger, composite strip by strip to disk
+    const totalPixels = outW * outH;
+    const useJpeg = format === 'jpg';
+
+    if (totalPixels <= 50_000_000) {
+      // Small enough: single-pass composite in memory
+      const compositeInputs: Array<{ input: Buffer; top: number; left: number }> = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const ci = r * cols + c;
+          const tileId = tileIds[assignment[ci]];
+          const buf = tileBuffers[tileId];
+          if (!buf) continue;
+          compositeInputs.push({ input: buf, top: r * TILE_PX, left: c * TILE_PX });
+        }
+      }
+      updateProgress(70, `Compositing ${compositeInputs.length} tiles...`);
+
+      const pipeline = sharp({
+        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      }).composite(compositeInputs);
+
+      let outputBuf: Buffer;
+      if (useJpeg) {
+        outputBuf = await pipeline.jpeg({ quality: 95 }).toBuffer();
+      } else {
+        outputBuf = await pipeline.png({ compressionLevel: 4 }).toBuffer();
+      }
+      updateProgress(90, `Speichere ${(outputBuf.length / 1024 / 1024).toFixed(1)} MB...`);
+
+      const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const ext = useJpeg ? 'jpg' : 'png';
+      const tmpFile = path.join(tmpDir, `${token}.${ext}`);
+      fs.writeFileSync(tmpFile, outputBuf);
+      setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10 * 60 * 1000);
+
+      const filename = `mosaicprint-${outW}x${outH}-druckbereit.${ext}`;
+      const resultData = { token, filename, size: outputBuf.length, width: outW, height: outH };
+      if (jobId) printJobs.set(jobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
+      return res.json(resultData);
     }
 
-    // Render strips and collect them
-    const stripBuffers: Buffer[] = [];
+    // Large image: strip-based compositing
+    const stripFiles: string[] = [];
     for (let stripStart = 0; stripStart < rows; stripStart += STRIP_ROWS) {
       const stripEnd = Math.min(stripStart + STRIP_ROWS, rows);
       const stripH = (stripEnd - stripStart) * TILE_PX;
-      const compositeInputs: Array<{ buf: Buffer; top: number; left: number }> = [];
+      const compositeInputs: Array<{ input: Buffer; top: number; left: number }> = [];
 
       for (let r = stripStart; r < stripEnd; r++) {
         for (let c = 0; c < cols; c++) {
           const ci = r * cols + c;
           const tileId = tileIds[assignment[ci]];
-          const buf = resizedBuffers[tileId];
+          const buf = tileBuffers[tileId];
           if (!buf) continue;
-          compositeInputs.push({
-            buf,
-            top: (r - stripStart) * TILE_PX,
-            left: c * TILE_PX,
-          });
+          compositeInputs.push({ input: buf, top: (r - stripStart) * TILE_PX, left: c * TILE_PX });
         }
       }
 
-      // Build strip using Sharp composite
-      const sharpCompositeInputs = compositeInputs.map(ci => ({
-        input: ci.buf,
-        top: ci.top,
-        left: ci.left,
-      }));
-      const stripPng = await sharp({
+      const stripFile = path.join(tmpDir, `strip-${Date.now()}-${stripStart}.png`);
+      await sharp({
         create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
       })
-        .composite(sharpCompositeInputs)
-        .png({ compressionLevel: 6 })
-        .toBuffer();
-      stripBuffers.push(stripPng);
-      console.log(`[print-render] Strip ${Math.floor(stripStart/STRIP_ROWS)+1}/${Math.ceil(rows/STRIP_ROWS)} done (${compositeInputs.length} tiles)`);
-    }
-    // Join strips vertically using Sharp
-    let mosaicPng: Buffer;
-    if (stripBuffers.length === 1) {
-      mosaicPng = stripBuffers[0];
-    } else {
-      // Calculate cumulative offsets
-      let yOff = 0;
-      const compositeStrips = [];
-      for (const buf of stripBuffers) {
-        const meta = await sharp(buf).metadata();
-        compositeStrips.push({ input: buf, top: yOff, left: 0 });
-        yOff += meta.height ?? 0;
-      }
-      mosaicPng = await sharp({
-        create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
-      })
-        .composite(compositeStrips)
-        .png({ compressionLevel: 6 })
-        .toBuffer();
-    }
-    console.log(`[print-render] Done: ${(mosaicPng.length / 1024 / 1024).toFixed(1)} MB`);
+        .composite(compositeInputs)
+        .png({ compressionLevel: 2 })
+        .toFile(stripFile);
+      stripFiles.push(stripFile);
 
-    // Save to temp file and return a download token.
+      const stripIdx = Math.floor(stripStart / STRIP_ROWS) + 1;
+      const stripPct = Math.round(55 + (stripIdx / totalStrips) * 30);
+      updateProgress(stripPct, `Strip ${stripIdx}/${totalStrips} fertig`);
+    }
+
+    // Join strips vertically
+    updateProgress(88, 'Strips zusammenfuegen...');
+    let yOff = 0;
+    const compositeStrips = [];
+    for (const sf of stripFiles) {
+      const meta = await sharp(sf).metadata();
+      compositeStrips.push({ input: sf, top: yOff, left: 0 });
+      yOff += meta.height ?? 0;
+    }
+
     const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const tmpDir = '/tmp/mosaicprint-downloads';
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = path.join(tmpDir, `${token}.png`);
-    fs.writeFileSync(tmpFile, mosaicPng);
-    // Auto-delete after 10 minutes
+    const ext = useJpeg ? 'jpg' : 'png';
+    const tmpFile = path.join(tmpDir, `${token}.${ext}`);
+
+    const finalPipeline = sharp({
+      create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+    }).composite(compositeStrips);
+
+    if (useJpeg) {
+      await finalPipeline.jpeg({ quality: 95 }).toFile(tmpFile);
+    } else {
+      await finalPipeline.png({ compressionLevel: 4 }).toFile(tmpFile);
+    }
+
+    // Clean up strip files
+    for (const sf of stripFiles) { try { fs.unlinkSync(sf); } catch {} }
+
+    const stat = fs.statSync(tmpFile);
     setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10 * 60 * 1000);
 
-    const filename = `mosaicprint-${outW}x${outH}-druckbereit.png`;
-    res.json({ token, filename, size: mosaicPng.length, width: outW, height: outH });
+    const filename = `mosaicprint-${outW}x${outH}-druckbereit.${ext}`;
+    updateProgress(95, `Fertig: ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
+    const resultData = { token, filename, size: stat.size, width: outW, height: outH };
+    if (jobId) printJobs.set(jobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
+    console.log(`[print-render] Done: ${outW}x${outH}px, ${(stat.size / 1024 / 1024).toFixed(1)} MB (${ext})`);
+    res.json(resultData);
   } catch (e) {
     console.error('[print-render] Error:', e);
+    if (req.body?.jobId) printJobs.set(req.body.jobId, { progress: 0, message: String(e), done: false, error: String(e) });
     res.status(500).json({ error: String(e) });
   }
 });
