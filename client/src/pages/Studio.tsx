@@ -4760,27 +4760,68 @@ export default function Studio() {
                   const posterH = (rows * tileSizeCm).toFixed(0);
                   // Quality assessment
                   const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
-                  // Recommend optimal tile count for this format (target: 8-10mm tiles)
-                  const recommendedCols = Math.round(fmt.widthCm / 0.9); // ~9mm tiles
+                  // Compute optimal baseTiles for ~9mm tiles in this format
+                  const targetTileMm = 9; // ideal: 9mm per tile
+                  const targetCols = Math.round(fmt.widthCm * 10 / targetTileMm);
+                  // Reverse-compute baseTiles from targetCols based on aspect ratio
+                  const imgAspect = cols / rows; // approximate from current grid
+                  const optimalBaseTiles = imgAspect >= 1
+                    ? targetCols                                    // landscape: baseTiles = cols
+                    : Math.round(targetCols / imgAspect);           // portrait: baseTiles = cols / aspect
+                  const needsOptimize = quality !== 'ideal' && quality !== 'ok';
+                  // Re-render handler: update baseTiles and trigger renderMosaic
+                  const handleOptimizeForFormat = () => {
+                    if (!userPhotoImg) return;
+                    try {
+                      const current = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}');
+                      current.baseTiles = optimalBaseTiles;
+                      localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(current));
+                    } catch { /* ignore */ }
+                    setReady(false); setLoading(true); setProgress(0);
+                    renderMosaic(userPhotoImg);
+                  };
                   return (
-                    <div className={`rounded-xl p-3 mb-4 text-xs ${quality === 'small' ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
+                    <div className={`rounded-xl p-3 mb-4 text-xs ${quality === 'small' ? 'bg-amber-50 border border-amber-300 text-amber-900' : quality === 'large' ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
                       <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
                       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Poster-Groesse:</span>
+                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Poster-Groesse:</span>
                         <span className="font-semibold">{posterW} × {posterH} cm</span>
-                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Kachel-Groesse:</span>
-                        <span className="font-semibold">{tileMm}mm × {tileMm}mm {quality === 'ideal' ? '✓' : quality === 'small' ? '⚠' : ''}</span>
-                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Anzahl Kacheln:</span>
+                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Kachel-Groesse:</span>
+                        <span className="font-semibold">{tileMm}mm × {tileMm}mm {quality === 'ideal' ? '✓' : needsOptimize ? '⚠' : ''}</span>
+                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Anzahl Kacheln:</span>
                         <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
-                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
+                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
                         <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
                       </div>
                       {quality === 'small' && (
-                        <p className="mt-2 text-amber-700 font-medium">
-                          Hinweis: Bei {tileMm}mm sind die einzelnen Fotos kaum erkennbar.
-                          Fuer {fmt.label} empfehlen wir ca. {recommendedCols} Kacheln (≈9mm pro Kachel)
-                          fuer die beste Balance zwischen Fernwirkung und Kachel-Sichtbarkeit.
-                        </p>
+                        <div className="mt-2">
+                          <p className="text-amber-700 font-medium mb-2">
+                            Bei {tileMm}mm sind die einzelnen Fotos kaum erkennbar.
+                            Fuer {fmt.label} empfehlen wir ca. {targetCols} Kacheln (≈{targetTileMm}mm pro Kachel).
+                          </p>
+                          <button
+                            onClick={handleOptimizeForFormat}
+                            disabled={loading}
+                            className="w-full py-2 px-3 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50"
+                          >
+                            Fuer {fmt.label} optimieren ({targetCols} Kacheln, ≈{targetTileMm}mm)
+                          </button>
+                        </div>
+                      )}
+                      {quality === 'large' && (
+                        <div className="mt-2">
+                          <p className="text-amber-700 font-medium mb-2">
+                            Bei {tileMm}mm sind die Kacheln sehr gross — das Gesamtbild wird grob.
+                            Fuer {fmt.label} empfehlen wir ca. {targetCols} Kacheln (≈{targetTileMm}mm pro Kachel).
+                          </p>
+                          <button
+                            onClick={handleOptimizeForFormat}
+                            disabled={loading}
+                            className="w-full py-2 px-3 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50"
+                          >
+                            Fuer {fmt.label} optimieren ({targetCols} Kacheln, ≈{targetTileMm}mm)
+                          </button>
+                        </div>
                       )}
                       {quality === 'ideal' && (
                         <p className="mt-1.5 text-green-700 font-medium">Optimale Kachelgroesse: Fernwirkung und Einzelfotos gut erkennbar.</p>
