@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Calendar, Users, Camera, RefreshCw, QrCode, Plus, Trash2, Link as LinkIcon, Image as ImageIcon, Download, Mail, ChevronDown, ChevronUp, Send } from 'lucide-react'
+import { Calendar, Users, Camera, RefreshCw, QrCode, Plus, Trash2, Link as LinkIcon, Image as ImageIcon, Download, Mail, ChevronDown, ChevronUp, Send, Upload } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface EventItem {
@@ -28,6 +28,9 @@ export default function Events() {
   const [expandedEvent, setExpandedEvent] = useState<string | null>(null)
   const [participants, setParticipants] = useState<Record<string, Array<{ id: number; name: string; email: string; created_at: string }>>>({})
   const [sendingMosaic, setSendingMosaic] = useState(false)
+  const [uploadingTargetFor, setUploadingTargetFor] = useState<string | null>(null)
+  const targetImageRef = useRef<HTMLInputElement>(null)
+  const [targetUploadSlug, setTargetUploadSlug] = useState<string | null>(null)
 
   const fetchEvents = useCallback(() => {
     fetch('/api/events')
@@ -89,6 +92,58 @@ export default function Events() {
         setQrEvent({ slug, qrDataUrl: data.qrDataUrl, eventUrl: data.eventUrl })
       }
     } catch { /* ignore */ }
+  }
+
+  const uploadTargetImage = async (slug: string, file: File) => {
+    setUploadingTargetFor(slug)
+    try {
+      const reader = new FileReader()
+      const base64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve((reader.result as string).split(',')[1])
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+      const res = await fetch(`/api/events/${slug}/target-image`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ targetImageBase64: base64 }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        fetchEvents()
+        setMessage({ text: 'Zielbild hochgeladen!', type: 'success' })
+      } else {
+        setMessage({ text: `Fehler: ${data.error}`, type: 'error' })
+      }
+    } catch (e) {
+      setMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setUploadingTargetFor(null)
+      setTargetUploadSlug(null)
+    }
+  }
+
+  const sendMosaic = async (slug: string) => {
+    if (sendingMosaic) return
+    if (!confirm('Mosaik jetzt generieren und an alle registrierten Teilnehmer senden?')) return
+    setSendingMosaic(true)
+    setMessage({ text: 'Mosaik wird generiert und versendet...', type: 'success' })
+    try {
+      const res = await fetch(`/api/events/${slug}/send-mosaic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setMessage({ text: `Mosaik an ${data.sent} von ${data.total} Teilnehmern gesendet!`, type: 'success' })
+      } else {
+        setMessage({ text: `Fehler: ${data.error}`, type: 'error' })
+      }
+    } catch (e) {
+      setMessage({ text: `Fehler: ${String(e)}`, type: 'error' })
+    } finally {
+      setSendingMosaic(false)
+    }
   }
 
   const toggleParticipants = async (slug: string) => {
@@ -202,6 +257,12 @@ export default function Events() {
             <div className="space-y-3 mb-8">
               {events.map(event => (
                 <div key={event.id} className="bg-white rounded-2xl p-5 border border-gray-200 shadow-sm">
+                  {/* Target image preview */}
+                  {event.target_image_url && (
+                    <div className="mb-3 -mt-1 -mx-1 rounded-xl overflow-hidden h-24">
+                      <img src={event.target_image_url} alt="Zielbild" className="w-full h-full object-cover" />
+                    </div>
+                  )}
                   <div className="flex items-center gap-4">
                     <div className="flex-shrink-0 w-12 h-12 rounded-xl bg-coral-50 flex items-center justify-center text-coral-500">
                       <Camera className="w-6 h-6" />
@@ -248,6 +309,17 @@ export default function Events() {
                       Öffnen
                     </a>
                     <button
+                      onClick={() => {
+                        setTargetUploadSlug(event.slug)
+                        setTimeout(() => targetImageRef.current?.click(), 50)
+                      }}
+                      disabled={uploadingTargetFor === event.slug}
+                      className="flex items-center gap-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                    >
+                      {uploadingTargetFor === event.slug ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                      Zielbild
+                    </button>
+                    <button
                       onClick={() => deleteEvent(event.slug, event.name)}
                       className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
                     >
@@ -274,9 +346,7 @@ export default function Events() {
                         </h4>
                         {participants[event.slug]?.length > 0 && (
                           <button
-                            onClick={() => {
-                              setMessage({ text: 'Mosaik-Versand wird vorbereitet... (Feature kommt bald)', type: 'success' })
-                            }}
+                            onClick={() => sendMosaic(event.slug)}
                             disabled={sendingMosaic}
                             className="flex items-center gap-1.5 bg-coral-500 hover:bg-coral-600 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
                           >
@@ -383,6 +453,19 @@ export default function Events() {
           </div>
         )}
       </section>
+
+      {/* Hidden file input for target image upload */}
+      <input
+        ref={targetImageRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={e => {
+          const f = e.target.files?.[0]
+          if (f && targetUploadSlug) uploadTargetImage(targetUploadSlug, f)
+          e.target.value = ''
+        }}
+      />
 
       {/* QR Code Modal */}
       {qrEvent && (

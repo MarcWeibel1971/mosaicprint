@@ -2745,6 +2745,141 @@ app.get("/api/events/:slug/participants", async (req, res) => {
   }
 });
 
+// ── Update event target image ──────────────────────────────────────────────
+app.put("/api/events/:slug/target-image", express.json({ limit: '20mb' }), async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { targetImageBase64 } = req.body;
+    if (!targetImageBase64) {
+      return res.status(400).json({ ok: false, error: "Kein Bild angegeben" });
+    }
+    const targetImageUrl = `data:image/jpeg;base64,${targetImageBase64}`;
+    const result = await pool.query(
+      `UPDATE mosaic_events SET target_image_url = $1, updated_at = NOW() WHERE slug = $2 RETURNING *`,
+      [targetImageUrl, req.params.slug]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    res.json({ ok: true, event: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Send mosaic to all participants ────────────────────────────────────────
+app.post("/api/events/:slug/send-mosaic", async (req, res) => {
+  try {
+    const pool = db.getPool();
+
+    // Get event
+    const eventRes = await pool.query(
+      `SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count FROM mosaic_events e WHERE e.slug = $1`,
+      [req.params.slug]
+    );
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    const event = eventRes.rows[0];
+
+    // Get participants
+    const partRes = await pool.query(
+      `SELECT name, email FROM event_participants WHERE event_id = $1`, [event.id]
+    );
+    if (partRes.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Keine Teilnehmer registriert" });
+    }
+
+    // Get photos
+    const photosRes = await pool.query(
+      `SELECT thumbnail_url FROM event_photos WHERE event_id = $1 ORDER BY created_at`, [event.id]
+    );
+    if (photosRes.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Keine Fotos vorhanden" });
+    }
+
+    // Build mosaic from event photos
+    const photos = photosRes.rows;
+    const cols = Math.ceil(Math.sqrt(photos.length * 1.5));
+    const rows = Math.ceil(photos.length / cols);
+    const tilePx = 128;
+    const tiles = photos.map((p: { thumbnail_url: string }, i: number) => ({
+      url: p.thumbnail_url,
+      col: i % cols,
+      row: Math.floor(i / cols),
+    }));
+
+    // Import renderMosaicOnServer dynamically
+    const { renderMosaicOnServer } = await import("./mosaicExport.js");
+    const mosaicBuffer = await renderMosaicOnServer({
+      tiles, cols, rows, tilePx,
+      overlayBase64: event.target_image_url?.startsWith('data:') ? event.target_image_url.split(',')[1] : undefined,
+      overlayAlpha: event.target_image_url ? 0.15 : 0,
+      sharpen: true,
+    });
+
+    // Check SMTP config
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const smtpFrom = process.env.SMTP_FROM || smtpUser;
+
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      return res.status(500).json({ ok: false, error: "SMTP nicht konfiguriert. Bitte SMTP_HOST, SMTP_USER, SMTP_PASS setzen." });
+    }
+
+    // Create transporter
+    const nodemailer = await import("nodemailer");
+    const transporter = nodemailer.default.createTransport({
+      host: smtpHost,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+
+    // Send to all participants
+    const results: { email: string; ok: boolean; error?: string }[] = [];
+    for (const participant of partRes.rows) {
+      try {
+        await transporter.sendMail({
+          from: `MosaicPrint <${smtpFrom}>`,
+          to: participant.email,
+          subject: `Dein Mosaik von "${event.name}" ist fertig!`,
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <h1 style="color: #1a1a1a; font-size: 24px;">Hallo ${participant.name}!</h1>
+              <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                Das Mosaik vom Event <strong>"${event.name}"</strong> ist fertig!
+                Es wurde aus <strong>${photos.length} Fotos</strong> aller Gäste zusammengesetzt.
+              </p>
+              <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                Das fertige Mosaik findest du im Anhang.
+              </p>
+              <p style="color: #999; font-size: 12px; margin-top: 30px;">
+                Erstellt mit MosaicPrint — Dein Foto als Kunstwerk
+              </p>
+            </div>
+          `,
+          attachments: [{
+            filename: `mosaik-${event.slug}.png`,
+            content: mosaicBuffer,
+            contentType: 'image/png',
+          }],
+        });
+        results.push({ email: participant.email, ok: true });
+      } catch (err) {
+        results.push({ email: participant.email, ok: false, error: String(err) });
+      }
+    }
+
+    const sent = results.filter(r => r.ok).length;
+    const failed = results.filter(r => !r.ok).length;
+    res.json({ ok: true, sent, failed, total: results.length, details: results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");
