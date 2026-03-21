@@ -1344,6 +1344,9 @@ export default function Studio() {
 
     let maxEdge = 0;
     const rawEdge: number[] = new Array(TOTAL_TILES).fill(0);
+    // Store Sobel gradient direction (gx, gy) for edge-aware quadrant matching
+    const sobelGx: number[] = new Array(TOTAL_TILES).fill(0);
+    const sobelGy: number[] = new Array(TOTAL_TILES).fill(0);
     for (let row = 1; row < (ROWS) - 1; row++) {
       for (let col = 1; col < (COLS) - 1; col++) {
         // Sobel 3x3 on luminance
@@ -1357,7 +1360,10 @@ export default function Studio() {
         const gy = -lum(row-1,col-1) - 2*lum(row-1,col) - lum(row-1,col+1)
                    +lum(row+1,col-1) + 2*lum(row+1,col) + lum(row+1,col+1);
         const mag = Math.sqrt(gx*gx + gy*gy);
-        rawEdge[row * COLS + col] = mag;
+        const ci = row * COLS + col;
+        rawEdge[ci] = mag;
+        sobelGx[ci] = gx;
+        sobelGy[ci] = gy;
         if (mag > maxEdge) maxEdge = mag;
       }
     }
@@ -1460,7 +1466,8 @@ export default function Studio() {
       targetL: number, targetA: number, targetB: number,
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
       targetQuadA: [number,number,number,number] = [targetA,targetA,targetA,targetA],
-      targetQuadB: [number,number,number,number] = [targetB,targetB,targetB,targetB]
+      targetQuadB: [number,number,number,number] = [targetB,targetB,targetB,targetB],
+      edgeQuadBoost = 1.0 // multiplier for W_QUAD on edge cells (>1 = prefer gradient tiles)
     ): Array<{tileId: number; labDist: number}> => {
       if (!labIndex) return [];
       // Weighted distance in feature space
@@ -1478,7 +1485,7 @@ export default function Studio() {
       // Tiles mit starken Farbgradienten (z.B. blauer Himmel oben / grünes Gras unten) werden
       // leicht benachteiligt wenn der Zielbereich einfarbig ist. Kleines Gewicht = subtile Verbesserung.
       // Stage C (SSD) ist weiterhin der primäre Ort für Quadrant-Matching.
-      const W_QUAD = IS_14D ? 0.15 : 0; // Aktiviert: leichtes Quadrant-Matching (war 0)
+      const W_QUAD = IS_14D ? 0.15 * edgeQuadBoost : 0; // Edge cells get boosted quadrant matching
       // W_EDGE: active for all index types - edge energy drives contour sharpness
       const W_EDGE = IS_7D ? 25.0 : 22.0;
       // W_BRIGHT: brightness matching - prevents dark tiles in bright areas
@@ -1653,6 +1660,11 @@ export default function Studio() {
 
     if (USE_2STAGE) {
       // 2-pass: first collect all candidates (with 14D features), then load images
+      // EDGE-AWARE QUADRANT MATCHING:
+      // For edge cells (contours), compute quadrant target colors from neighboring cells
+      // using the Sobel gradient direction. This lets the kNN find two-tone/gradient tiles
+      // that match the actual color transition (e.g., skin→background at chin line).
+      const EDGE_QUAD_THRESHOLD = 0.25; // edgeMap > 0.25 → use directional quadrants
       for (let ci = 0; ci < (TOTAL_TILES); ci++) {
         const [tL, tA, tB] = cellLab[ci];
         // FIX: targetEdge/targetBright/targetSat must be active for ALL index types (7D, 14D, 15D)!
@@ -1660,11 +1672,60 @@ export default function Studio() {
         const targetEdge = edgeMap[ci]; // always active
         const targetBright = tL / 100;  // always active
         const targetSat = Math.min(1, Math.sqrt(tA*tA + tB*tB) / 60); // always active
-        // For 14D: use cell LAB for all quadrants (cell resolution = 1px, so all quads equal)
-        // The quadrant matching happens on the TILE side (DB has per-quadrant data)
-        const tQuadA: [number,number,number,number] = [tA, tA, tA, tA];
-        const tQuadB: [number,number,number,number] = [tB, tB, tB, tB];
-        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB);
+
+        let tQuadA: [number,number,number,number];
+        let tQuadB: [number,number,number,number];
+
+        if (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD) {
+          // EDGE CELL: Compute directional quadrant targets from neighbors
+          // Sobel gx>0 = brighter to the right, gy>0 = brighter below
+          // Use gradient direction to sample "before" and "after" colors from neighbors
+          const col = ci % COLS, row = Math.floor(ci / COLS);
+          const gx = sobelGx[ci], gy = sobelGy[ci];
+          const mag = Math.sqrt(gx * gx + gy * gy);
+
+          if (mag > 0) {
+            // Normalize gradient direction
+            const nx = gx / mag, ny = gy / mag;
+            // Sample neighbor cells in the gradient direction (+ and -)
+            // "plus" = brighter side, "minus" = darker side
+            const plusCol = Math.min(COLS - 1, Math.max(0, Math.round(col + nx)));
+            const plusRow = Math.min(ROWS - 1, Math.max(0, Math.round(row + ny)));
+            const minusCol = Math.min(COLS - 1, Math.max(0, Math.round(col - nx)));
+            const minusRow = Math.min(ROWS - 1, Math.max(0, Math.round(row - ny)));
+            const plusLab = cellLab[plusRow * COLS + plusCol];
+            const minusLab = cellLab[minusRow * COLS + minusCol];
+
+            // Assign quadrants based on gradient direction:
+            // Each quadrant gets the color of the neighbor it faces
+            // Quads: [TL(0), TR(1), BL(2), BR(3)]
+            // dot product of quad center direction with gradient tells which side each quad faces
+            // TL center=(-0.5,-0.5), TR=(+0.5,-0.5), BL=(-0.5,+0.5), BR=(+0.5,+0.5)
+            const quadDirs: [number, number][] = [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]];
+            tQuadA = [0, 0, 0, 0];
+            tQuadB = [0, 0, 0, 0];
+            for (let q = 0; q < 4; q++) {
+              const dot = quadDirs[q][0] * nx + quadDirs[q][1] * ny;
+              // Blend: dot>0 → plus side, dot<0 → minus side, dot≈0 → center color
+              const blend = Math.max(-1, Math.min(1, dot * 2)); // scale for stronger effect
+              const t = (blend + 1) / 2; // 0=minus, 0.5=center, 1=plus
+              tQuadA[q] = minusLab[1] * (1 - t) + plusLab[1] * t;
+              tQuadB[q] = minusLab[2] * (1 - t) + plusLab[2] * t;
+            }
+          } else {
+            tQuadA = [tA, tA, tA, tA];
+            tQuadB = [tB, tB, tB, tB];
+          }
+        } else {
+          // Non-edge cell: all quadrants same as cell center (original behavior)
+          tQuadA = [tA, tA, tA, tA];
+          tQuadB = [tB, tB, tB, tB];
+        }
+
+        // Edge cells: boost W_QUAD 6× so gradient tiles rank higher in candidates
+        // Non-edge cells: default 1.0 (no boost)
+        const eqBoost = (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD) ? 6.0 : 1.0;
+        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB, eqBoost);
         cellCandidates.push(candidates);
         candidates.forEach(c => neededTileIds.add(c.tileId));
         if (ci % 500 === 0) {
