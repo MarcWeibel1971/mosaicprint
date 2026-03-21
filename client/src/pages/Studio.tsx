@@ -176,6 +176,7 @@ export default function Studio() {
   const [sharpness, setSharpness] = useState(80);
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [compareMode, setCompareMode] = useState(false);
+  const [distancePreview, setDistancePreview] = useState(false); // Simulate 2-3m viewing distance
   const [comparePos, setComparePos] = useState(50);
   const [popOutMode, setPopOutMode] = useState(false);
   const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
@@ -4196,9 +4197,22 @@ export default function Studio() {
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomOut className="w-4 h-4" />
                 </button>
-                <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Ansicht zuruecksetzen">
                   <Eye className="w-4 h-4" />
                 </button>
+                {ready && (
+                  <button
+                    onClick={() => setDistancePreview(d => !d)}
+                    className={`p-2.5 rounded-xl border shadow-sm hover:shadow-md transition-all text-xs font-bold ${
+                      distancePreview
+                        ? 'bg-blue-100 border-blue-400 text-blue-700'
+                        : 'bg-white border-gray-200 text-gray-600 hover:text-gray-900'
+                    }`}
+                    title={distancePreview ? 'Fernansicht deaktivieren' : 'Fernansicht: So sieht das Mosaik aus 2-3m Distanz aus'}
+                  >
+                    {distancePreview ? '2-3m ✓' : '2-3m'}
+                  </button>
+                )}
                 {ready && (
                   <>
                     <button onClick={() => handleDownload(false)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Vorschau herunterladen (mit Wasserzeichen)">
@@ -4245,7 +4259,8 @@ export default function Studio() {
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
-                     imageRendering: zoom > 1 ? "pixelated" : "auto",  // pixelated = crisp tiles when zoomed in
+                    imageRendering: zoom > 1 && !distancePreview ? "pixelated" : "auto",
+                    filter: distancePreview ? "blur(2px)" : "none",
                     maxWidth: "none",
                   }}
                 />
@@ -4333,7 +4348,7 @@ export default function Studio() {
 
               {ready && zoom === 1 && (
                 <div className="absolute bottom-3 right-3 text-xs text-white/80 bg-black/40 rounded-lg px-2 py-1 pointer-events-none">
-                  Scroll zum Zoomen . Drag zum Verschieben
+                  {distancePreview ? 'Fernansicht: So sieht das Mosaik aus 2-3m Distanz aus' : 'Scroll zum Zoomen . Drag zum Verschieben'}
                 </div>
               )}
             </div>
@@ -4664,22 +4679,33 @@ export default function Studio() {
                 <div className="mb-5">
                   <p className="text-sm font-bold text-gray-700 mb-3">Druckformat waehlen</p>
                   <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                    {PRINT_FORMATS.map(({ label, price }, idx) => (
-                      <button
-                        key={label}
-                        onClick={() => setSelectedFormat(idx)}
-                        className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
-                          selectedFormat === idx
-                            ? "border-coral-500 bg-coral-50"
-                            : "border-gray-100 hover:border-coral-200"
-                        }`}
-                      >
-                        {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
-                        <div className="text-xs font-bold text-gray-900">{label}</div>
-                        <div className="text-xs text-coral-700 font-semibold">CHF {price}</div>
-                        {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
-                      </button>
-                    ))}
+                    {PRINT_FORMATS.map(({ label, price, widthCm }, idx) => {
+                      const cols = mosaicParamsRef.current?.cols ?? 60;
+                      const tileMm = Math.round((widthCm / cols) * 10); // tile size in mm
+                      // Quality rating: <5mm = tiles too small, 5-7mm = ok, 8-12mm = ideal, >12mm = tiles dominate
+                      const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
+                      const qualityColor = quality === 'ideal' ? 'text-green-600' : quality === 'ok' ? 'text-blue-500' : quality === 'small' ? 'text-amber-600' : 'text-gray-500';
+                      const qualityLabel = quality === 'ideal' ? 'Optimal' : quality === 'ok' ? 'Gut' : quality === 'small' ? 'Kacheln klein' : 'Kacheln gross';
+                      const tooSmall = tileMm < 5; // tiles under 5mm are not individually recognizable
+                      return (
+                        <button
+                          key={label}
+                          onClick={() => setSelectedFormat(idx)}
+                          className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
+                            selectedFormat === idx
+                              ? "border-coral-500 bg-coral-50"
+                              : tooSmall ? "border-amber-200 hover:border-coral-200 bg-amber-50/30" : "border-gray-100 hover:border-coral-200"
+                          }`}
+                        >
+                          {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
+                          <div className="text-xs font-bold text-gray-900">{label}</div>
+                          <div className="text-[9px] text-gray-400 mt-0.5">Kachel: {tileMm}mm</div>
+                          <div className={`text-[9px] font-semibold mt-0.5 ${qualityColor}`}>{qualityLabel}</div>
+                          <div className="text-xs text-coral-700 font-semibold mt-0.5">CHF {price}</div>
+                          {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -4718,35 +4744,50 @@ export default function Studio() {
                   </div>
                 </div>
 
-                {/* Printolino-Info-Box */}
+                {/* Printolino-Info-Box with quality analysis */}
                 {(() => {
                   const fmt = PRINT_FORMATS[selectedFormat];
                   const cols = mosaicParamsRef.current?.cols ?? 60;
                   const rows = mosaicParamsRef.current?.rows ?? 80;
                   const PX_PER_CM = 300 / 2.54;
                   const tileSizeCm = fmt.widthCm / cols;
+                  const tileMm = Math.round(tileSizeCm * 10);
                   const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
                   const printTilePx = Math.min(600, Math.max(200, naturalTilePx2));
                   const outW = cols * printTilePx;
                   const outH = rows * printTilePx;
                   const posterW = (cols * tileSizeCm).toFixed(0);
                   const posterH = (rows * tileSizeCm).toFixed(0);
+                  // Quality assessment
+                  const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
+                  // Recommend optimal tile count for this format (target: 8-10mm tiles)
+                  const recommendedCols = Math.round(fmt.widthCm / 0.9); // ~9mm tiles
                   return (
-                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 text-xs text-blue-800">
+                    <div className={`rounded-xl p-3 mb-4 text-xs ${quality === 'small' ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
                       <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
                       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                        <span className="text-blue-600">Poster-Groesse:</span>
+                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Poster-Groesse:</span>
                         <span className="font-semibold">{posterW} × {posterH} cm</span>
-                        <span className="text-blue-600">Kachel-Groesse:</span>
-                        <span className="font-semibold">{tileSizeCm.toFixed(1)} cm × {tileSizeCm.toFixed(1)} cm</span>
-                        <span className="text-blue-600">Kachel-Pixel:</span>
-                        <span className="font-semibold">{printTilePx} px ({fmt.dpi} dpi)</span>
-                        <span className="text-blue-600">Ausgabe-Pixel:</span>
-                        <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
-                        <span className="text-blue-600">Anzahl Kacheln:</span>
+                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Kachel-Groesse:</span>
+                        <span className="font-semibold">{tileMm}mm × {tileMm}mm {quality === 'ideal' ? '✓' : quality === 'small' ? '⚠' : ''}</span>
+                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Anzahl Kacheln:</span>
                         <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
+                        <span className={quality === 'small' ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
+                        <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
                       </div>
-                      <p className="mt-1.5 text-blue-600">Optimiert fuer Printolino {fmt.label} Druck.</p>
+                      {quality === 'small' && (
+                        <p className="mt-2 text-amber-700 font-medium">
+                          Hinweis: Bei {tileMm}mm sind die einzelnen Fotos kaum erkennbar.
+                          Fuer {fmt.label} empfehlen wir ca. {recommendedCols} Kacheln (≈9mm pro Kachel)
+                          fuer die beste Balance zwischen Fernwirkung und Kachel-Sichtbarkeit.
+                        </p>
+                      )}
+                      {quality === 'ideal' && (
+                        <p className="mt-1.5 text-green-700 font-medium">Optimale Kachelgroesse: Fernwirkung und Einzelfotos gut erkennbar.</p>
+                      )}
+                      {quality === 'ok' && (
+                        <p className="mt-1.5 text-blue-600">Gute Qualitaet fuer Printolino {fmt.label} Druck.</p>
+                      )}
                     </div>
                   );
                 })()}
