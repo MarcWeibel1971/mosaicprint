@@ -1777,8 +1777,8 @@ export const appRouter = router({
                 await Promise.all(batch.map(async (photo) => {
                   try {
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
-                    if (lab && lab.blurScore < 80) { return; }
+                    // Blur-Filter: very lenient (5) to allow smooth/gradient tiles
+                    if (lab && lab.blurScore < 5) { return; }
                     const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                       tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -1961,6 +1961,26 @@ export const appRouter = router({
                   log(`🔄 Pexels rate-limited → Pixabay fallback for "${task.query}"`);
                   photos = await fetchPixabay(task.query, 200, process.env.PIXABAY_API_KEY);
                 }
+                // Also try Unsplash for more variety if available and Pexels returned few results
+                if (photos.length < 10 && process.env.UNSPLASH_ACCESS_KEY && !unsplashRateLimited) {
+                  try {
+                    const uRes = await fetch(
+                      `https://api.unsplash.com/search/photos?query=${encodeURIComponent(task.query)}&per_page=30&orientation=squarish`,
+                      { headers: { Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`, Accept: 'application/json' } }
+                    );
+                    if (uRes.ok) {
+                      const uData = await uRes.json() as any;
+                      const uPhotos = (uData.results ?? []).map((p: any) => ({
+                        sourceUrl: p.urls.regular, tile128Url: p.urls.thumb,
+                        downloadLocation: p.links?.download_location ?? null,
+                      }));
+                      photos.push(...uPhotos);
+                      if (uPhotos.length > 0) log(`📸 +${uPhotos.length} Unsplash Fotos für "${task.query}"`);
+                    } else if (uRes.status === 429 || uRes.status === 403) {
+                      unsplashRateLimited = true;
+                    }
+                  } catch { /* ignore Unsplash errors */ }
+                }
               } else if (input.sourceId === "pixabay") {
                 const res = await fetch(
                   `https://pixabay.com/api/?key=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(task.query)}&per_page=${perPage}&image_type=photo&safesearch=true&orientation=horizontal`,
@@ -2065,11 +2085,18 @@ export const appRouter = router({
                       return; // discard – too vivid / noisy / watermarked
                     }
                     const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                    // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
-                    if (lab && lab.blurScore < 80) { batchRejected++; return; }
-                    // Mosaic-Score-Filter: nur Tiles mit mosaicScore >= 0.3 importieren
-                    // (verhindert zu einfarbige oder zu chaotische Tiles)
-                    if (lab && typeof lab.mosaicScore === 'number' && lab.mosaicScore < 0.3) { batchRejected++; return; }
+                    // Subject-aware quality thresholds:
+                    // Calm/smooth/gradient tiles are INTENTIONALLY low-texture — don't reject them for it
+                    const isCalmTarget = ['calm_nature', 'calm_monochrome', 'abstract_smooth', 'skin_tone',
+                      'gradient_edge', 'bokeh_gradient', 'pure_sky', 'fog_mist', 'snow_ice',
+                      'portrait_nature', 'water_surface'].includes(task.subject);
+                    // Blur-Filter: calm tiles can be very smooth (blurScore 5-50 is normal for gradients)
+                    const blurThreshold = isCalmTarget ? 5 : 30;
+                    if (lab && lab.blurScore < blurThreshold) { batchRejected++; return; }
+                    // Mosaic-Score: calm neutral tiles naturally score low (no edges, no chroma)
+                    // Only reject truly degenerate tiles (solid single-color with no info)
+                    const mosaicThreshold = isCalmTarget ? 0.02 : 0.15;
+                    if (lab && typeof lab.mosaicScore === 'number' && lab.mosaicScore < mosaicThreshold) { batchRejected++; return; }
                     // R2 upload is handled automatically by insertMosaicImage (fire-and-forget)
                     const result = await db.insertMosaicImage({ ...photo,
                       avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
@@ -2750,8 +2777,8 @@ export const appRouter = router({
                 if (!lab) {
                   console.warn(`[targetedImport] computeLabFull null for ${labUrl.slice(0,100)}`);
                 }
-                // Blur-Filter: skip blurry tiles (Laplacian Variance < 80)
-                if (lab && lab.blurScore < 80) { rejected++; return; }
+                // Blur-Filter: very lenient to allow smooth/gradient tiles through
+                if (lab && lab.blurScore < 5) { rejected++; return; }
                 const result = await db.insertMosaicImage({ ...photo,
                   avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                   tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
@@ -3391,8 +3418,11 @@ export const appRouter = router({
                           const quality = await checkTileQuality(photo.tile128Url ?? photo.sourceUrl, task.subject);
                           if (quality.rejected) return;
                           const lab = await computeLabFull(photo.tile128Url ?? photo.sourceUrl);
-                          // Blur-Filter: skip blurry tiles
-                          if (lab && lab.blurScore < 80) { return; }
+                          // Blur-Filter: lenient to allow smooth/gradient tiles
+                          const isCalmSubj = ['calm_nature', 'calm_monochrome', 'abstract_smooth', 'skin_tone',
+                            'gradient_edge', 'bokeh_gradient', 'pure_sky', 'fog_mist', 'snow_ice',
+                            'portrait_nature', 'water_surface'].includes(task.subject);
+                          if (lab && lab.blurScore < (isCalmSubj ? 5 : 30)) { return; }
                           const ins = await db.insertMosaicImage({ ...photo,
                             avgL: lab?.L ?? 50, avgA: lab?.a ?? 0, avgB: lab?.b ?? 0,
                             tlL: lab?.tlL, tlA: lab?.tlA, tlB: lab?.tlB,
