@@ -2375,23 +2375,219 @@ app.get('/api/admin/test-flickr-import', async (_req, res) => {
   }
 });
 
+// ── Authentication API ──────────────────────────────────────────────────────
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import QRCode from "qrcode";
+
+const JWT_SECRET = process.env.JWT_SECRET || "mosaicprint-dev-secret-change-in-production";
+const JWT_EXPIRES_IN = "30d";
+
+interface AuthUser { id: number; email: string; display_name: string | null }
+
+function extractUser(req: express.Request): AuthUser | null {
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) return null;
+  try {
+    const payload = jwt.verify(header.slice(7), JWT_SECRET) as any;
+    return { id: payload.id, email: payload.email, display_name: payload.display_name };
+  } catch { return null; }
+}
+
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const user = extractUser(req);
+  if (!user) return res.status(401).json({ ok: false, error: "Nicht eingeloggt" });
+  (req as any).user = user;
+  next();
+}
+
+// Register
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { email, password, displayName } = req.body;
+    if (!email || !password) return res.status(400).json({ ok: false, error: "E-Mail und Passwort erforderlich" });
+    if (password.length < 6) return res.status(400).json({ ok: false, error: "Passwort muss mindestens 6 Zeichen lang sein" });
+    // Check if email exists
+    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email.toLowerCase().trim()]);
+    if (existing.rows.length > 0) return res.status(409).json({ ok: false, error: "E-Mail bereits registriert" });
+    const passwordHash = await bcrypt.hash(password, 12);
+    const result = await pool.query(
+      "INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, display_name, created_at",
+      [email.toLowerCase().trim(), passwordHash, displayName || null]
+    );
+    const user = result.rows[0];
+    const token = jwt.sign({ id: user.id, email: user.email, display_name: user.display_name }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    res.json({ ok: true, user: { id: user.id, email: user.email, displayName: user.display_name }, token });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Login
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ ok: false, error: "E-Mail und Passwort erforderlich" });
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email.toLowerCase().trim()]);
+    if (result.rows.length === 0) return res.status(401).json({ ok: false, error: "Ungueltige Anmeldedaten" });
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(401).json({ ok: false, error: "Ungueltige Anmeldedaten" });
+    const token = jwt.sign({ id: user.id, email: user.email, display_name: user.display_name }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    res.json({ ok: true, user: { id: user.id, email: user.email, displayName: user.display_name }, token });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Get current user
+app.get("/api/auth/me", (req, res) => {
+  const user = extractUser(req);
+  if (!user) return res.status(401).json({ ok: false, error: "Nicht eingeloggt" });
+  res.json({ ok: true, user: { id: user.id, email: user.email, displayName: user.display_name } });
+});
+
+// ── Projects API (auth required) ───────────────────────────────────────────
+
+// Save project
+app.post("/api/projects", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const { name, data, thumbnailUrl } = req.body;
+    if (!data) return res.status(400).json({ ok: false, error: "Projektdaten fehlen" });
+    const result = await pool.query(
+      "INSERT INTO projects (user_id, name, data, thumbnail_url) VALUES ($1, $2, $3, $4) RETURNING id, name, thumbnail_url, created_at",
+      [user.id, name || "Mein Mosaik", data, thumbnailUrl || null]
+    );
+    res.json({ ok: true, project: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// List user's projects
+app.get("/api/projects", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const result = await pool.query(
+      "SELECT id, name, thumbnail_url, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
+      [user.id]
+    );
+    res.json({ ok: true, projects: result.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Get single project
+app.get("/api/projects/:id", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const result = await pool.query(
+      "SELECT * FROM projects WHERE id = $1 AND user_id = $2",
+      [req.params.id, user.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Projekt nicht gefunden" });
+    res.json({ ok: true, project: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Update project
+app.put("/api/projects/:id", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const { name, data, thumbnailUrl } = req.body;
+    const result = await pool.query(
+      "UPDATE projects SET name = COALESCE($1, name), data = COALESCE($2, data), thumbnail_url = COALESCE($3, thumbnail_url), updated_at = NOW() WHERE id = $4 AND user_id = $5 RETURNING id, name, thumbnail_url, updated_at",
+      [name, data, thumbnailUrl, req.params.id, user.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Projekt nicht gefunden" });
+    res.json({ ok: true, project: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Delete project
+app.delete("/api/projects/:id", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    await pool.query("DELETE FROM projects WHERE id = $1 AND user_id = $2", [req.params.id, user.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── QR Code API ────────────────────────────────────────────────────────────
+
+app.get("/api/events/:slug/qr", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const eventRes = await pool.query("SELECT id, slug, name FROM mosaic_events WHERE slug = $1", [req.params.slug]);
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
+    // Build full URL: use X-Forwarded-Host or Host header
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000";
+    const eventUrl = `${proto}://${host}/event/${req.params.slug}`;
+    const format = req.query.format === "svg" ? "svg" : "png";
+    if (format === "svg") {
+      const svg = await QRCode.toString(eventUrl, { type: "svg", width: 400, margin: 2 });
+      res.setHeader("Content-Type", "image/svg+xml");
+      res.send(svg);
+    } else {
+      const pngBuf = await QRCode.toBuffer(eventUrl, { width: 400, margin: 2, type: "png" });
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Content-Disposition", `inline; filename="qr-${req.params.slug}.png"`);
+      res.send(pngBuf);
+    }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// QR code as data URL (for inline display)
+app.get("/api/events/:slug/qr-data", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const eventRes = await pool.query("SELECT id, slug FROM mosaic_events WHERE slug = $1", [req.params.slug]);
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000";
+    const eventUrl = `${proto}://${host}/event/${req.params.slug}`;
+    const dataUrl = await QRCode.toDataURL(eventUrl, { width: 400, margin: 2 });
+    res.json({ ok: true, qrDataUrl: dataUrl, eventUrl });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ── Event Mosaic API ────────────────────────────────────────────────────────
 
-// Create event (admin)
+// Create event (admin or authenticated user)
 app.post("/api/events", async (req, res) => {
+  const user = extractUser(req); // optional auth
   try {
     const pool = db.getPool();
     const { name, targetImageBase64, maxPhotos } = req.body;
     if (!name) return res.status(400).json({ ok: false, error: "Name required" });
-    // Generate short slug
     const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 30) + '-' + Math.random().toString(36).slice(2, 6);
     let targetImageUrl: string | null = null;
     if (targetImageBase64) {
       targetImageUrl = `data:image/jpeg;base64,${targetImageBase64}`;
     }
     const result = await pool.query(
-      `INSERT INTO mosaic_events (slug, name, target_image_url, max_photos) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [slug, name, targetImageUrl, maxPhotos ?? 500]
+      `INSERT INTO mosaic_events (slug, name, target_image_url, max_photos, user_id) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [slug, name, targetImageUrl, maxPhotos ?? 500, user?.id ?? null]
     );
     res.json({ ok: true, event: result.rows[0] });
   } catch (e) {

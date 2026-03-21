@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Component, type ReactNode } from "react";
+import { AuthProvider } from "./contexts/AuthContext";
 import { Navbar } from "./components/Navbar";
 import { Footer } from "./components/Footer";
 import Landing from "./pages/Landing";
@@ -10,6 +11,9 @@ import Admin from "./pages/Admin";
 import TileUpload from "./pages/TileUpload";
 import EventPage from "./pages/EventPage";
 import Events from "./pages/Events";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Projects from "./pages/Projects";
 
 // Error boundary to prevent white screen crashes
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
@@ -45,25 +49,30 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen flex flex-col bg-white">
-        <Navbar />
-        <main className="flex-1">
-          <ErrorBoundary>
-          <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/studio" element={<Studio />} />
-            <Route path="/preise" element={<Pricing />} />
-            <Route path="/so-funktionierts" element={<HowItWorks />} />
-            <Route path="/admin" element={<Admin />} />
-            <Route path="/tile-upload" element={<TileUpload />} />
-            <Route path="/events" element={<Events />} />
-            <Route path="/event/:slug" element={<EventPage />} />
-            <Route path="*" element={<Landing />} />
-          </Routes>
-          </ErrorBoundary>
-        </main>
-        <Footer />
-      </div>
+      <AuthProvider>
+        <div className="min-h-screen flex flex-col bg-white">
+          <Navbar />
+          <main className="flex-1">
+            <ErrorBoundary>
+            <Routes>
+              <Route path="/" element={<Landing />} />
+              <Route path="/studio" element={<Studio />} />
+              <Route path="/preise" element={<Pricing />} />
+              <Route path="/so-funktionierts" element={<HowItWorks />} />
+              <Route path="/admin" element={<Admin />} />
+              <Route path="/tile-upload" element={<TileUpload />} />
+              <Route path="/events" element={<Events />} />
+              <Route path="/event/:slug" element={<EventPage />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/register" element={<Register />} />
+              <Route path="/projekte" element={<Projects />} />
+              <Route path="*" element={<Landing />} />
+            </Routes>
+            </ErrorBoundary>
+          </main>
+          <Footer />
+        </div>
+      </AuthProvider>
     </BrowserRouter>
   );
 }
