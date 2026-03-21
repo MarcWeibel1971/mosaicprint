@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { Calendar, Users, Camera, RefreshCw, QrCode, Plus, Trash2, Link as LinkIcon, Image as ImageIcon, Download } from 'lucide-react'
+import { Calendar, Users, Camera, RefreshCw, QrCode, Plus, Trash2, Link as LinkIcon, Image as ImageIcon, Download, Mail, ChevronDown, ChevronUp, Send } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface EventItem {
@@ -25,6 +25,9 @@ export default function Events() {
   const [eventCreating, setEventCreating] = useState(false)
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null)
   const [qrEvent, setQrEvent] = useState<{ slug: string; qrDataUrl: string; eventUrl: string } | null>(null)
+  const [expandedEvent, setExpandedEvent] = useState<string | null>(null)
+  const [participants, setParticipants] = useState<Record<string, Array<{ id: number; name: string; email: string; created_at: string }>>>({})
+  const [sendingMosaic, setSendingMosaic] = useState(false)
 
   const fetchEvents = useCallback(() => {
     fetch('/api/events')
@@ -86,6 +89,23 @@ export default function Events() {
         setQrEvent({ slug, qrDataUrl: data.qrDataUrl, eventUrl: data.eventUrl })
       }
     } catch { /* ignore */ }
+  }
+
+  const toggleParticipants = async (slug: string) => {
+    if (expandedEvent === slug) {
+      setExpandedEvent(null)
+      return
+    }
+    setExpandedEvent(slug)
+    if (!participants[slug]) {
+      try {
+        const res = await fetch(`/api/events/${slug}/participants`, { headers: authHeaders() })
+        const data = await res.json()
+        if (data.ok) {
+          setParticipants(prev => ({ ...prev, [slug]: data.participants }))
+        }
+      } catch { /* ignore */ }
+    }
   }
 
   const activeEvents = events.filter(e => e.status === 'active')
@@ -234,7 +254,66 @@ export default function Events() {
                       <Trash2 className="w-3.5 h-3.5" />
                       Löschen
                     </button>
+                    <button
+                      onClick={() => toggleParticipants(event.slug)}
+                      className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors ml-auto"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      Teilnehmer
+                      {expandedEvent === event.slug ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                    </button>
                   </div>
+
+                  {/* Participants panel */}
+                  {expandedEvent === event.slug && (
+                    <div className="mt-4 pt-4 border-t border-gray-100">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+                          <Users className="w-4 h-4 text-amber-500" />
+                          Möchten das Mosaik erhalten
+                        </h4>
+                        {participants[event.slug]?.length > 0 && (
+                          <button
+                            onClick={() => {
+                              setMessage({ text: 'Mosaik-Versand wird vorbereitet... (Feature kommt bald)', type: 'success' })
+                            }}
+                            disabled={sendingMosaic}
+                            className="flex items-center gap-1.5 bg-coral-500 hover:bg-coral-600 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            Mosaik an alle senden
+                          </button>
+                        )}
+                      </div>
+                      {!participants[event.slug] ? (
+                        <div className="flex justify-center py-4">
+                          <RefreshCw className="w-4 h-4 text-gray-300 animate-spin" />
+                        </div>
+                      ) : participants[event.slug].length === 0 ? (
+                        <p className="text-sm text-gray-400 py-2">Noch keine Teilnehmer registriert.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {participants[event.slug].map(p => (
+                            <div key={p.id} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2">
+                              <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-700 text-xs font-bold">
+                                {p.name.charAt(0).toUpperCase()}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-gray-800">{p.name}</p>
+                                <p className="text-xs text-gray-500 truncate">{p.email}</p>
+                              </div>
+                              <span className="text-xs text-gray-400">
+                                {new Date(p.created_at).toLocaleDateString('de-CH')}
+                              </span>
+                            </div>
+                          ))}
+                          <p className="text-xs text-gray-400 pt-1">
+                            {participants[event.slug].length} Teilnehmer registriert
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

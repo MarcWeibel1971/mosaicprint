@@ -2706,6 +2706,45 @@ app.delete("/api/events/:slug", async (req, res) => {
   }
 });
 
+// ── Event participants (mosaic opt-in) ─────────────────────────────────────
+app.post("/api/events/:slug/participants", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { name, email } = req.body;
+    if (!name?.trim() || !email?.trim()) {
+      return res.status(400).json({ ok: false, error: "Name und E-Mail sind erforderlich" });
+    }
+    const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    await pool.query(
+      `INSERT INTO event_participants (event_id, name, email) VALUES ($1, $2, $3) ON CONFLICT (event_id, email) DO UPDATE SET name = $2`,
+      [eventRes.rows[0].id, name.trim(), email.trim().toLowerCase()]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/api/events/:slug/participants", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    const result = await pool.query(
+      `SELECT id, name, email, created_at FROM event_participants WHERE event_id = $1 ORDER BY created_at`,
+      [eventRes.rows[0].id]
+    );
+    res.json({ ok: true, participants: result.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");

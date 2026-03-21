@@ -359,7 +359,20 @@ export async function ensureSchema(): Promise<void> {
   // Add user_id to events (nullable for backwards compatibility)
   await pool.query(`ALTER TABLE mosaic_events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`);
 
-  console.log("[DB] Schema ensured (v11 with auth & projects)");
+  // ── Event participants (guests who want the finished mosaic) ─────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_participants (
+      id SERIAL PRIMARY KEY,
+      event_id INT NOT NULL REFERENCES mosaic_events(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(event_id, email)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_event_participants_event_id ON event_participants (event_id)`);
+
+  console.log("[DB] Schema ensured (v12 with event participants)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
