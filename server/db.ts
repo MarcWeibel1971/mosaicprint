@@ -304,7 +304,33 @@ export async function ensureSchema(): Promise<void> {
   // v9: blur_score – Laplacian Variance for blur detection (< 80 = blurry)
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS blur_score REAL DEFAULT NULL`);
 
-  console.log("[DB] Schema ensured (v9 with blur_score)");
+  // ── Events table (interactive mosaic for events) ────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mosaic_events (
+      id SERIAL PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      target_image_url TEXT,
+      status TEXT DEFAULT 'active',
+      max_photos INT DEFAULT 500,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS event_photos (
+      id SERIAL PRIMARY KEY,
+      event_id INT REFERENCES mosaic_events(id) ON DELETE CASCADE,
+      photo_url TEXT NOT NULL,
+      thumbnail_url TEXT,
+      guest_name TEXT,
+      avg_l REAL, avg_a REAL, avg_b REAL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_event_photos_event_id ON event_photos (event_id)`);
+
+  console.log("[DB] Schema ensured (v10 with events)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
