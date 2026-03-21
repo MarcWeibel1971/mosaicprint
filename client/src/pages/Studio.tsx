@@ -3652,13 +3652,19 @@ export default function Studio() {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const digFmt = DIGITAL_FORMATS[selectedDigitalFormat];
     const { cols, rows } = mosaicParamsRef.current;
-    const TILE_PX = digFmt.tilePx;
+    // Replicate server-side clamping (MAX_DIM=16000, tilePx 64-400) so progress shows real dimensions
+    const SERVER_MAX_DIM = 16000;
+    let TILE_PX = Math.min(Math.max(digFmt.tilePx, 64), 400);
+    if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
+      TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
+      TILE_PX = Math.max(32, TILE_PX);
+    }
     const outW = cols * TILE_PX;
     const outH = rows * TILE_PX;
 
     try {
       setLoading(true);
-      setProgressMsg(`Rendere ${digFmt.label} (${outW}x${outH}px)...`);
+      setProgressMsg(`Rendere ${digFmt.label} (${outW.toLocaleString()}x${outH.toLocaleString()}px)...`);
       setProgress(5);
 
       const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -4164,15 +4170,6 @@ export default function Studio() {
                     <button onClick={() => handleDownload(false)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Vorschau herunterladen (mit Wasserzeichen)">
                       <Download className="w-4 h-4" />
                     </button>
-                    {isAdminMode && (
-                      <button
-                        onClick={() => handleDownload(true)}
-                        className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 shadow-sm hover:shadow-md transition-all text-amber-700 hover:text-amber-900"
-                        title="Admin: Druckqualitaet herunterladen (ohne Wasserzeichen, max 600px Tiles)"
-                      >
-                        <Printer className="w-4 h-4" />
-                      </button>
-                    )}
                     <button onClick={() => { if (userPhotoImg) { setReady(false); setLoading(true); setProgress(0); renderMosaic(userPhotoImg); } }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Neu generieren">
                       <RefreshCw className="w-4 h-4" />
                     </button>
