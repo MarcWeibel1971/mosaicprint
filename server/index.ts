@@ -2706,6 +2706,233 @@ app.delete("/api/events/:slug", async (req, res) => {
   }
 });
 
+// ── Event participants (mosaic opt-in) ─────────────────────────────────────
+app.post("/api/events/:slug/participants", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { name, email } = req.body;
+    if (!name?.trim() || !email?.trim()) {
+      return res.status(400).json({ ok: false, error: "Name und E-Mail sind erforderlich" });
+    }
+    const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    await pool.query(
+      `INSERT INTO event_participants (event_id, name, email) VALUES ($1, $2, $3) ON CONFLICT (event_id, email) DO UPDATE SET name = $2`,
+      [eventRes.rows[0].id, name.trim(), email.trim().toLowerCase()]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.get("/api/events/:slug/participants", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    const result = await pool.query(
+      `SELECT id, name, email, created_at FROM event_participants WHERE event_id = $1 ORDER BY created_at`,
+      [eventRes.rows[0].id]
+    );
+    res.json({ ok: true, participants: result.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Update event target image ──────────────────────────────────────────────
+app.put("/api/events/:slug/target-image", express.json({ limit: '20mb' }), async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { targetImageBase64 } = req.body;
+    if (!targetImageBase64) {
+      return res.status(400).json({ ok: false, error: "Kein Bild angegeben" });
+    }
+    const targetImageUrl = `data:image/jpeg;base64,${targetImageBase64}`;
+    const result = await pool.query(
+      `UPDATE mosaic_events SET target_image_url = $1, updated_at = NOW() WHERE slug = $2 RETURNING *`,
+      [targetImageUrl, req.params.slug]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    res.json({ ok: true, event: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Send mosaic to all participants ────────────────────────────────────────
+app.post("/api/events/:slug/send-mosaic", async (req, res) => {
+  try {
+    const pool = db.getPool();
+
+    // Get event
+    const eventRes = await pool.query(
+      `SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count FROM mosaic_events e WHERE e.slug = $1`,
+      [req.params.slug]
+    );
+    if (eventRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    }
+    const event = eventRes.rows[0];
+
+    // Get participants
+    const partRes = await pool.query(
+      `SELECT name, email FROM event_participants WHERE event_id = $1`, [event.id]
+    );
+    if (partRes.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Keine Teilnehmer registriert" });
+    }
+
+    // Get photos with LAB colors
+    const photosRes = await pool.query(
+      `SELECT thumbnail_url, avg_l, avg_a, avg_b FROM event_photos WHERE event_id = $1 ORDER BY created_at`, [event.id]
+    );
+    if (photosRes.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Keine Fotos vorhanden" });
+    }
+
+    const photos = photosRes.rows as Array<{ thumbnail_url: string; avg_l: number; avg_a: number; avg_b: number }>;
+    const cols = Math.ceil(Math.sqrt(photos.length * 1.5));
+    const rows = Math.ceil(photos.length / cols);
+    const totalCells = cols * rows;
+    const tilePx = 128;
+
+    // Smart matching: if target image exists, match photos to target regions by LAB color
+    let tiles: Array<{ url: string; col: number; row: number }>;
+    const { rgbToLab, deltaE2000 } = await import("./colorUtils.js");
+
+    const hasTarget = event.target_image_url?.startsWith('data:');
+    if (hasTarget) {
+      // Extract target image region colors using sharp
+      const targetBase64 = event.target_image_url.split(',')[1];
+      const targetBuffer = Buffer.from(targetBase64, 'base64');
+      const targetResized = await sharp(targetBuffer)
+        .resize(cols, rows, { fit: 'fill' })
+        .raw()
+        .toBuffer();
+
+      // Build LAB color per cell from target image
+      const cellColors: Array<{ l: number; a: number; b: number; col: number; row: number }> = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const idx = (r * cols + c) * 3;
+          const [l, a, b] = rgbToLab(targetResized[idx], targetResized[idx + 1], targetResized[idx + 2]);
+          cellColors.push({ l, a, b, col: c, row: r });
+        }
+      }
+
+      // Greedy matching: assign best photo to each cell (CIEDE2000)
+      const used = new Set<number>();
+      const assigned: Array<{ url: string; col: number; row: number }> = [];
+
+      // Process cells in random order to avoid bias
+      const shuffled = [...cellColors].sort(() => Math.random() - 0.5);
+
+      for (const cell of shuffled) {
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < photos.length; i++) {
+          if (used.has(i) && photos.length >= totalCells) continue; // avoid reuse if enough photos
+          const p = photos[i];
+          const dist = deltaE2000(cell.l, cell.a, cell.b, p.avg_l, p.avg_a, p.avg_b);
+          // Penalty for reuse
+          const reusePenalty = used.has(i) ? 20 : 0;
+          if (dist + reusePenalty < bestDist) {
+            bestDist = dist + reusePenalty;
+            bestIdx = i;
+          }
+        }
+        used.add(bestIdx);
+        assigned.push({ url: photos[bestIdx].thumbnail_url, col: cell.col, row: cell.row });
+      }
+      tiles = assigned;
+    } else {
+      // No target image: simple grid layout
+      tiles = photos.slice(0, totalCells).map((p, i) => ({
+        url: p.thumbnail_url,
+        col: i % cols,
+        row: Math.floor(i / cols),
+      }));
+    }
+
+    // Render mosaic
+    const { renderMosaicOnServer } = await import("./mosaicExport.js");
+    const mosaicBuffer = await renderMosaicOnServer({
+      tiles, cols, rows, tilePx,
+      overlayBase64: hasTarget ? event.target_image_url.split(',')[1] : undefined,
+      overlayAlpha: hasTarget ? 0.15 : 0,
+      sharpen: true,
+    });
+
+    // Check SMTP config
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const smtpFrom = process.env.SMTP_FROM || smtpUser;
+
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      return res.status(500).json({ ok: false, error: "SMTP nicht konfiguriert. Bitte SMTP_HOST, SMTP_USER, SMTP_PASS setzen." });
+    }
+
+    // Create transporter
+    const nodemailer = await import("nodemailer");
+    const transporter = nodemailer.default.createTransport({
+      host: smtpHost,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+
+    // Send to all participants
+    const results: { email: string; ok: boolean; error?: string }[] = [];
+    for (const participant of partRes.rows) {
+      try {
+        await transporter.sendMail({
+          from: `MosaicPrint <${smtpFrom}>`,
+          to: participant.email,
+          subject: `Dein Mosaik von "${event.name}" ist fertig!`,
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <h1 style="color: #1a1a1a; font-size: 24px;">Hallo ${participant.name}!</h1>
+              <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                Das Mosaik vom Event <strong>"${event.name}"</strong> ist fertig!
+                Es wurde aus <strong>${photos.length} Fotos</strong> aller Gäste zusammengesetzt.
+              </p>
+              <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                Das fertige Mosaik findest du im Anhang.
+              </p>
+              <p style="color: #999; font-size: 12px; margin-top: 30px;">
+                Erstellt mit MosaicPrint — Dein Foto als Kunstwerk
+              </p>
+            </div>
+          `,
+          attachments: [{
+            filename: `mosaik-${event.slug}.png`,
+            content: mosaicBuffer,
+            contentType: 'image/png',
+          }],
+        });
+        results.push({ email: participant.email, ok: true });
+      } catch (err) {
+        results.push({ email: participant.email, ok: false, error: String(err) });
+      }
+    }
+
+    const sent = results.filter(r => r.ok).length;
+    const failed = results.filter(r => !r.ok).length;
+    res.json({ ok: true, sent, failed, total: results.length, details: results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");
