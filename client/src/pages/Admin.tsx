@@ -679,6 +679,15 @@ export default function Admin() {
   const [analysisImportRunningMain, setAnalysisImportRunningMain] = useState(false)
   const [analysisImportSourceMain, setAnalysisImportSourceMain] = useState<'pexels' | 'unsplash' | 'pixabay'>('pexels')
   const [recsExpanded, setRecsExpanded] = useState(false)
+  // Excellent Keyword Import
+  const [excellentKeywords, setExcellentKeywords] = useState<Array<{keyword: string; count: number; avgScore: number; avgChroma: number}>>([])
+  const [excellentTotal, setExcellentTotal] = useState(0)
+  const [excellentLoading, setExcellentLoading] = useState(false)
+  const [excellentSelected, setExcellentSelected] = useState<Set<string>>(new Set())
+  const [excellentImportSource, setExcellentImportSource] = useState<'pexels' | 'unsplash' | 'pixabay' | 'flickr'>('flickr')
+  const [excellentImportCount, setExcellentImportCount] = useState(50)
+  const [excellentImportJob, setExcellentImportJob] = useState<SmartImportJob | null>(null)
+  const [excellentImportRunning, setExcellentImportRunning] = useState(false)
   // Mirror Tiles
   const [mirrorBatch, setMirrorBatch] = useState(500)
   const [mirrorResult, setMirrorResult] = useState<string>('')
@@ -864,12 +873,61 @@ export default function Admin() {
     ))
   }
 
+  // ── Excellent Keywords: fetch & import ──
+  const fetchExcellentKeywords = useCallback(async () => {
+    setExcellentLoading(true)
+    try {
+      const res = await fetch('/api/trpc/getExcellentKeywords?input=' + encodeURIComponent(JSON.stringify({ limit: 50, minCount: 2 })))
+      const data = await res.json()
+      const result = data?.result?.data ?? data
+      setExcellentKeywords(result.keywords ?? [])
+      setExcellentTotal(result.totalExcellent ?? 0)
+      // Auto-select top keywords
+      setExcellentSelected(new Set((result.keywords ?? []).slice(0, 10).map((k: any) => k.keyword)))
+    } catch { /* ignore */ }
+    setExcellentLoading(false)
+  }, [])
+
+  const startExcellentImport = async () => {
+    if (excellentImportRunning || excellentSelected.size === 0) return
+    const keywords = Array.from(excellentSelected)
+    setExcellentImportRunning(true)
+    setExcellentImportJob({ running: true, log: [`🌟 Starte Import: ${keywords.length} Exzellent-Keywords via ${excellentImportSource}...`], imported: 0, total: keywords.length * excellentImportCount })
+    try {
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: excellentImportSource, count: keywords.length * excellentImportCount, keywords, jobLabel: `Exzellent-Keywords (${keywords.length})` }),
+      })
+      // Poll status
+      const pollInterval = setInterval(async () => {
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: excellentImportSource, isAnalysis: true }))
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
+          const data = await res.json()
+          const job = data?.result?.data ?? data
+          setExcellentImportJob(prev => ({ ...prev, ...job, log: job.log ?? prev?.log ?? [] }))
+          if (!job.running) {
+            clearInterval(pollInterval)
+            setExcellentImportRunning(false)
+            setMessage({ text: `✅ Exzellent-Import fertig: ${job.imported ?? 0} neue Bilder`, type: 'success' })
+            fetchStats()
+          }
+        } catch { /* ignore */ }
+      }, 3000)
+    } catch {
+      setExcellentImportRunning(false)
+      setExcellentImportJob(prev => prev ? { ...prev, running: false, error: 'Fehler beim Starten' } : null)
+    }
+  }
+
   // fetchStats is declared above (before startAnalysisImportMain) to avoid TDZ
   useEffect(() => { fetchStats() }, [fetchStats])
   useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
-  // Sync lastAnalysis when switching to import tab (in case Quality tab updated it)
+  // Sync lastAnalysis and fetch excellent keywords when switching to import tab
   useEffect(() => {
     if (activeTab === 'import') {
+      fetchExcellentKeywords()
       try {
         const s = localStorage.getItem('mosaicprint_last_analysis')
         if (s) setLastAnalysis(JSON.parse(s))
@@ -1449,6 +1507,136 @@ export default function Admin() {
                 )}
               </div>
             )}
+
+            {/* ── Exzellent-Keywords Import ── */}
+            <div className="bg-gradient-to-r from-amber-50 to-yellow-50 rounded-2xl p-6 border-2 border-amber-300">
+              <div className="flex items-start justify-between mb-1">
+                <h2 className="font-bold text-amber-900 flex items-center gap-2">
+                  <span className="text-xl">🌟</span>
+                  Import aus Exzellent-Keywords
+                  <span className="text-xs font-normal bg-amber-100 text-amber-600 px-2 py-0.5 rounded-full">
+                    {excellentTotal} exzellente Bilder
+                  </span>
+                </h2>
+                <button
+                  onClick={fetchExcellentKeywords}
+                  disabled={excellentLoading}
+                  className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-amber-50 transition-colors"
+                >
+                  {excellentLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                  Aktualisieren
+                </button>
+              </div>
+              <p className="text-sm text-amber-700 mb-3">
+                Keywords die bereits exzellente Bilder geliefert haben – gezielt mehr davon importieren.
+              </p>
+
+              {excellentLoading ? (
+                <div className="flex items-center gap-2 text-sm text-amber-500 mb-4">
+                  <RefreshCw className="w-4 h-4 animate-spin" /> Lade Exzellent-Keywords...
+                </div>
+              ) : excellentKeywords.length === 0 ? (
+                <div className="text-sm text-amber-500 mb-4">Keine exzellenten Keywords gefunden. Zuerst Bilder mit Gemini analysieren.</div>
+              ) : (
+                <>
+                  {/* Select/Deselect controls */}
+                  <div className="flex items-center gap-3 mb-3">
+                    <button
+                      onClick={() => setExcellentSelected(new Set(excellentKeywords.map(k => k.keyword)))}
+                      className="text-xs text-amber-700 hover:underline"
+                    >Alle auswählen</button>
+                    <span className="text-amber-300">|</span>
+                    <button
+                      onClick={() => setExcellentSelected(new Set())}
+                      className="text-xs text-amber-500 hover:underline"
+                    >Alle abwählen</button>
+                    <span className="text-xs text-amber-400 ml-auto">{excellentSelected.size} / {excellentKeywords.length} ausgewählt</span>
+                  </div>
+
+                  {/* Keyword chips */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {excellentKeywords.map(kw => {
+                      const isSelected = excellentSelected.has(kw.keyword)
+                      return (
+                        <button
+                          key={kw.keyword}
+                          onClick={() => {
+                            const next = new Set(excellentSelected)
+                            if (isSelected) next.delete(kw.keyword); else next.add(kw.keyword)
+                            setExcellentSelected(next)
+                          }}
+                          className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                            isSelected
+                              ? 'bg-amber-100 border-amber-400 text-amber-800 ring-1 ring-amber-400'
+                              : 'bg-white border-gray-200 text-gray-400 opacity-60'
+                          }`}
+                        >
+                          {kw.keyword}
+                          <span className="ml-1.5 opacity-70">×{kw.count}</span>
+                          <span className="ml-1 opacity-50">⌀{kw.avgScore}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+
+              {/* Controls */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <select
+                  value={excellentImportSource}
+                  onChange={e => setExcellentImportSource(e.target.value as 'pexels' | 'unsplash' | 'pixabay' | 'flickr')}
+                  className="text-sm border border-amber-200 rounded-lg px-3 py-2 bg-white text-amber-700"
+                  disabled={excellentImportRunning}
+                >
+                  <option value="flickr">🔵 Flickr (CC-Lizenz)</option>
+                  <option value="pixabay">🟠 Pixabay</option>
+                  <option value="pexels">🟢 Pexels</option>
+                  <option value="unsplash">🟣 Unsplash</option>
+                </select>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-amber-700">Bilder/Keyword:</span>
+                  <input
+                    type="number"
+                    value={excellentImportCount}
+                    onChange={e => setExcellentImportCount(Math.max(10, Math.min(500, Number(e.target.value))))}
+                    className="w-20 text-sm border border-amber-200 rounded-lg px-2 py-1.5 text-center"
+                    min={10} max={500} step={10}
+                    disabled={excellentImportRunning}
+                  />
+                </div>
+                <button
+                  onClick={startExcellentImport}
+                  disabled={excellentImportRunning || excellentSelected.size === 0}
+                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-semibold px-5 py-2 rounded-xl transition-colors text-sm"
+                >
+                  {excellentImportRunning
+                    ? <><span className="animate-spin inline-block">⏳</span> Import läuft...</>
+                    : <><span>🌟</span> {excellentSelected.size} Keywords × {excellentImportCount} importieren</>}
+                </button>
+              </div>
+
+              {/* Progress */}
+              {excellentImportJob && (
+                <div className="mt-3 space-y-2">
+                  {(excellentImportJob.total ?? 0) > 0 && (
+                    <div className="w-full bg-amber-100 rounded-full h-2">
+                      <div className="bg-amber-500 h-2 rounded-full transition-all" style={{ width: `${Math.min(100, ((excellentImportJob.imported ?? 0) / (excellentImportJob.total ?? 1)) * 100)}%` }} />
+                    </div>
+                  )}
+                  <div className="text-xs text-amber-700 font-medium">
+                    {excellentImportJob.imported ?? 0} / {excellentImportJob.total ?? 0} Bilder importiert
+                    {excellentImportJob.finishedAt && <span className="ml-2 text-green-600">✅ Fertig</span>}
+                    {excellentImportJob.error && <span className="ml-2 text-red-600">❌ {typeof excellentImportJob.error === 'string' ? excellentImportJob.error : JSON.stringify(excellentImportJob.error)}</span>}
+                  </div>
+                  {(excellentImportJob.log ?? []).length > 0 && (
+                    <div className="bg-white rounded-lg p-2 max-h-24 overflow-y-auto text-xs text-gray-500 font-mono">
+                      {(excellentImportJob.log ?? []).slice(-6).map((l, i) => <div key={i}>{l}</div>)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* API Key Status */}
             <div className="bg-white rounded-2xl p-6 border border-gray-200">
