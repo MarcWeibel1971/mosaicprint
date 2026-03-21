@@ -500,6 +500,31 @@ const PLANTS_GREEN_KEYWORDS = [
   "dark green minimal", "forest green abstract", "muted green texture",
 ];
 
+// ── Gradient / Edge tiles: specifically for edge-aware matching ──
+// These have smooth directional gradients (light→dark or color→color transitions)
+// that are ideal for edge cells in the mosaic where Sobel detects contours.
+const GRADIENT_EDGE_KEYWORDS = [
+  // Directional gradients (strong L-channel transition across tile)
+  "smooth gradient light to dark abstract", "diagonal gradient minimal abstract",
+  "black white gradient smooth", "gradient shadow light abstract",
+  "light dark transition smooth", "shadow gradient abstract minimal",
+  // Color gradients (hue transitions)
+  "sunset gradient two tone sky", "blue orange gradient smooth sky",
+  "warm cool gradient abstract", "color gradient smooth transition",
+  "pink blue gradient abstract", "yellow orange gradient sky",
+  // Soft directional light
+  "window light gradient smooth", "soft directional light abstract",
+  "spotlight gradient dark background", "side light gradient portrait",
+  "chiaroscuro abstract smooth", "dramatic light shadow gradient",
+  // Natural gradients
+  "horizon line gradient sky water", "forest edge gradient light dark",
+  "mountain silhouette gradient", "tree shadow gradient ground",
+  "sand to water gradient beach", "snow to rock gradient mountain",
+  // Vignette and radial gradients
+  "vignette dark edges abstract", "radial gradient smooth center",
+  "light center dark edges abstract", "tunnel light gradient abstract",
+];
+
 function getColorCategory(avgL: number, avgA: number, avgB: number): string {
   if (avgL < 25) return "black";
   if (avgL > 80) return "white";
@@ -875,6 +900,23 @@ async function analyzeDbGaps(targetPerBucket = 200): Promise<Array<{query: strin
       const deficit = Math.round((0.10 - plantsPct) * total);
       for (const kw of PLANTS_GREEN_KEYWORDS) {
         tasks.push({ query: kw, priority: plantsPriority, deficit, label: `🌿 Pflanzen/Grün (${Math.round(plantsPct*100)}% → Ziel 10%)`, subject: 'plants' });
+      }
+    }
+  }
+
+  // ── Step 2h2: Gradient/Edge tiles (for edge-aware tile matching) ──
+  // These tiles have smooth directional gradients ideal for Sobel-detected edge cells.
+  // Target: 10% of DB. High priority because edge quality depends on these.
+  {
+    const gradientCnt = await pool.query(
+      `SELECT COUNT(*) as cnt FROM mosaic_images WHERE subject = 'gradient_edge'`
+    ).then(r => Number(r.rows[0]?.cnt ?? 0));
+    const gradientPct = gradientCnt / total;
+    const gradientPriority = Math.max(0, (0.10 - gradientPct) / 0.10) * 2.5; // max 2.5
+    if (gradientPriority > 0.05) {
+      const deficit = Math.round((0.10 - gradientPct) * total);
+      for (const kw of GRADIENT_EDGE_KEYWORDS) {
+        tasks.push({ query: kw, priority: gradientPriority, deficit, label: `🔲 Gradient/Edge-Tiles (${Math.round(gradientPct*100)}% → Ziel 10%)`, subject: 'gradient_edge' });
       }
     }
   }
