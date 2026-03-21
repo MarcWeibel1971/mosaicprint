@@ -299,6 +299,9 @@ export default function Studio() {
   const [showRestoreBanner, setShowRestoreBanner] = useState<boolean>(() => {
     try { return !!localStorage.getItem('mosaicprint_saved_project'); } catch { return false; }
   });
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveProjectName, setSaveProjectName] = useState('');
+  const [savingProject, setSavingProject] = useState(false);
 
   // Update cache size display
   useEffect(() => {
@@ -3396,8 +3399,10 @@ export default function Studio() {
   }, [ready, zoom, pan]);
 
   // Project save handler — saves to server if logged in, otherwise localStorage
-  const saveProject = useCallback(async () => {
+  const saveProject = useCallback(async (projectName?: string) => {
+    setSavingProject(true);
     try {
+      const name = projectName?.trim() || 'Mein Mosaik';
       const data: Record<string, unknown> = {
         version: 1,
         savedAt: new Date().toISOString(),
@@ -3431,24 +3436,29 @@ export default function Studio() {
         const res = await fetch('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ name: 'Mein Mosaik', data, thumbnailUrl }),
+          body: JSON.stringify({ name, data, thumbnailUrl }),
         });
         const result = await res.json();
         if (result.ok) {
           setHasSavedProject(true);
+          setShowSaveModal(false);
         } else {
           console.warn('[Project Save] Server error:', result.error);
           // Fallback to localStorage
           localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
           setHasSavedProject(true);
+          setShowSaveModal(false);
         }
       } else {
         // Not logged in: save to localStorage
         localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
         setHasSavedProject(true);
+        setShowSaveModal(false);
       }
     } catch (e) {
       console.warn('[Project Save] Failed:', e);
+    } finally {
+      setSavingProject(false);
     }
   }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders]);
 
@@ -4306,7 +4316,7 @@ export default function Studio() {
                     <button onClick={() => { if (userPhotoImg) { setReady(false); setLoading(true); setProgress(0); renderMosaic(userPhotoImg); } }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Neu generieren">
                       <RefreshCw className="w-4 h-4" />
                     </button>
-                    <button onClick={saveProject} className="p-2.5 rounded-xl bg-green-50 border border-green-200 shadow-sm hover:shadow-md transition-all text-green-600 hover:text-green-800" title="Projekt speichern">
+                    <button onClick={() => { setSaveProjectName(''); setShowSaveModal(true); }} className="p-2.5 rounded-xl bg-green-50 border border-green-200 shadow-sm hover:shadow-md transition-all text-green-600 hover:text-green-800" title="Projekt speichern">
                       <Save className="w-4 h-4" />
                     </button>
                   </>
@@ -5030,6 +5040,45 @@ export default function Studio() {
               className="w-full h-auto max-h-[85vh] object-contain rounded-xl shadow-2xl"
             />
             <p className="text-center text-white text-sm mt-3 opacity-70">Klick ausserhalb zum Schliessen</p>
+          </div>
+        </div>
+      )}
+
+      {/* Save Project Modal */}
+      {showSaveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Projekt speichern</h3>
+              <button onClick={() => setShowSaveModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Projektname</label>
+            <input
+              type="text"
+              value={saveProjectName}
+              onChange={e => setSaveProjectName(e.target.value)}
+              placeholder="z.B. Familienportrait, Hochzeit 2024..."
+              className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-400 focus:border-green-400 mb-4"
+              autoFocus
+              onKeyDown={e => { if (e.key === 'Enter' && !savingProject) saveProject(saveProjectName); }}
+            />
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowSaveModal(false)}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={() => saveProject(saveProjectName)}
+                disabled={savingProject}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white text-sm font-semibold transition-colors"
+              >
+                {savingProject ? 'Speichert...' : 'Speichern'}
+              </button>
+            </div>
           </div>
         </div>
       )}
