@@ -1466,7 +1466,16 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
       if (row.r2_url) {
         urlMap[row.id] = { hiRes: row.r2_url, fallback: row.r2_url };
       } else if (row.source_provider === 'pixabay') {
-        continue;
+        // Pixabay: only skip if URLs are hotlink-protected (pixabay.com/get/ or /download/)
+        // CDN URLs (cdn.pixabay.com/photo/...) are publicly accessible
+        const hiRes = row.source_url || '';
+        const fallback = row.tile128_url || row.source_url || '';
+        const isHotlink = (u: string) => u.includes('pixabay.com/get/') || u.includes('pixabay.com/download/');
+        if (isHotlink(hiRes) && isHotlink(fallback)) continue; // both hotlink-protected, skip
+        urlMap[row.id] = {
+          hiRes: isHotlink(hiRes) ? fallback : hiRes,
+          fallback: isHotlink(fallback) ? hiRes : fallback,
+        };
       } else {
         urlMap[row.id] = {
           hiRes: row.source_url || '',
