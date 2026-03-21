@@ -2724,7 +2724,8 @@ export const appRouter = router({
         : process.env.UNSPLASH_ACCESS_KEY;
       if (!apiKey) return { started: false, error: "API key missing" };
       // Init job tracking
-      const targetedSessionId = randomUUID();
+      // Use client-provided sessionId as the DB import_session_id so getImportPreview can find the tiles
+      const targetedSessionId = input.sessionId ?? randomUUID();
       targetedImportJobs[jobKey] = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null, imported: 0, total: input.count, query: input.query, sourceId: input.sourceId, sessionId: targetedSessionId };
       // Register in session if provided
       if (input.sessionId && keywordSessions[input.sessionId]) {
