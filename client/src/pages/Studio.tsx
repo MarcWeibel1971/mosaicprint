@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { loadStripe } from "@stripe/stripe-js";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
   Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check,
@@ -11,6 +11,7 @@ import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
 import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
 import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
 import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
+import { useAuth } from "../contexts/AuthContext";
 
 
 // Canvas-based face/skin detection (replaces MediaPipe to avoid WASM issues)
@@ -164,6 +165,8 @@ const DIGITAL_FORMATS = [
 ];
 
 export default function Studio() {
+  const { user, authHeaders } = useAuth();
+  const [searchParams] = useSearchParams();
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [userPhotoImg, setUserPhotoImg] = useState<HTMLImageElement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -3392,8 +3395,8 @@ export default function Studio() {
     setTileDetail({ col, row, tileIdx, tileUrl, cellColor });
   }, [ready, zoom, pan]);
 
-  // Project save handler
-  const saveProject = useCallback(() => {
+  // Project save handler — saves to server if logged in, otherwise localStorage
+  const saveProject = useCallback(async () => {
     try {
       const data: Record<string, unknown> = {
         version: 1,
@@ -3409,15 +3412,45 @@ export default function Studio() {
         tileSourceMode,
       };
       // Save mosaic canvas as data URL
+      let thumbnailUrl: string | undefined;
       if (canvasRef.current) {
         data.mosaicImage = canvasRef.current.toDataURL('image/jpeg', 0.7);
+        // Create smaller thumbnail for project listing
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = 300;
+        thumbCanvas.height = Math.round(300 * (canvasRef.current.height / canvasRef.current.width));
+        const thumbCtx = thumbCanvas.getContext('2d');
+        if (thumbCtx) {
+          thumbCtx.drawImage(canvasRef.current, 0, 0, thumbCanvas.width, thumbCanvas.height);
+          thumbnailUrl = thumbCanvas.toDataURL('image/jpeg', 0.6);
+        }
       }
-      localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
-      setHasSavedProject(true);
+
+      // Save to server if logged in
+      if (user) {
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ name: 'Mein Mosaik', data, thumbnailUrl }),
+        });
+        const result = await res.json();
+        if (result.ok) {
+          setHasSavedProject(true);
+        } else {
+          console.warn('[Project Save] Server error:', result.error);
+          // Fallback to localStorage
+          localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
+          setHasSavedProject(true);
+        }
+      } else {
+        // Not logged in: save to localStorage
+        localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
+        setHasSavedProject(true);
+      }
     } catch (e) {
       console.warn('[Project Save] Failed:', e);
     }
-  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode]);
+  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders]);
 
   // Project restore handler
   const restoreProject = useCallback(() => {
@@ -3485,6 +3518,58 @@ export default function Studio() {
     setHasSavedProject(false);
     setShowRestoreBanner(false);
   }, []);
+
+  // Load project from server if ?project=ID in URL
+  useEffect(() => {
+    const projectId = searchParams.get('project');
+    if (!projectId || !user) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}`, { headers: authHeaders() });
+        const result = await res.json();
+        if (result.ok && result.project?.data) {
+          const data = typeof result.project.data === 'string' ? JSON.parse(result.project.data) : result.project.data;
+          if (data.userPhoto) setUserPhoto(data.userPhoto);
+          if (data.selectedFormat !== undefined) setSelectedFormat(data.selectedFormat);
+          if (data.selectedMaterial !== undefined) setSelectedMaterial(data.selectedMaterial);
+          if (data.selectedTheme) { setSelectedTheme(data.selectedTheme); selectedThemeRef.current = data.selectedTheme; }
+          if (data.tileSourceMode) { setTileSourceMode(data.tileSourceMode); tileSourceModeRef.current = data.tileSourceMode; }
+          if (data.qualityMetrics) setQualityMetrics(data.qualityMetrics);
+          if (data.assignment) assignmentRef.current = data.assignment;
+          if (data.tileIds) tileIdsRef.current = data.tileIds;
+          if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+          if (data.mosaicImage && data.mosaicParams) {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = canvasRef.current;
+              if (!canvas) return;
+              const { canvasW, canvasH } = data.mosaicParams;
+              canvas.width = canvasW;
+              canvas.height = canvasH;
+              const displayScale = data.mosaicParams._displayScale ?? 0.5;
+              canvas.style.width = `${Math.round(canvasW * displayScale)}px`;
+              canvas.style.height = `${Math.round(canvasH * displayScale)}px`;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(img, 0, 0, canvasW, canvasH);
+                snapshotRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+              }
+              setReady(true);
+              setShowOrderPanel(true);
+            };
+            img.src = data.mosaicImage;
+          }
+          if (data.userPhoto) {
+            const uImg = new Image();
+            uImg.onload = () => setUserPhotoImg(uImg);
+            uImg.src = data.userPhoto;
+          }
+        }
+      } catch (e) {
+        console.warn('[Project Load] Failed:', e);
+      }
+    })();
+  }, [searchParams, user, authHeaders]);
 
   // Print Export: high-quality render with 128px tiles
   // Two modes:

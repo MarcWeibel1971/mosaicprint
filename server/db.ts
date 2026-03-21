@@ -330,7 +330,36 @@ export async function ensureSchema(): Promise<void> {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_event_photos_event_id ON event_photos (event_id)`);
 
-  console.log("[DB] Schema ensured (v10 with events)");
+  // ── Users table (authentication) ──────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      display_name TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // ── Projects table (server-side project saving) ───────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL DEFAULT 'Mein Mosaik',
+      data JSONB NOT NULL,
+      thumbnail_url TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects (user_id)`);
+
+  // Add user_id to events (nullable for backwards compatibility)
+  await pool.query(`ALTER TABLE mosaic_events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`);
+
+  console.log("[DB] Schema ensured (v11 with auth & projects)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import { rgbToLab as rgbToLabUtil } from '../lib/colorUtils'
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle,
-  Users, Link, Plus
+  Users, Link, Plus, QrCode
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1958,6 +1958,17 @@ function EventsTab({ onMessage }: { onMessage: (m: { text: string; type: 'succes
   const [eventName, setEventName] = useState('')
   const [eventMaxPhotos, setEventMaxPhotos] = useState(500)
   const [eventCreating, setEventCreating] = useState(false)
+  const [qrEvent, setQrEvent] = useState<{ slug: string; qrDataUrl: string; eventUrl: string } | null>(null)
+
+  const showQrCode = useCallback(async (slug: string) => {
+    try {
+      const res = await fetch(`/api/events/${slug}/qr-data`)
+      const data = await res.json()
+      if (data.ok) {
+        setQrEvent({ slug, qrDataUrl: data.qrDataUrl, eventUrl: data.eventUrl })
+      }
+    } catch { /* ignore */ }
+  }, [])
 
   const fetchEvents = useCallback(async () => {
     try {
@@ -2062,6 +2073,14 @@ function EventsTab({ onMessage }: { onMessage: (m: { text: string; type: 'succes
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  onClick={() => showQrCode(event.slug)}
+                  className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                  title="QR-Code anzeigen"
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  QR
+                </button>
+                <button
                   onClick={() => {
                     const url = `${window.location.origin}/event/${event.slug}`
                     navigator.clipboard.writeText(url)
@@ -2070,7 +2089,7 @@ function EventsTab({ onMessage }: { onMessage: (m: { text: string; type: 'succes
                   className="flex items-center gap-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
                 >
                   <Link className="w-3.5 h-3.5" />
-                  Link kopieren
+                  Link
                 </button>
                 <a
                   href={`/event/${event.slug}`}
@@ -2090,6 +2109,34 @@ function EventsTab({ onMessage }: { onMessage: (m: { text: string; type: 'succes
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {qrEvent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setQrEvent(null)}>
+          <div className="bg-white rounded-2xl p-8 max-w-sm mx-4 text-center shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="font-bold text-lg text-gray-900 mb-2">QR-Code</h3>
+            <p className="text-sm text-gray-500 mb-4">Gaeste scannen diesen Code, um Fotos hochzuladen.</p>
+            <img src={qrEvent.qrDataUrl} alt="QR Code" className="w-64 h-64 mx-auto mb-4 rounded-xl border border-gray-200" />
+            <p className="text-xs text-gray-400 break-all mb-4">{qrEvent.eventUrl}</p>
+            <div className="flex gap-2 justify-center">
+              <a
+                href={`/api/events/${qrEvent.slug}/qr?format=png`}
+                download={`qr-${qrEvent.slug}.png`}
+                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                PNG herunterladen
+              </a>
+              <button
+                onClick={() => setQrEvent(null)}
+                className="text-xs text-gray-500 hover:text-gray-700 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+              >
+                Schliessen
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

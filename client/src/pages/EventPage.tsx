@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { Camera, Upload, Users, RefreshCw, Image as ImageIcon } from 'lucide-react'
+import { Camera, Upload, Users, RefreshCw, Image as ImageIcon, QrCode, X as XIcon } from 'lucide-react'
 
 interface EventData {
   id: number
@@ -32,6 +32,8 @@ export default function EventPage() {
   const [uploadSuccess, setUploadSuccess] = useState(false)
   const [guestName, setGuestName] = useState('')
   const [view, setView] = useState<'upload' | 'live'>('upload')
+  const [showQr, setShowQr] = useState(false)
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -171,23 +173,41 @@ export default function EventPage() {
               {event.photo_count} / {event.max_photos} Fotos
             </p>
           </div>
-          <div className="flex rounded-xl overflow-hidden border border-indigo-200 shadow-sm">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setView('upload')}
-              className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                view === 'upload' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500'
-              }`}
+              onClick={async () => {
+                if (!qrDataUrl && slug) {
+                  try {
+                    const res = await fetch(`/api/events/${slug}/qr-data`)
+                    const data = await res.json()
+                    if (data.ok) setQrDataUrl(data.qrDataUrl)
+                  } catch { /* ignore */ }
+                }
+                setShowQr(true)
+              }}
+              className="p-1.5 rounded-lg bg-purple-50 text-purple-600 hover:bg-purple-100 transition-colors"
+              title="QR-Code teilen"
             >
-              <Camera className="w-3.5 h-3.5 inline mr-1" />Foto
+              <QrCode className="w-4 h-4" />
             </button>
-            <button
-              onClick={() => setView('live')}
-              className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                view === 'live' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500'
-              }`}
-            >
-              <ImageIcon className="w-3.5 h-3.5 inline mr-1" />Mosaik
-            </button>
+            <div className="flex rounded-xl overflow-hidden border border-indigo-200 shadow-sm">
+              <button
+                onClick={() => setView('upload')}
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  view === 'upload' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5 inline mr-1" />Foto
+              </button>
+              <button
+                onClick={() => setView('live')}
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  view === 'live' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500'
+                }`}
+              >
+                <ImageIcon className="w-3.5 h-3.5 inline mr-1" />Mosaik
+              </button>
+            </div>
           </div>
         </div>
         {/* Progress bar */}
@@ -330,6 +350,29 @@ export default function EventPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {showQr && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowQr(false)}>
+          <div className="bg-white rounded-2xl p-6 max-w-xs mx-4 text-center shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="font-bold text-gray-900">QR-Code teilen</h3>
+              <button onClick={() => setShowQr(false)} className="text-gray-400 hover:text-gray-600">
+                <XIcon className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-4">Andere Gaeste koennen den Code scannen, um Fotos beizusteuern.</p>
+            {qrDataUrl ? (
+              <img src={qrDataUrl} alt="QR Code" className="w-48 h-48 mx-auto mb-3 rounded-lg" />
+            ) : (
+              <div className="w-48 h-48 mx-auto mb-3 bg-gray-100 rounded-lg flex items-center justify-center">
+                <RefreshCw className="w-6 h-6 text-gray-300 animate-spin" />
+              </div>
+            )}
+            <p className="text-[10px] text-gray-400 break-all">{window.location.href}</p>
+          </div>
         </div>
       )}
     </div>
