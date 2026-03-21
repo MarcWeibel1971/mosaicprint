@@ -2215,6 +2215,41 @@ export const appRouter = router({
       return { tasks: topTasks, total: tasks.length };
     }),
 
+  // Admin: Get top import keywords from excellent-rated images
+  // Groups by import_query, counts occurrences, returns sorted by frequency
+  getExcellentKeywords: publicProcedure
+    .input(z.object({
+      limit: z.number().min(5).max(100).default(30),
+      minCount: z.number().min(1).max(50).default(2), // minimum images per keyword
+    }))
+    .query(async ({ input }) => {
+      const pool = db.getPool();
+      const res = await pool.query(`
+        SELECT
+          import_query AS keyword,
+          COUNT(*) AS count,
+          ROUND(AVG(ai_mosaic_score)::numeric, 1) AS avg_score,
+          ROUND(AVG(SQRT(avg_a * avg_a + avg_b * avg_b))::numeric, 1) AS avg_chroma
+        FROM mosaic_images
+        WHERE ai_suitability = 'excellent'
+          AND import_query IS NOT NULL
+          AND import_query != ''
+        GROUP BY import_query
+        HAVING COUNT(*) >= $1
+        ORDER BY COUNT(*) DESC
+        LIMIT $2
+      `, [input.minCount, input.limit]);
+      return {
+        keywords: res.rows.map((r: any) => ({
+          keyword: r.keyword as string,
+          count: Number(r.count),
+          avgScore: Number(r.avg_score),
+          avgChroma: Number(r.avg_chroma),
+        })),
+        totalExcellent: await pool.query(`SELECT COUNT(*) FROM mosaic_images WHERE ai_suitability = 'excellent' AND import_query IS NOT NULL`).then(r => Number(r.rows[0].count)),
+      };
+    }),
+
   // Admin: Import All Sources simultaneously (Pexels + Unsplash in parallel)
   // This starts both importFromSource jobs at the same time for maximum throughput
   importAll: publicProcedure
