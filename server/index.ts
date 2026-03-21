@@ -1312,7 +1312,7 @@ const HIRES_CACHE_DIR = '/tmp/mosaicprint-hires';
 if (!fs.existsSync(HIRES_CACHE_DIR)) fs.mkdirSync(HIRES_CACHE_DIR, { recursive: true });
 
 // In-memory progress tracking for SSE
-const printJobs = new Map<string, { progress: number; message: string; done: boolean; error?: string; result?: Record<string, unknown> }>();
+const printJobs = new Map<string, { progress: number; message: string; done: boolean; eta?: number; error?: string; result?: Record<string, unknown> }>();
 
 // SSE endpoint for real-time progress
 app.get('/api/print-progress/:jobId', (req, res) => {
@@ -1354,12 +1354,20 @@ app.post('/api/print-render', express.json({ limit: '2mb' }), async (req, res) =
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Helper to update progress (SSE + console)
+    // Helper to update progress with ETA (SSE + console)
+    const startTime = Date.now();
     const updateProgress = (progress: number, message: string) => {
-      if (jobId) {
-        printJobs.set(jobId, { progress, message, done: false });
+      const elapsed = (Date.now() - startTime) / 1000;
+      let eta: number | undefined;
+      if (progress > 5 && progress < 100) {
+        const remaining = (elapsed / progress) * (100 - progress);
+        eta = Math.round(remaining);
       }
-      console.log(`[print-render] [${progress}%] ${message}`);
+      if (jobId) {
+        printJobs.set(jobId, { progress, message, done: false, eta });
+      }
+      const etaStr = eta !== undefined ? ` (~${eta}s remaining)` : '';
+      console.log(`[print-render] [${progress}%] ${message}${etaStr}`);
     };
 
     // Clamp tile size: min 64px, max 400px

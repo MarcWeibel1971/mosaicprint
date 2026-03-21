@@ -418,7 +418,10 @@ export default function Studio() {
         try {
           const data = JSON.parse(ev.data);
           if (data.progress) setProgress(data.progress);
-          if (data.message) setProgressMsg(data.message);
+          if (data.message) {
+            const etaStr = data.eta > 0 ? ` (~${data.eta}s)` : '';
+            setProgressMsg(`${data.message}${etaStr}`);
+          }
         } catch { /* ignore */ }
       };
     } catch { /* SSE not critical */ }
@@ -4203,7 +4206,7 @@ export default function Studio() {
                   ref={canvasRef}
                   style={{
                     display: (ready || loading) && !popOutMode ? "block" : "none",
-                    opacity: (hiResReady && hiResImgUrl) ? 0 : 1,
+                    opacity: (hiResReady && hiResImgUrl && zoom > 1.05) ? 0 : 1,
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
@@ -4244,8 +4247,8 @@ export default function Studio() {
                     }}
                   />
                 )}
-                {/* Hi-Res image overlay - server-rendered for sharp zoom */}
-                {hiResImgUrl && hiResReady && (
+                {/* Hi-Res image overlay - server-rendered for sharp zoom (only visible when zoomed in) */}
+                {hiResImgUrl && hiResReady && zoom > 1.05 && (
                   <img
                     src={hiResImgUrl}
                     alt=""
@@ -4274,10 +4277,13 @@ export default function Studio() {
                       background: "white", borderRadius: 16, padding: "24px 32px",
                       textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
                     }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: "#1f2937", marginBottom: 8 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#1f2937", marginBottom: 4 }}>
                         Zoomansicht wird gerendert...
                       </div>
-                      <div style={{ width: 200, height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: "#6366f1", marginBottom: 8 }}>
+                        {progress}%
+                      </div>
+                      <div style={{ width: 220, height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
                         <div style={{
                           height: "100%", background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
                           borderRadius: 3, transition: "width 0.3s",
