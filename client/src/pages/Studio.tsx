@@ -200,6 +200,11 @@ export default function Studio() {
   const [paymentSuccess, setPaymentSuccess] = useState(false);
   const [detectedImageType, setDetectedImageType] = useState<'portrait' | 'landscape' | 'abstract' | null>(null);
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
+  // Gemini AI toggle: when true (default), Gemini dynamic settings are applied directly.
+  // When false, heuristic presets + admin overrides are used instead.
+  const [useGemini, setUseGemini] = useState<boolean>(() => {
+    try { return localStorage.getItem('mosaicprint_use_gemini') !== 'false'; } catch { return true; }
+  });
   const [selectedTheme, setSelectedTheme] = useState<string>('alle'); // Theme filter for tile pool
   const selectedThemeRef = useRef<string>('alle'); // Ref for use inside renderMosaic callback
   const [suggestedThemes, setSuggestedThemes] = useState<Array<{key: string; label: string; emoji: string; score: number; profileSettings?: Record<string, unknown>}>>([]);
@@ -353,6 +358,8 @@ export default function Studio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hiResCanvasRef = useRef<HTMLCanvasElement>(null); // second canvas for hi-res zoom
   const uploadRef = useRef<HTMLInputElement>(null);
+  const useGeminiRef = useRef(useGemini);
+  useGeminiRef.current = useGemini;
   const containerRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
@@ -892,9 +899,12 @@ export default function Studio() {
                 }
 
                 // ── Dynamic Settings: Gemini returns image-specific algo parameters ──
-                // These REPLACE the heuristic preset entirely for better quality
-                if (geminiDynamic && typeof geminiDynamic.baseTiles === 'number') {
-                  // Apply Gemini dynamic settings (merged with any admin overrides)
+                // When useGemini is ON (default): apply Gemini settings DIRECTLY (no admin merge)
+                // When useGemini is OFF: skip Gemini entirely, keep heuristic preset + admin overrides
+                const geminiEnabled = useGeminiRef.current;
+
+                if (geminiEnabled && geminiDynamic && typeof geminiDynamic.baseTiles === 'number') {
+                  // Apply Gemini dynamic settings DIRECTLY (no admin override merge)
                   const dynamicPreset: Record<string, unknown> = {
                     baseTiles: geminiDynamic.baseTiles,
                     tilePx: geminiDynamic.tilePx ?? 8,
@@ -915,7 +925,8 @@ export default function Studio() {
                     portraitMode: geminiDynamic.portraitMode ?? falHasFace,
                     tileComplexityThreshold: geminiAlgo?.tileComplexityThreshold ?? 0.25,
                   };
-                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(dynamicPreset)));
+                  // Gemini settings applied directly — no admin override merge
+                  localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(dynamicPreset));
 
                   // Update detected type & preset label
                   const profile = geminiAlgo?.recommendedProfile ?? falSceneType ?? 'abstract';
@@ -931,16 +942,16 @@ export default function Studio() {
                     setDetectedImageType('abstract');
                   }
 
-                  console.log('[Studio] Gemini dynamicSettings applied: baseTiles=' + dynamicPreset.baseTiles + ' tilePx=' + dynamicPreset.tilePx + ' brightnessW=' + dynamicPreset.brightnessWeight + ' labW=' + dynamicPreset.labWeight + ' portrait=' + dynamicPreset.portraitMode);
+                  console.log('[Studio] Gemini dynamicSettings applied DIRECTLY (no admin merge): baseTiles=' + dynamicPreset.baseTiles + ' tilePx=' + dynamicPreset.tilePx + ' brightnessW=' + dynamicPreset.brightnessWeight + ' labW=' + dynamicPreset.labWeight + ' portrait=' + dynamicPreset.portraitMode);
                   console.log('[Studio] Gemini reasoning: ' + (geminiDynamic.reasoning ?? 'n/a'));
-                } else {
-                  // Fallback: old behavior using fixed presets + Gemini algo refinements
+                } else if (geminiEnabled) {
+                  // Gemini ON but no dynamicSettings returned: fallback with Gemini algo refinements
                   if (falHasFace && imageType !== 'portrait') {
                     const neighborPenalty = geminiAlgo?.neighborPenalty ?? 200;
                     const neighborRadius = geminiAlgo?.neighborRadius ?? 6;
                     const tileComplexityThreshold = geminiAlgo?.tileComplexityThreshold ?? 0.22;
                     const portraitPreset = { baseTiles: 120, tilePx: 7, maxReuse: 8, rotation: false, neighborRadius, neighborPenalty, contrastBoost: 1.35, histogramBlend: 0.09, baseOverlay: 0.22, edgeBoost: 0.28, overlayMode: 'softlight', labWeight: 0.15, brightnessWeight: 0.55, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.35, portraitMode: true, tileComplexityThreshold };
-                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(portraitPreset)));
+                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(portraitPreset));
                     localStorage.removeItem('mosaicprint_selected_theme');
                     setAutoPresetApplied('Portrait');
                     setDetectedImageType('portrait');
@@ -949,7 +960,7 @@ export default function Studio() {
                     const neighborRadius = geminiAlgo?.neighborRadius ?? 4;
                     const recommendedProfile = geminiAlgo?.recommendedProfile ?? 'landscape';
                     const abstractPreset = { baseTiles: 70, tilePx: 14, neighborRadius, neighborPenalty, contrastBoost: 1.20, histogramBlend: 0.05, baseOverlay: 0.12, edgeBoost: 0.18, labWeight: 0.18, brightnessWeight: 0.38, textureWeight: 0.10, edgeWeight: 0.20, saturationWeight: 0.30, portraitMode: false };
-                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(mergeWithAdmin2(abstractPreset)));
+                    localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(abstractPreset));
                     setAutoPresetApplied(null);
                     setDetectedImageType(recommendedProfile as any);
                   } else if (falHasFace && imageType === 'portrait' && geminiAlgo) {
@@ -957,6 +968,9 @@ export default function Studio() {
                     const refined = { ...currentSettings, neighborPenalty: geminiAlgo.neighborPenalty, neighborRadius: geminiAlgo.neighborRadius, tileComplexityThreshold: geminiAlgo.tileComplexityThreshold };
                     localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(refined));
                   }
+                } else {
+                  // Gemini OFF: keep heuristic preset + admin overrides (already applied above)
+                  console.log('[Studio] Gemini OFF: keeping heuristic preset + admin overrides');
                 }
 
                 // Store full Gemini analysis for Admin Qualität tab (admin-only display)
@@ -4039,6 +4053,75 @@ export default function Studio() {
         {error && (
           <div className="max-w-xl mx-auto bg-red-50 border border-red-200 rounded-2xl p-4 text-red-700 text-sm mb-6">
             {error}
+          </div>
+        )}
+
+        {/* Gemini AI Toggle (Admin only) - shown after upload */}
+        {isAdminMode && detectedImageType && (ready || loading) && (
+          <div className="flex items-center justify-center gap-3 mb-3">
+            <span className="text-xs font-medium text-gray-500">Algorithmus-Quelle:</span>
+            <div className="inline-flex rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+              <button
+                onClick={() => {
+                  setUseGemini(true);
+                  localStorage.setItem('mosaicprint_use_gemini', 'true');
+                  // Re-apply Gemini settings if available
+                  try {
+                    const analysis = JSON.parse(localStorage.getItem('mosaicprint_gemini_analysis') || 'null');
+                    const gd = analysis?.dynamicSettings;
+                    if (gd && typeof gd.baseTiles === 'number') {
+                      const dynamicPreset: Record<string, unknown> = {
+                        baseTiles: gd.baseTiles, tilePx: gd.tilePx ?? 8, maxReuse: gd.maxReuse ?? 10,
+                        rotation: gd.rotation ?? false, neighborRadius: gd.neighborRadius ?? 5,
+                        neighborPenalty: gd.neighborPenalty ?? 200, contrastBoost: gd.contrastBoost ?? 1.30,
+                        histogramBlend: gd.histogramBlend ?? 0.08, baseOverlay: gd.baseOverlay ?? 0.15,
+                        edgeBoost: gd.edgeBoost ?? 0.15, overlayMode: gd.overlayMode ?? 'softlight',
+                        labWeight: gd.labWeight ?? 0.20, brightnessWeight: gd.brightnessWeight ?? 0.45,
+                        textureWeight: gd.textureWeight ?? 0.10, edgeWeight: gd.edgeWeight ?? 0.15,
+                        saturationWeight: gd.saturationWeight ?? 0.30,
+                        portraitMode: gd.portraitMode ?? analysis?.hasFace ?? false,
+                        tileComplexityThreshold: analysis?.algoRecommendations?.tileComplexityThreshold ?? 0.25,
+                      };
+                      localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(dynamicPreset));
+                      setAutoPresetApplied('KI-Dynamisch');
+                    }
+                  } catch { /* ignore */ }
+                }}
+                className={`px-4 py-1.5 text-xs font-semibold transition-colors ${
+                  useGemini
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-white text-gray-500 hover:bg-gray-50'
+                }`}
+              >
+                Gemini AI
+              </button>
+              <button
+                onClick={() => {
+                  setUseGemini(false);
+                  localStorage.setItem('mosaicprint_use_gemini', 'false');
+                  // Re-apply heuristic preset + admin overrides
+                  try {
+                    const overrides = JSON.parse(localStorage.getItem('mosaicprint_algo_overrides') || '{}');
+                    const current = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}');
+                    // Restore from overrides (admin presets)
+                    if (Object.keys(overrides).length > 0) {
+                      localStorage.setItem('mosaicprint_algo_settings', JSON.stringify({ ...current, ...overrides }));
+                    }
+                    setAutoPresetApplied(detectedImageType === 'portrait' ? 'Portrait' : detectedImageType === 'landscape' ? 'Landschaft' : null);
+                  } catch { /* ignore */ }
+                }}
+                className={`px-4 py-1.5 text-xs font-semibold transition-colors ${
+                  !useGemini
+                    ? 'bg-amber-600 text-white'
+                    : 'bg-white text-gray-500 hover:bg-gray-50'
+                }`}
+              >
+                Voreinstellungen
+              </button>
+            </div>
+            <span className="text-xs text-gray-400">
+              {useGemini ? 'Gemini passt alle Parameter an' : 'Admin-Presets werden verwendet'}
+            </span>
           </div>
         )}
 
