@@ -177,6 +177,7 @@ export default function Studio() {
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
+  const [popOutMode, setPopOutMode] = useState(false);
   const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
 
@@ -364,6 +365,7 @@ export default function Studio() {
   const isDragging = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
   const snapshotRef = useRef<ImageData | null>(null);
+  const popOutCanvasRef = useRef<HTMLCanvasElement>(null);
   const compareDragging = useRef(false);
   // Store tile assignment for hi-res re-render
   const assignmentRef = useRef<number[]>([]);
@@ -3393,6 +3395,48 @@ export default function Studio() {
     setShowOrderPanel(true);
   }, []);
 
+  // Pop-Out effect: re-render snapshot with gaps + shadows between tiles
+  const renderPopOut = useCallback(() => {
+    const snapshot = snapshotRef.current;
+    const params = mosaicParamsRef.current;
+    const popCanvas = popOutCanvasRef.current;
+    if (!snapshot || !params || !popCanvas) return;
+    const { cols, rows, tilePx } = params;
+    const gap = Math.max(1, Math.round(tilePx * 0.12)); // 12% gap
+    const outW = cols * (tilePx + gap) + gap;
+    const outH = rows * (tilePx + gap) + gap;
+    popCanvas.width = outW;
+    popCanvas.height = outH;
+    const ctx = popCanvas.getContext('2d')!;
+    // Dark background visible through gaps
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, outW, outH);
+    // Create source canvas from snapshot
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = snapshot.width;
+    srcCanvas.height = snapshot.height;
+    srcCanvas.getContext('2d')!.putImageData(snapshot, 0, 0);
+    // Draw each tile with shadow
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = Math.max(2, Math.round(tilePx * 0.15));
+    ctx.shadowOffsetX = Math.max(1, Math.round(tilePx * 0.04));
+    ctx.shadowOffsetY = Math.max(1, Math.round(tilePx * 0.06));
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const sx = col * tilePx, sy = row * tilePx;
+        const dx = gap + col * (tilePx + gap), dy = gap + row * (tilePx + gap);
+        ctx.drawImage(srcCanvas, sx, sy, tilePx, tilePx, dx, dy, tilePx, tilePx);
+      }
+    }
+  }, []);
+
+  // Toggle pop-out: render/clear the overlay
+  useEffect(() => {
+    if (popOutMode && ready) {
+      renderPopOut();
+    }
+  }, [popOutMode, ready, renderPopOut]);
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     setZoom(z => Math.min(8, Math.max(0.2, z * (e.deltaY > 0 ? 0.85 : 1.18))));
@@ -4321,11 +4365,24 @@ export default function Studio() {
                 <canvas
                   ref={canvasRef}
                   style={{
-                    display: ready || loading ? "block" : "none",
+                    display: (ready || loading) && !popOutMode ? "block" : "none",
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
                      imageRendering: zoom > 1 ? "pixelated" : "auto",  // pixelated = crisp tiles when zoomed in
+                    maxWidth: "none",
+                  }}
+                />
+                {/* Pop-Out overlay canvas */}
+                <canvas
+                  ref={popOutCanvasRef}
+                  style={{
+                    display: popOutMode && ready ? "block" : "none",
+                    position: "absolute",
+                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                    transformOrigin: "center center",
+                    transition: isDragging.current ? "none" : "transform 0.1s ease",
+                    imageRendering: zoom > 1 ? "pixelated" : "auto",
                     maxWidth: "none",
                   }}
                 />
@@ -4525,12 +4582,20 @@ export default function Studio() {
                     <p className="text-sm font-bold text-gray-800">Original vs. Mosaik</p>
                     <p className="text-xs text-gray-500">Schiebe den Regler um zu vergleichen</p>
                   </div>
-                  <button
-                    onClick={() => { setCompareMode(m => !m); if (!compareMode) setComparePos(50); }}
-                    className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${compareMode ? "bg-coral-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
-                  >
-                    {compareMode ? "Vergleich AN" : "Vergleich AUS"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { setPopOutMode(m => !m); }}
+                      className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${popOutMode ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+                    >
+                      {popOutMode ? "Pop-Out AN" : "Pop-Out"}
+                    </button>
+                    <button
+                      onClick={() => { setCompareMode(m => !m); if (!compareMode) setComparePos(50); }}
+                      className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${compareMode ? "bg-coral-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+                    >
+                      {compareMode ? "Vergleich AN" : "Vergleich AUS"}
+                    </button>
+                  </div>
                 </div>
                 {compareMode && (
                   <>

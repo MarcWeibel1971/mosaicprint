@@ -2187,6 +2187,132 @@ app.get('/api/admin/test-flickr-import', async (_req, res) => {
   }
 });
 
+// ── Event Mosaic API ────────────────────────────────────────────────────────
+
+// Create event (admin)
+app.post("/api/events", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { name, targetImageBase64, maxPhotos } = req.body;
+    if (!name) return res.status(400).json({ ok: false, error: "Name required" });
+    // Generate short slug
+    const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 30) + '-' + Math.random().toString(36).slice(2, 6);
+    let targetImageUrl: string | null = null;
+    if (targetImageBase64) {
+      targetImageUrl = `data:image/jpeg;base64,${targetImageBase64}`;
+    }
+    const result = await pool.query(
+      `INSERT INTO mosaic_events (slug, name, target_image_url, max_photos) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [slug, name, targetImageUrl, maxPhotos ?? 500]
+    );
+    res.json({ ok: true, event: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// List events (admin)
+app.get("/api/events", async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(`
+      SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count
+      FROM mosaic_events e ORDER BY e.created_at DESC
+    `);
+    res.json({ ok: true, events: result.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Get event by slug (public)
+app.get("/api/events/:slug", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(
+      `SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count
+       FROM mosaic_events e WHERE e.slug = $1`, [req.params.slug]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
+    res.json({ ok: true, event: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Upload photo to event (guest)
+app.post("/api/events/:slug/photos", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const { base64, guestName } = req.body;
+    if (!base64) return res.status(400).json({ ok: false, error: "Photo required" });
+    // Get event
+    const eventRes = await pool.query(`SELECT * FROM mosaic_events WHERE slug = $1 AND status = 'active'`, [req.params.slug]);
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found or inactive" });
+    const event = eventRes.rows[0];
+    // Check photo limit
+    const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM event_photos WHERE event_id = $1`, [event.id]);
+    if (Number(countRes.rows[0].cnt) >= event.max_photos) {
+      return res.status(400).json({ ok: false, error: "Maximum number of photos reached" });
+    }
+    // Process image: resize to 256px, compute LAB
+    const { Jimp } = await import("jimp");
+    const buf = Buffer.from(base64, 'base64');
+    const img = await Jimp.fromBuffer(buf);
+    img.resize({ w: 256, h: 256 });
+    const thumbBuf = await img.getBuffer("image/jpeg", { quality: 80 });
+    const thumbnailUrl = `data:image/jpeg;base64,${thumbBuf.toString('base64')}`;
+    // Compute average LAB from pixels
+    const pixels = img.bitmap;
+    let rSum = 0, gSum = 0, bSum = 0, count = 0;
+    for (let i = 0; i < pixels.data.length; i += 4) {
+      rSum += pixels.data[i]; gSum += pixels.data[i+1]; bSum += pixels.data[i+2]; count++;
+    }
+    const avgR = rSum / count, avgG = gSum / count, avgB_ = bSum / count;
+    // Simple RGB to LAB approximation
+    const labL = 0.2126 * avgR + 0.7152 * avgG + 0.0722 * avgB_; // luminance approx
+    const labA = (avgR - avgG) * 0.5;
+    const labB_ = (avgG - avgB_) * 0.5;
+    const photoUrl = thumbnailUrl;
+    await pool.query(
+      `INSERT INTO event_photos (event_id, photo_url, thumbnail_url, guest_name, avg_l, avg_a, avg_b) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [event.id, photoUrl, thumbnailUrl, guestName || null, labL, labA, labB_]
+    );
+    const newCount = Number(countRes.rows[0].cnt) + 1;
+    res.json({ ok: true, photoCount: newCount, maxPhotos: event.max_photos });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Get event photos (for live mosaic)
+app.get("/api/events/:slug/photos", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
+    const photos = await pool.query(
+      `SELECT id, thumbnail_url, guest_name, avg_l, avg_a, avg_b, created_at
+       FROM event_photos WHERE event_id = $1 ORDER BY created_at ASC`,
+      [eventRes.rows[0].id]
+    );
+    res.json({ ok: true, photos: photos.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Delete event (admin)
+app.delete("/api/events/:slug", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    await pool.query(`DELETE FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");
