@@ -599,6 +599,91 @@ app.post("/api/admin/add-unique-constraint", async (_req, res) => {
   }
 });
 
+// POST /api/admin/cleanup-gray  →  removes excess gray/neutral tiles to reduce gray dominance
+// Keeps the most diverse gray tiles (spread across brightness levels), removes redundant ones
+// from overrepresented LAB cubes. Target: reduce gray/neutral to ~30% of pool.
+app.post("/api/admin/cleanup-gray", async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const targetPct = Number(req.body?.targetPct) || 0.35; // default: keep 35% gray
+
+    // Count total and gray tiles
+    const totalRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images`);
+    const total = Number(totalRes.rows[0].cnt);
+    const grayRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE ABS(avg_a) < 8 AND ABS(avg_b) < 8
+    `);
+    const grayCount = Number(grayRes.rows[0].cnt);
+    const grayPct = grayCount / Math.max(1, total);
+
+    if (grayPct <= targetPct) {
+      return res.json({
+        ok: true, deleted: 0, before: grayCount, after: grayCount,
+        message: `Grau-Anteil ist bereits bei ${Math.round(grayPct * 100)}% (Ziel: ${Math.round(targetPct * 100)}%). Keine Bereinigung nötig.`,
+      });
+    }
+
+    // Calculate how many gray tiles to remove
+    const targetGrayCount = Math.round(total * targetPct);
+    const toRemove = grayCount - targetGrayCount;
+
+    // Remove gray tiles from the most overrepresented LAB regions first.
+    // We quantize LAB values into cubes (L/10, a/10, b/10) and delete
+    // tiles from cubes that have the most tiles, keeping at least 5 per cube.
+    const deleteResult = await pool.query(`
+      WITH gray_tiles AS (
+        SELECT id, avg_l, avg_a, avg_b,
+          FLOOR(avg_l / 10) as l_bucket,
+          FLOOR(avg_a / 10) as a_bucket,
+          FLOOR(avg_b / 10) as b_bucket
+        FROM mosaic_images
+        WHERE ABS(avg_a) < 8 AND ABS(avg_b) < 8
+      ),
+      bucket_ranks AS (
+        SELECT id,
+          ROW_NUMBER() OVER (
+            PARTITION BY l_bucket, a_bucket, b_bucket
+            ORDER BY id DESC
+          ) as rn,
+          COUNT(*) OVER (
+            PARTITION BY l_bucket, a_bucket, b_bucket
+          ) as bucket_size
+        FROM gray_tiles
+      ),
+      to_delete AS (
+        SELECT id FROM bucket_ranks
+        WHERE rn > 5 AND bucket_size > 5
+        ORDER BY bucket_size DESC, rn DESC
+        LIMIT $1
+      )
+      DELETE FROM mosaic_images WHERE id IN (SELECT id FROM to_delete)
+    `, [toRemove]);
+
+    const deleted = deleteResult.rowCount ?? 0;
+    const afterRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE ABS(avg_a) < 8 AND ABS(avg_b) < 8
+    `);
+    const afterGray = Number(afterRes.rows[0].cnt);
+    const afterTotalRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images`);
+    const afterTotal = Number(afterTotalRes.rows[0].cnt);
+    const afterPct = Math.round(afterGray / Math.max(1, afterTotal) * 100);
+
+    res.json({
+      ok: true,
+      deleted,
+      before: grayCount,
+      after: afterGray,
+      totalBefore: total,
+      totalAfter: afterTotal,
+      message: `${deleted.toLocaleString()} redundante Grau-Tiles entfernt. Grau-Anteil: ${Math.round(grayPct * 100)}% → ${afterPct}%.`,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // POST /api/admin/remove-shutterstock  →  removes all Shutterstock watermarked images
 app.post("/api/admin/remove-shutterstock", async (_req, res) => {
   try {

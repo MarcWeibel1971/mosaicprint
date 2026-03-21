@@ -2015,6 +2015,10 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
   const [constraintResult, setConstraintResult] = useState<string | null>(null)
   const [shutterstockLoading, setShutterstockLoading] = useState(false)
   const [shutterstockResult, setShutterstockResult] = useState<string | null>(null)
+  const [grayCleanupLoading, setGrayCleanupLoading] = useState(false)
+  const [grayCleanupResult, setGrayCleanupResult] = useState<string | null>(null)
+  const [poolOptimizeRunning, setPoolOptimizeRunning] = useState(false)
+  const [poolOptimizeResult, setPoolOptimizeResult] = useState<string | null>(null)
   const [quickImportLoading, setQuickImportLoading] = useState<string | null>(null)
   const [quickImportResult, setQuickImportResult] = useState<Record<string, string>>({})
   const [pdfExporting, setPdfExporting] = useState(false)
@@ -2162,6 +2166,70 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       setShutterstockLoading(false)
     }
   }, [fetchDbStats, fetchImages])
+
+  const runGrayCleanup = useCallback(async () => {
+    if (!confirm('Überschüssige Grau/Neutrale Tiles entfernen?\n\nBehält mindestens 5 Tiles pro LAB-Region und reduziert den Grau-Anteil auf ~35%.\n\nDieser Vorgang kann nicht rückgängig gemacht werden.')) return
+    setGrayCleanupLoading(true)
+    setGrayCleanupResult(null)
+    try {
+      const res = await fetch('/api/admin/cleanup-gray', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPct: 0.35 }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setGrayCleanupResult(`✅ ${data.message}`)
+        fetchDbStats()
+        fetchImages(1)
+      } else {
+        setGrayCleanupResult(`❌ Fehler: ${data.error}`)
+      }
+    } catch (e) {
+      setGrayCleanupResult(`❌ Netzwerkfehler: ${String(e)}`)
+    } finally {
+      setGrayCleanupLoading(false)
+    }
+  }, [fetchDbStats, fetchImages])
+
+  const runPoolOptimize = useCallback(async () => {
+    if (poolOptimizeRunning) return
+    setPoolOptimizeRunning(true)
+    setPoolOptimizeResult(null)
+    try {
+      // Trigger smart import with gap analysis (uses analyzeDbGaps automatically)
+      await fetch('/api/trpc/smartImport', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: 'pexels', count: 3000, targetPerBucket: 500, jobLabel: 'Pool-Optimierung' }),
+      })
+      // Poll status
+      let done = false
+      let attempts = 0
+      while (!done && attempts < 180) {
+        await new Promise(r => setTimeout(r, 3000))
+        attempts++
+        try {
+          const params = encodeURIComponent(JSON.stringify({ sourceId: 'pexels', isAnalysis: false }))
+          const statusRes = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`)
+          const statusData = await statusRes.json()
+          const job = statusData.result?.data ?? statusData
+          if (!job.running) {
+            done = true
+            setPoolOptimizeResult(`✅ Pool-Optimierung abgeschlossen: ${job.imported ?? 0} Tiles importiert`)
+            fetchDbStats()
+          }
+        } catch { /* retry */ }
+      }
+      if (!done) {
+        setPoolOptimizeResult('⏳ Import läuft im Hintergrund weiter...')
+      }
+    } catch (e) {
+      setPoolOptimizeResult(`❌ Fehler: ${String(e)}`)
+    } finally {
+      setPoolOptimizeRunning(false)
+    }
+  }, [poolOptimizeRunning, fetchDbStats])
 
   const runQuickImport = useCallback(async (query: string, label: string) => {
     setQuickImportLoading(query)
@@ -2449,7 +2517,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           <span className="text-gray-400 text-sm">{showStats ? '▲ Einklappen' : '▼ Ausklappen'}</span>
         </button>
         {showStats && dbStats && (
-          <div className="px-5 pb-5 space-y-5 border-t border-gray-100">
+          <div className="px-5 pb-6 space-y-6 border-t border-gray-100">
             {/* By Source */}
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3 mt-4">Nach Quelle</h3>
@@ -2477,19 +2545,19 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {/* By Color */}
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Nach Farbe (LAB-indexiert)</h3>
-              <div className="flex flex-wrap gap-2">
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
                 {Object.entries(COLOR_LABELS).map(([key, { label, color, emoji }]) => {
                   const cnt = (dbStats.byColor ?? {})[key] ?? 0
                   const pct = dbStats.labIndexed > 0 ? Math.round((cnt / dbStats.labIndexed) * 100) : 0
                   return (
                     <button key={key} onClick={() => setColorFilter(colorFilter === key ? 'alle' : key)}
-                      className={`flex flex-col items-center gap-1 px-3 py-2 rounded-xl border transition-all ${colorFilter === key ? 'ring-2 ring-offset-1' : 'hover:border-gray-300'} ${cnt === 0 ? 'opacity-40' : ''}`}
+                      className={`flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border transition-all ${colorFilter === key ? 'ring-2 ring-offset-1' : 'hover:border-gray-300'} ${cnt === 0 ? 'opacity-40' : ''}`}
                       style={{ borderColor: colorFilter === key ? color : undefined }}>
                       <span className="text-lg">{emoji}</span>
                       <span className="text-xs font-medium text-gray-700">{label}</span>
                       <span className="text-xs font-bold" style={{ color }}>{cnt.toLocaleString()}</span>
                       <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
+                        <div className="h-full rounded-full" style={{ width: `${Math.max(pct, 2)}%`, backgroundColor: color }} />
                       </div>
                     </button>
                   )
@@ -2512,7 +2580,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
             {/* By Brightness */}
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Nach Helligkeit</h3>
-              <div className="flex gap-3">
+              <div className="grid grid-cols-3 gap-2">
                 {[
                   { key: 'dunkel', label: 'Dunkel', color: '#374151', bg: 'bg-gray-800' },
                   { key: 'mittel', label: 'Mittel', color: '#6b7280', bg: 'bg-gray-400' },
@@ -2522,7 +2590,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                    const pct = dbStats.labIndexed > 0 ? Math.round((cnt / dbStats.labIndexed) * 100) : 0
                   return (
                     <button key={key} onClick={() => setBrightnessFilter(brightnessFilter === key ? 'alle' : key)}
-                      className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${brightnessFilter === key ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                      className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${brightnessFilter === key ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'}`}>
                       <div className={`w-8 h-8 rounded-full ${bg} border border-gray-300`} />
                       <span className="text-sm font-medium text-gray-700">{label}</span>
                       <span className="text-lg font-bold text-gray-900">{cnt.toLocaleString()}</span>
@@ -2546,22 +2614,22 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               return (
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Warm vs. Kühl (Farbtemperatur)</h3>
-                  <div className="flex gap-2 mb-2">
-                    <div className="flex-1 bg-orange-50 border border-orange-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
                       onClick={() => { setWarmCoolFilter('warm'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Warme Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">🔥</div>
                       <div className="text-xs text-gray-500">Warm</div>
                       <div className="text-lg font-bold text-orange-600">{warmPct}%</div>
                       <div className="text-xs text-gray-400">{warm.toLocaleString()}</div>
                     </div>
-                    <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
+                    <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
                       onClick={() => { setWarmCoolFilter('neutral'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Neutrale Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">⚪</div>
                       <div className="text-xs text-gray-500">Neutral</div>
                       <div className="text-lg font-bold text-gray-600">{neutralPct}%</div>
                       <div className="text-xs text-gray-400">{neutral.toLocaleString()}</div>
                     </div>
-                    <div className={`flex-1 rounded-xl p-3 text-center border cursor-pointer hover:opacity-80 transition-opacity ${kuehlOk ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}
+                    <div className={`rounded-xl p-3 text-center border cursor-pointer hover:opacity-80 transition-opacity ${kuehlOk ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}
                       onClick={() => { setWarmCoolFilter('kuehl'); window.scrollTo({ top: 0, behavior: 'smooth' }) }} title="Klick: Kühle Tiles in DB anzeigen">
                       <div className="text-2xl mb-1">❄️</div>
                       <div className="text-xs text-gray-500">Kühl</div>
@@ -2600,19 +2668,24 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               return (
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Helligkeit (5 Stufen) – Kontrast-Analyse</h3>
-                  <div className="flex gap-1 h-16 items-end mb-2">
+                  <div className="flex gap-2 items-end mb-3" style={{ height: '100px' }}>
                     {levels.map(({ key, label, color, target }) => {
                       const cnt = dbStats.byBrightness5![key] ?? 0
                       const pct = Math.round(cnt / total5 * 100)
                       const ok = pct >= target * 0.7
+                      const barHeight = Math.max(8, pct * 1.5)
                       return (
-                        <div key={key} className="flex-1 flex flex-col items-center gap-1">
-                          <div className="text-xs font-bold" style={{ color: ok ? '#16a34a' : '#dc2626' }}>{pct}%</div>
-                          <div className="w-full rounded-t-sm transition-all" style={{ height: `${Math.max(4, pct * 2)}px`, backgroundColor: color, border: '1px solid #e5e7eb' }} />
-                          <div className="text-xs text-gray-400 text-center leading-tight" style={{ fontSize: '10px' }}>{label.replace(' ', '\n')}</div>
+                        <div key={key} className="flex-1 flex flex-col items-center justify-end h-full">
+                          <div className="text-xs font-bold mb-1" style={{ color: ok ? '#16a34a' : '#dc2626' }}>{pct}%</div>
+                          <div className="w-full rounded-t transition-all" style={{ height: `${barHeight}px`, backgroundColor: color, border: '1px solid #e5e7eb' }} />
                         </div>
                       )
                     })}
+                  </div>
+                  <div className="flex gap-2 mb-2">
+                    {levels.map(({ key, label }) => (
+                      <div key={key} className="flex-1 text-center text-xs text-gray-400 leading-tight">{label}</div>
+                    ))}
                   </div>
                   {needsContrast && (
                     <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
@@ -2638,14 +2711,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               return (
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Sättigung – Qualität für Hauttöne & Übergänge</h3>
-                  <div className="flex gap-2 mb-2">
+                  <div className="grid grid-cols-3 gap-2 mb-3">
                     {[
                       { label: 'Niedrig (glatt)', pct: lowPct, cnt: low, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', icon: '🌫️', tip: 'Ideal für Hauttöne & Hintergründe', target: 30, satKey: 'niedrig' },
                       { label: 'Mittel', pct: midPct, cnt: mid, color: 'bg-yellow-50 border-yellow-200', text: 'text-yellow-700', icon: '🎨', tip: 'Gute Allround-Tiles', target: 40, satKey: 'mittel' },
                       { label: 'Hoch (bunt)', pct: highPct, cnt: high, color: 'bg-pink-50 border-pink-200', text: 'text-pink-700', icon: '🌈', tip: 'Zu viele → Haut wirkt unruhig', target: 30, satKey: 'hoch' },
                     ].map(({ label, pct, cnt, color, text, icon, tip, satKey }) => (
                       <div key={label}
-                        className={`flex-1 rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
+                        className={`rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
                         onClick={() => { setSaturationFilter(satKey); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
                         title={`Klick: ${label}-Tiles in DB anzeigen`}>
                         <div className="text-xl mb-1">{icon}</div>
@@ -2661,7 +2734,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                     <div className="bg-yellow-400" style={{ width: `${midPct}%` }} />
                     <div className="bg-pink-400" style={{ width: `${highPct}%` }} />
                   </div>
-                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <div className="flex flex-col sm:flex-row sm:justify-between gap-1 text-xs text-gray-400 mt-1">
                     <span>Grau/Neutral: {grayPct}% ({(dbStats.grayCount ?? 0).toLocaleString()} Bilder)</span>
                     <span>Ziel: 30% niedrig · 40% mittel · 30% hoch</span>
                   </div>
@@ -2687,14 +2760,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               return (
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Tile-Typ – Ruhig / Normal / Komplex</h3>
-                  <div className="flex gap-2 mb-2">
+                  <div className="grid grid-cols-3 gap-2 mb-3">
                     {[
                       { label: '🌫️ Ruhig (calm)', pct: calmPct, cnt: calm, color: 'bg-emerald-100 border-emerald-300', text: 'text-emerald-700', tip: 'Ideal für Haut & Hintergrund', target: 40, type: 'calm' },
                       { label: '🎨 Normal', pct: mediumPct, cnt: medium, color: 'bg-blue-50 border-blue-200', text: 'text-blue-700', tip: 'Allround-Tiles', target: 40, type: 'medium' },
                       { label: '🌀 Komplex (busy)', pct: busyPct, cnt: busy, color: 'bg-orange-50 border-orange-200', text: 'text-orange-700', tip: 'Zu viele → Haut wirkt unruhig', target: 20, type: 'busy' },
                     ].map(({ label, pct, cnt, color, text, tip, type }) => (
                       <div key={label}
-                        className={`flex-1 rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
+                        className={`rounded-xl p-3 border ${color} cursor-pointer hover:opacity-80 transition-opacity`}
                         onClick={() => setTileTypeFilter(type)}>
                         <div className="text-xs font-semibold text-gray-700">{label}</div>
                         <div className={`text-lg font-bold ${text}`}>{pct}%</div>
@@ -2708,7 +2781,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                     <div className="bg-blue-400" style={{ width: `${mediumPct}%` }} />
                     <div className="bg-orange-400" style={{ width: `${busyPct}%` }} />
                   </div>
-                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <div className="flex flex-col sm:flex-row sm:justify-between gap-1 text-xs text-gray-400 mt-1">
                     <span>Ziel: 40% ruhig · 40% normal · 20% komplex</span>
                     <span className={tooFewCalm ? 'text-amber-600 font-medium' : 'text-gray-400'}>{tooFewCalm ? `⚠️ Zu wenig ruhige Tiles (${calmPct}%)` : '✅ Gute Verteilung'}</span>
                   </div>
@@ -2792,16 +2865,59 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                     <div className={`h-full rounded-full transition-all ${scoreInt >= 70 ? 'bg-green-500' : scoreInt >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${scoreInt}%` }} />
                   </div>
                   <p className={`text-xs ${scoreColor} font-medium`}>{scoreLabel}</p>
-                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-500">
-                    <span className={lowSat >= 50 ? 'text-green-600 font-medium' : 'text-amber-600'}>🌫️ Niedrig-Sättigung: {lowSat}% / 50% Ziel {lowSat >= 50 ? '✅' : `(fehlt ${Math.max(0,50-lowSat)}%)`}</span>
-                    <span className={grayPct >= 20 ? 'text-green-600 font-medium' : 'text-amber-600'}>⬜ Grau/Neutral: {grayPct}% / 20% Ziel {grayPct >= 20 ? '✅' : `(fehlt ${Math.max(0,20-grayPct)}%)`}</span>
-                    <span className={kuehlPct >= 15 ? 'text-green-600 font-medium' : 'text-amber-600'}>❄️ Kühl: {kuehlPct}% / 15% Ziel {kuehlPct >= 15 ? '✅' : `(fehlt ${Math.max(0,15-kuehlPct)}%)`}</span>
-                    <span className={extremeDark >= 8 ? 'text-green-600 font-medium' : 'text-amber-600'}>⚫ Extrem Dunkel: {extremeDark}% / 8% Ziel {extremeDark >= 8 ? '✅' : `(fehlt ${Math.max(0,8-extremeDark)}%)`}</span>
-                    <span className={extremeLight >= 8 ? 'text-green-600 font-medium' : 'text-amber-600'}>⚪ Extrem Hell: {extremeLight}% / 8% Ziel {extremeLight >= 8 ? '✅' : `(fehlt ${Math.max(0,8-extremeLight)}%)`}</span>
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {[
+                      { ok: lowSat >= 50, icon: '🌫️', label: 'Niedrig-Sättigung', value: lowSat, target: 50 },
+                      { ok: grayPct >= 20, icon: '⬜', label: 'Grau/Neutral', value: grayPct, target: 20 },
+                      { ok: kuehlPct >= 15, icon: '❄️', label: 'Kühl', value: kuehlPct, target: 15 },
+                      { ok: extremeDark >= 8, icon: '⚫', label: 'Extrem Dunkel', value: extremeDark, target: 8 },
+                      { ok: extremeLight >= 8, icon: '⚪', label: 'Extrem Hell', value: extremeLight, target: 8 },
+                    ].map(({ ok, icon, label, value, target }) => (
+                      <div key={label} className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg ${ok ? 'bg-green-50' : 'bg-amber-50'}`}>
+                        <span>{icon}</span>
+                        <span className={`flex-1 ${ok ? 'text-green-700' : 'text-amber-700'}`}>
+                          {label}: {value}% / {target}% Ziel
+                        </span>
+                        <span>{ok ? '✅' : <span className="text-amber-600 font-medium">(fehlt {Math.max(0, target - value)}%)</span>}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )
             })()}
+
+            {/* Pool-Optimierung: One-click actions */}
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">🚀 Pool-Optimierung</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Gezielter Import für unterrepräsentierte Farben und Helligkeitsbereiche.
+                Nutzt die Lückenanalyse um ~3'000 Tiles in den kritischsten Bereichen zu importieren.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  onClick={runPoolOptimize}
+                  disabled={poolOptimizeRunning}
+                  className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+                >
+                  {poolOptimizeRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {poolOptimizeRunning ? 'Importiere...' : 'Farblücken füllen (~3\'000 Tiles)'}
+                </button>
+                <button
+                  onClick={runGrayCleanup}
+                  disabled={grayCleanupLoading}
+                  className="flex items-center justify-center gap-2 bg-gray-600 hover:bg-gray-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-colors"
+                >
+                  {grayCleanupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  {grayCleanupLoading ? 'Bereinige...' : 'Grau-Überschuss bereinigen'}
+                </button>
+              </div>
+              {poolOptimizeResult && (
+                <p className={`text-xs mt-2 font-medium ${poolOptimizeResult.startsWith('✅') ? 'text-green-700' : poolOptimizeResult.startsWith('❌') ? 'text-red-700' : 'text-indigo-700'}`}>{poolOptimizeResult}</p>
+              )}
+              {grayCleanupResult && (
+                <p className={`text-xs mt-2 font-medium ${grayCleanupResult.startsWith('✅') ? 'text-green-700' : 'text-red-700'}`}>{grayCleanupResult}</p>
+              )}
+            </div>
 
           </div>
         )}
