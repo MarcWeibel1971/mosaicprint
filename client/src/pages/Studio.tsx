@@ -393,21 +393,18 @@ export default function Studio() {
     //   zoom 3-5x   -> 256px tiles (new tier for medium-high zoom)
     //   zoom > 5x   -> 400px tiles (max quality for extreme zoom like 800%)
     // Desktop:
-    //   zoom < 1.0  -> no hi-res
-    //   zoom 1.0-1.6 -> 128px tiles
-    //   zoom 1.6-3x  -> 200px tiles
-    //   zoom > 3x    -> 400px tiles
+    //   zoom < 1.5  -> no hi-res (standard canvas is sharp enough)
+    //   zoom 1.5-3x -> 200px tiles
+    //   zoom > 3x   -> 400px tiles
     const _isMobileHR = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
-    const HI_RES_THRESHOLD = _isMobileHR ? 1.5 : 1.0;
-    const showHiRes = ready && zoom >= (HI_RES_THRESHOLD) && sharpness > 0;
+    const HI_RES_THRESHOLD = 1.5;
+    const showHiRes = ready && zoom >= HI_RES_THRESHOLD && sharpness > 0;
     // 3-tier resolution: higher zoom -> larger tiles -> crisper detail
     const hiResTileSize = _isMobileHR
       ? (zoom >= 5.0 ? 400 : zoom >= 3.0 ? 256 : 128)
-      : (zoom >= 3.0 ? 400 : zoom >= 1.6 ? 200 : 128);
-    // Hi-res canvas opacity: starts at 0.5 at threshold, reaches sharpness% at zoom 2x
-    const hiResOpacity = showHiRes && hiResReady
-      ? Math.min(1.0, 0.5 + (zoom - HI_RES_THRESHOLD) / 0.8) * (sharpness / 100)
-      : 0;
+      : (zoom >= 3.0 ? 400 : 200);
+    // Hi-res canvas opacity: full replacement when ready (no blending to avoid brightening)
+    const hiResOpacity = showHiRes && hiResReady ? 1.0 : 0;
 
   /** Convert a tile URL or /api/tile/:id URL to a higher-resolution version */
   const toHiResUrl = (url: string, size = 400) => {
@@ -4241,47 +4238,6 @@ export default function Studio() {
           </div>
         )}
 
-        {/* KI-Themen-Vorschlaege: shown after upload, before/during rendering */}
-        {suggestedThemes.length > 0 && (ready || loading) && (
-          <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">🤖</span>
-              <span className="text-xs font-semibold text-amber-800">KI-Profil-Empfehlungen – Klick lädt optimale Einstellungen</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {suggestedThemes.map(({ key, label, emoji, score, profileSettings }) => (
-                <button
-                  key={key}
-                  onClick={() => {
-                    // Apply profile settings to mosaicSettings (same as Admin applyProfile)
-                    if (profileSettings) {
-                      try {
-                        const existing = JSON.parse(localStorage.getItem('mosaicSettings') ?? '{}');
-                        localStorage.setItem('mosaicSettings', JSON.stringify({ ...existing, ...profileSettings }));
-                        window.dispatchEvent(new Event('mosaicSettingsChanged'));
-                      } catch { /* ignore */ }
-                    }
-                    // Trigger re-render with new settings
-                    setTimeout(() => {
-                      const evt = new CustomEvent('mosaicprint:rerender');
-                      window.dispatchEvent(evt);
-                    }, 100);
-                  }}
-                  style={{ opacity: 1 }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all border ${
-                    autoPresetApplied === key
-                      ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
-                      : 'bg-white text-amber-700 border-amber-300 hover:border-amber-500 hover:bg-amber-100'
-                  }`}
-                >
-                  <span>{emoji}</span>
-                  <span>{label}</span>
-                  {score > 1.5 && <span className="text-xs opacity-70 ml-0.5">✓</span>}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
         {/* Canvas container */}
         {(ready || loading) && (
           <>
@@ -4366,6 +4322,7 @@ export default function Studio() {
                   ref={canvasRef}
                   style={{
                     display: (ready || loading) && !popOutMode ? "block" : "none",
+                    opacity: (showHiRes && hiResReady) ? 0 : 1,
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
