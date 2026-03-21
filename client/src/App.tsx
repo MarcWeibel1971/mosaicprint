@@ -9,6 +9,7 @@ import HowItWorks from "./pages/HowItWorks";
 import Admin from "./pages/Admin";
 import TileUpload from "./pages/TileUpload";
 import EventPage from "./pages/EventPage";
+import Events from "./pages/Events";
 
 // Error boundary to prevent white screen crashes
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
@@ -55,6 +56,7 @@ export default function App() {
             <Route path="/so-funktionierts" element={<HowItWorks />} />
             <Route path="/admin" element={<Admin />} />
             <Route path="/tile-upload" element={<TileUpload />} />
+            <Route path="/events" element={<Events />} />
             <Route path="/event/:slug" element={<EventPage />} />
             <Route path="*" element={<Landing />} />
           </Routes>

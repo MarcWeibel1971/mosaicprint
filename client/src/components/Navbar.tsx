@@ -19,6 +19,7 @@ function LogoMark() {
 
 const NAV_LINKS = [
   { to: "/studio", label: "Studio" },
+  { to: "/events", label: "Events" },
   { to: "/so-funktionierts", label: "So funktioniert's" },
   { to: "/preise", label: "Preise" },
 ];
