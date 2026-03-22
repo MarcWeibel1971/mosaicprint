@@ -2648,11 +2648,20 @@ app.post("/api/events/:slug/photos", async (req, res) => {
     if (Number(countRes.rows[0].cnt) >= event.max_photos) {
       return res.status(400).json({ ok: false, error: "Maximum number of photos reached" });
     }
-    // Process image: resize to 256px, compute LAB
+    // Process image: create thumbnail (256px cover crop) and preview (800px)
     const { Jimp } = await import("jimp");
     const buf = Buffer.from(base64, 'base64');
     const img = await Jimp.fromBuffer(buf);
-    img.resize({ w: 256, h: 256 });
+    // Create larger preview (max 800px, maintain aspect ratio)
+    const previewImg = img.clone();
+    const pw = previewImg.width, ph = previewImg.height;
+    if (pw > 800 || ph > 800) {
+      if (pw > ph) { previewImg.resize({ w: 800 }); } else { previewImg.resize({ h: 800 }); }
+    }
+    const previewBuf = await previewImg.getBuffer("image/jpeg", { quality: 85 });
+    const photoUrl = `data:image/jpeg;base64,${previewBuf.toString('base64')}`;
+    // Create square thumbnail using cover (crop, no distortion)
+    img.cover({ w: 256, h: 256 });
     const thumbBuf = await img.getBuffer("image/jpeg", { quality: 80 });
     const thumbnailUrl = `data:image/jpeg;base64,${thumbBuf.toString('base64')}`;
     // Compute average LAB from pixels
@@ -2666,7 +2675,6 @@ app.post("/api/events/:slug/photos", async (req, res) => {
     const labL = 0.2126 * avgR + 0.7152 * avgG + 0.0722 * avgB_; // luminance approx
     const labA = (avgR - avgG) * 0.5;
     const labB_ = (avgG - avgB_) * 0.5;
-    const photoUrl = thumbnailUrl;
     await pool.query(
       `INSERT INTO event_photos (event_id, photo_url, thumbnail_url, guest_name, avg_l, avg_a, avg_b) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [event.id, photoUrl, thumbnailUrl, guestName || null, labL, labA, labB_]
@@ -2685,7 +2693,7 @@ app.get("/api/events/:slug/photos", async (req, res) => {
     const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
     if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
     const photos = await pool.query(
-      `SELECT id, thumbnail_url, guest_name, avg_l, avg_a, avg_b, created_at
+      `SELECT id, photo_url, thumbnail_url, guest_name, avg_l, avg_a, avg_b, created_at
        FROM event_photos WHERE event_id = $1 ORDER BY created_at ASC`,
       [eventRes.rows[0].id]
     );
