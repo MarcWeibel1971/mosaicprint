@@ -2639,6 +2639,7 @@ app.post("/api/events/:slug/photos", async (req, res) => {
     const pool = db.getPool();
     const { base64, guestName } = req.body;
     if (!base64) return res.status(400).json({ ok: false, error: "Photo required" });
+    if (!guestName || !guestName.trim()) return res.status(400).json({ ok: false, error: "Name is required" });
     // Get event
     const eventRes = await pool.query(`SELECT * FROM mosaic_events WHERE slug = $1 AND status = 'active'`, [req.params.slug]);
     if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found or inactive" });
@@ -2698,6 +2699,30 @@ app.get("/api/events/:slug/photos", async (req, res) => {
       [eventRes.rows[0].id]
     );
     res.json({ ok: true, photos: photos.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Delete individual photo (event creator/admin)
+app.delete("/api/events/:slug/photos/:photoId", async (req, res) => {
+  try {
+    const user = extractUser(req);
+    if (!user) return res.status(401).json({ ok: false, error: "Authentication required" });
+    const pool = db.getPool();
+    // Verify event exists and user is the creator
+    const eventRes = await pool.query(`SELECT * FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event not found" });
+    const event = eventRes.rows[0];
+    if (event.user_id !== user.id) return res.status(403).json({ ok: false, error: "Not authorized" });
+    // Delete photo
+    const result = await pool.query(
+      `DELETE FROM event_photos WHERE id = $1 AND event_id = $2 RETURNING id`,
+      [req.params.photoId, event.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Photo not found" });
+    const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM event_photos WHERE event_id = $1`, [event.id]);
+    res.json({ ok: true, photoCount: Number(countRes.rows[0].cnt) });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
