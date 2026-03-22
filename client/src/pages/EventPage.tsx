@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { Camera, Users, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle } from 'lucide-react'
+import { Camera, Users, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle, Trash2 } from 'lucide-react'
+import { useAuth } from '../contexts/AuthContext'
 
 interface EventData {
   id: number
@@ -10,6 +11,7 @@ interface EventData {
   status: string
   max_photos: number
   photo_count: number
+  user_id: number | null
 }
 
 interface EventPhoto {
@@ -25,6 +27,7 @@ interface EventPhoto {
 
 export default function EventPage() {
   const { slug } = useParams<{ slug: string }>()
+  const { user, authHeaders } = useAuth()
   const [event, setEvent] = useState<EventData | null>(null)
   const [photos, setPhotos] = useState<EventPhoto[]>([])
   const [loading, setLoading] = useState(true)
@@ -171,6 +174,30 @@ export default function EventPage() {
     }
   }
 
+  const isEventOwner = !!(user && event && event.user_id === user.id)
+
+  const handleDeletePhoto = async (photoId: number) => {
+    if (!slug || !confirm('Dieses Foto wirklich löschen?')) return
+    try {
+      const res = await fetch(`/api/events/${slug}/photos/${photoId}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setPhotos(prev => prev.filter(p => p.id !== photoId))
+        setEvent(prev => prev ? { ...prev, photo_count: data.photoCount } : prev)
+        if (previewPhoto?.id === photoId) setPreviewPhoto(null)
+      } else {
+        setError(data.error)
+        setTimeout(() => setError(null), 3000)
+      }
+    } catch (e) {
+      setError(String(e))
+      setTimeout(() => setError(null), 3000)
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-coral-50 to-cream-50">
@@ -273,10 +300,11 @@ export default function EventPage() {
             {/* Guest name */}
             <input
               type="text"
-              placeholder="Dein Name (optional)"
+              placeholder="Dein Name *"
               value={guestName}
               onChange={e => setGuestName(e.target.value)}
               className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-coral-300"
+              required
             />
 
             {/* Upload button */}
@@ -289,7 +317,7 @@ export default function EventPage() {
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploading || event.status !== 'active'}
+              disabled={uploading || event.status !== 'active' || !guestName.trim()}
               className="w-full flex items-center justify-center gap-3 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 disabled:opacity-50 text-white text-base font-bold py-4 rounded-2xl transition-all shadow-lg shadow-coral-200 active:scale-[0.98]"
             >
               {uploading ? (
@@ -385,8 +413,17 @@ export default function EventPage() {
               </h3>
               <div className="grid grid-cols-4 gap-2">
                 {photos.slice(-16).reverse().map(photo => (
-                  <div key={photo.id} className="aspect-square rounded-lg overflow-hidden bg-gray-100 cursor-pointer" onClick={() => setPreviewPhoto(photo)}>
+                  <div key={photo.id} className="relative aspect-square rounded-lg overflow-hidden bg-gray-100 cursor-pointer group" onClick={() => setPreviewPhoto(photo)}>
                     <img src={photo.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                    {isEventOwner && (
+                      <button
+                        onClick={e => { e.stopPropagation(); handleDeletePhoto(photo.id) }}
+                        className="absolute top-1 right-1 bg-red-500/80 hover:bg-red-600 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Foto löschen"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -461,9 +498,20 @@ export default function EventPage() {
               alt=""
               className="max-w-[90vw] max-h-[85vh] rounded-xl object-contain shadow-2xl"
             />
-            {previewPhoto.guest_name && (
-              <p className="text-center text-white/80 text-sm mt-2">{previewPhoto.guest_name}</p>
-            )}
+            <div className="flex items-center justify-center gap-3 mt-2">
+              {previewPhoto.guest_name && (
+                <p className="text-white/80 text-sm">{previewPhoto.guest_name}</p>
+              )}
+              {isEventOwner && (
+                <button
+                  onClick={() => handleDeletePhoto(previewPhoto.id)}
+                  className="flex items-center gap-1 bg-red-500/80 hover:bg-red-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Löschen
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
