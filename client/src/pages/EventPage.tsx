@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { Camera, Users, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle, Trash2 } from 'lucide-react'
+import { Camera, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle, Trash2, Play, Lock, Download, Send, SlidersHorizontal } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface EventData {
@@ -25,6 +25,23 @@ interface EventPhoto {
   created_at: string
 }
 
+interface MosaicCell {
+  col: number
+  row: number
+  photoId: number | null
+  thumbnailUrl: string | null
+  guestName: string | null
+}
+
+interface MatchResult {
+  cols: number
+  rows: number
+  totalCells: number
+  filledCount: number
+  photoCount: number
+  cells: MosaicCell[]
+}
+
 export default function EventPage() {
   const { slug } = useParams<{ slug: string }>()
   const { user, authHeaders } = useAuth()
@@ -35,11 +52,10 @@ export default function EventPage() {
   const [uploading, setUploading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
   const [guestName, setGuestName] = useState('')
-  const [view, setView] = useState<'upload' | 'live'>('upload')
+  const [view, setView] = useState<'upload' | 'mosaik'>('upload')
   const [showQr, setShowQr] = useState(false)
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Mosaic opt-in state
@@ -49,6 +65,16 @@ export default function EventPage() {
   const [registering, setRegistering] = useState(false)
   const [registered, setRegistered] = useState(false)
   const [previewPhoto, setPreviewPhoto] = useState<EventPhoto | null>(null)
+
+  // Mosaic matching state
+  const [matchResult, setMatchResult] = useState<MatchResult | null>(null)
+  const [matching, setMatching] = useState(false)
+  const [finalizing, setFinalizing] = useState(false)
+  const [overlayAlpha, setOverlayAlpha] = useState(0.15)
+  const [rendering, setRendering] = useState(false)
+  const [renderedImage, setRenderedImage] = useState<string | null>(null)
+  const [sending, setSending] = useState(false)
+  const [sendResult, setSendResult] = useState<{ sent: number; failed: number } | null>(null)
 
   const fetchEvent = useCallback(async () => {
     if (!slug) return
@@ -79,38 +105,13 @@ export default function EventPage() {
   useEffect(() => { fetchEvent() }, [fetchEvent])
   useEffect(() => { fetchPhotos() }, [fetchPhotos])
 
-  // Auto-poll for live view
+  // Auto-poll for upload view
   useEffect(() => {
-    if (view === 'live') {
+    if (view === 'upload') {
       pollRef.current = setInterval(() => { fetchPhotos(); fetchEvent() }, 5000)
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [view, fetchPhotos, fetchEvent])
-
-  // Render live mosaic on canvas
-  useEffect(() => {
-    if (view !== 'live' || !canvasRef.current || photos.length === 0) return
-    const canvas = canvasRef.current
-    const cols = Math.ceil(Math.sqrt(photos.length * 1.5))
-    const rows = Math.ceil(photos.length / cols)
-    const tilePx = 64
-    canvas.width = cols * tilePx
-    canvas.height = rows * tilePx
-    const ctx = canvas.getContext('2d')!
-    ctx.fillStyle = '#111'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-    photos.forEach((photo, i) => {
-      const col = i % cols
-      const row = Math.floor(i / cols)
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
-        ctx.drawImage(img, col * tilePx, row * tilePx, tilePx, tilePx)
-      }
-      img.src = photo.thumbnail_url
-    })
-  }, [view, photos])
 
   const handleUpload = async (file: File) => {
     if (!event || uploading) return
@@ -198,6 +199,99 @@ export default function EventPage() {
     }
   }
 
+  // ── Mosaic matching ──────────────────────────────────────────────────────
+  const handleMatch = async (mode: 'match' | 'finalize' = 'match') => {
+    if (!slug) return
+    if (mode === 'match') setMatching(true)
+    else setFinalizing(true)
+    setRenderedImage(null)
+    setSendResult(null)
+    try {
+      const res = await fetch(`/api/events/${slug}/match`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ mode }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setMatchResult(data)
+      } else {
+        setError(data.error)
+        setTimeout(() => setError(null), 5000)
+      }
+    } catch (e) {
+      setError(String(e))
+      setTimeout(() => setError(null), 3000)
+    } finally {
+      setMatching(false)
+      setFinalizing(false)
+    }
+  }
+
+  // ── Render mosaic image on server ────────────────────────────────────────
+  const handleRender = async () => {
+    if (!slug || !matchResult) return
+    setRendering(true)
+    try {
+      const res = await fetch(`/api/events/${slug}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          cells: matchResult.cells,
+          cols: matchResult.cols,
+          rows: matchResult.rows,
+          overlayAlpha,
+        }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setRenderedImage(data.imageDataUrl)
+      } else {
+        setError(data.error)
+        setTimeout(() => setError(null), 5000)
+      }
+    } catch (e) {
+      setError(String(e))
+      setTimeout(() => setError(null), 3000)
+    } finally {
+      setRendering(false)
+    }
+  }
+
+  // ── Save mosaic (download) ──────────────────────────────────────────────
+  const handleSave = () => {
+    if (!renderedImage) return
+    const a = document.createElement('a')
+    a.href = renderedImage
+    a.download = `mosaik-${slug}.png`
+    a.click()
+  }
+
+  // ── Send mosaic to participants ─────────────────────────────────────────
+  const handleSend = async () => {
+    if (!slug || !confirm('Mosaik an alle registrierten Teilnehmer senden?')) return
+    setSending(true)
+    setSendResult(null)
+    try {
+      const res = await fetch(`/api/events/${slug}/send-mosaic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setSendResult({ sent: data.sent, failed: data.failed })
+      } else {
+        setError(data.error)
+        setTimeout(() => setError(null), 5000)
+      }
+    } catch (e) {
+      setError(String(e))
+      setTimeout(() => setError(null), 3000)
+    } finally {
+      setSending(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-coral-50 to-cream-50">
@@ -258,9 +352,9 @@ export default function EventPage() {
                 <Camera className="w-3.5 h-3.5 inline mr-1" />Foto
               </button>
               <button
-                onClick={() => setView('live')}
+                onClick={() => setView('mosaik')}
                 className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                  view === 'live' ? 'bg-coral-500 text-white' : 'bg-white text-gray-500'
+                  view === 'mosaik' ? 'bg-coral-500 text-white' : 'bg-white text-gray-500'
                 }`}
               >
                 <ImageIcon className="w-3.5 h-3.5 inline mr-1" />Mosaik
@@ -432,8 +526,8 @@ export default function EventPage() {
         </div>
       )}
 
-      {/* Live Mosaic View */}
-      {view === 'live' && (
+      {/* Mosaik View */}
+      {view === 'mosaik' && (
         <div className="px-4 py-6">
           {photos.length === 0 ? (
             <div className="max-w-lg mx-auto bg-white rounded-2xl shadow-lg p-8 text-center">
@@ -443,10 +537,120 @@ export default function EventPage() {
             </div>
           ) : (
             <div className="max-w-4xl mx-auto">
+              {/* Owner controls */}
+              {isEventOwner && (
+                <div className="bg-white rounded-2xl shadow-lg border border-coral-100 p-4 mb-4">
+                  <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                    <SlidersHorizontal className="w-4 h-4 text-coral-500" />
+                    Mosaik-Steuerung
+                  </h3>
+
+                  {/* Action buttons */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <button
+                      onClick={() => handleMatch('match')}
+                      disabled={matching || !event.target_image_url}
+                      className="flex items-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-all shadow-md"
+                    >
+                      {matching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                      {matching ? 'Matching...' : 'Rendering starten'}
+                    </button>
+
+                    <button
+                      onClick={() => handleMatch('finalize')}
+                      disabled={finalizing || !event.target_image_url}
+                      className="flex items-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2.5 rounded-xl transition-all shadow-md"
+                    >
+                      {finalizing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                      {finalizing ? 'Wird finalisiert...' : 'Event abschliessen'}
+                    </button>
+                  </div>
+
+                  {!event.target_image_url && (
+                    <p className="text-xs text-amber-600 mb-3">
+                      Bitte zuerst ein Zielbild hochladen (im Event-Dashboard).
+                    </p>
+                  )}
+
+                  {/* Overlay slider */}
+                  {matchResult && (
+                    <div className="border-t border-gray-100 pt-3 mt-1">
+                      <div className="flex items-center gap-3">
+                        <label className="text-xs font-medium text-gray-600 whitespace-nowrap">
+                          Overlay: {Math.round(overlayAlpha * 100)}%
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="50"
+                          value={overlayAlpha * 100}
+                          onChange={e => setOverlayAlpha(Number(e.target.value) / 100)}
+                          className="flex-1 h-1.5 rounded-full appearance-none bg-gray-200 accent-coral-500"
+                        />
+                      </div>
+
+                      {/* Render + Save + Send buttons */}
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <button
+                          onClick={handleRender}
+                          disabled={rendering}
+                          className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+                        >
+                          {rendering ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ImageIcon className="w-4 h-4" />}
+                          {rendering ? 'Wird gerendert...' : 'Mosaik rendern'}
+                        </button>
+
+                        {renderedImage && (
+                          <>
+                            <button
+                              onClick={handleSave}
+                              className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+                            >
+                              <Download className="w-4 h-4" />
+                              Mosaik speichern
+                            </button>
+
+                            <button
+                              onClick={handleSend}
+                              disabled={sending}
+                              className="flex items-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors"
+                            >
+                              {sending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                              {sending ? 'Wird gesendet...' : 'An Teilnehmer senden'}
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      {sendResult && (
+                        <div className="mt-3 bg-green-50 border border-green-200 rounded-xl p-3">
+                          <p className="text-sm text-green-700">
+                            <CheckCircle className="w-4 h-4 inline mr-1" />
+                            {sendResult.sent} E-Mail(s) erfolgreich gesendet
+                            {sendResult.failed > 0 && `, ${sendResult.failed} fehlgeschlagen`}.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Error display */}
+              {error && (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-center">
+                  <p className="text-sm font-semibold text-red-700">{error}</p>
+                </div>
+              )}
+
+              {/* Mosaic Grid */}
               <div className="bg-white rounded-2xl shadow-lg border border-coral-100 p-4 mb-4">
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-sm font-bold text-gray-700">
-                    Live-Mosaik ({photos.length} Fotos)
+                    {matchResult
+                      ? `Mosaik (${matchResult.filledCount}/${matchResult.totalCells} Zellen belegt, ${matchResult.photoCount} Fotos)`
+                      : `Fotos bereit: ${photos.length}`
+                    }
                   </h2>
                   <button
                     onClick={fetchPhotos}
@@ -455,13 +659,86 @@ export default function EventPage() {
                     <RefreshCw className="w-3 h-3" /> Aktualisieren
                   </button>
                 </div>
-                <div className="rounded-xl overflow-hidden bg-gray-900">
-                  <canvas
-                    ref={canvasRef}
-                    style={{ width: '100%', height: 'auto', display: 'block', imageRendering: 'auto' }}
-                  />
-                </div>
+
+                {/* Rendered image preview */}
+                {renderedImage && (
+                  <div className="mb-4 rounded-xl overflow-hidden border border-gray-200">
+                    <img src={renderedImage} alt="Gerendertes Mosaik" className="w-full h-auto" />
+                  </div>
+                )}
+
+                {/* Grid display: target image with placed photos */}
+                {matchResult && !renderedImage ? (
+                  <div className="rounded-xl overflow-hidden bg-gray-50 border border-gray-200">
+                    <div
+                      className="grid"
+                      style={{
+                        gridTemplateColumns: `repeat(${matchResult.cols}, 1fr)`,
+                        gap: '1px',
+                        backgroundColor: '#e5e7eb',
+                      }}
+                    >
+                      {matchResult.cells.map((cell, idx) => (
+                        <div
+                          key={idx}
+                          className="aspect-square relative overflow-hidden"
+                          style={{ backgroundColor: cell.thumbnailUrl ? undefined : '#ffffff' }}
+                        >
+                          {cell.thumbnailUrl ? (
+                            <img
+                              src={cell.thumbnailUrl}
+                              alt={cell.guestName || ''}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="w-full h-full bg-white" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {/* Overlay target image with CSS opacity */}
+                    {event.target_image_url && overlayAlpha > 0 && (
+                      <div className="relative -mt-[100%]" style={{ paddingBottom: `${(matchResult.rows / matchResult.cols) * 100}%` }}>
+                        <img
+                          src={event.target_image_url}
+                          alt="Overlay"
+                          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                          style={{ opacity: overlayAlpha, mixBlendMode: 'multiply' }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : !renderedImage ? (
+                  /* No match yet - show target image grid or photo grid */
+                  event.target_image_url ? (
+                    <div className="rounded-xl overflow-hidden relative">
+                      <img
+                        src={event.target_image_url}
+                        alt="Zielbild"
+                        className="w-full h-auto opacity-20"
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <p className="text-sm text-gray-500 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-xl">
+                          {isEventOwner
+                            ? 'Klicke "Rendering starten" um das Mosaik zu erstellen'
+                            : `${photos.length} Fotos hochgeladen`
+                          }
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-6 gap-1">
+                      {photos.slice(0, 36).map(photo => (
+                        <div key={photo.id} className="aspect-square rounded overflow-hidden bg-gray-100">
+                          <img src={photo.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                        </div>
+                      ))}
+                    </div>
+                  )
+                ) : null}
               </div>
+
               {/* Photo contributors */}
               <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-4 border border-coral-100">
                 <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Beitragende</h3>

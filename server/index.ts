@@ -2800,6 +2800,198 @@ app.put("/api/events/:slug/target-image", express.json({ limit: '20mb' }), async
   }
 });
 
+// ── Event mosaic matching endpoint ─────────────────────────────────────────
+// Matches event photos to target image cells using CIEDE2000 color distance.
+// mode=match: one photo per cell max (no reuse)
+// mode=finalize: fill all remaining cells by reusing photos (multi-use)
+app.post("/api/events/:slug/match", async (req, res) => {
+  try {
+    const user = extractUser(req);
+    const pool = db.getPool();
+    const { mode } = req.body; // 'match' (default) or 'finalize'
+
+    // Get event
+    const eventRes = await pool.query(
+      `SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count FROM mosaic_events e WHERE e.slug = $1`,
+      [req.params.slug]
+    );
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    const event = eventRes.rows[0];
+
+    // Only event owner can trigger matching
+    if (!user || event.user_id !== user.id) {
+      return res.status(403).json({ ok: false, error: "Nur der Event-Ersteller kann das Matching starten" });
+    }
+
+    if (!event.target_image_url?.startsWith('data:')) {
+      return res.status(400).json({ ok: false, error: "Kein Zielbild vorhanden" });
+    }
+
+    // Get photos with LAB colors
+    const photosRes = await pool.query(
+      `SELECT id, thumbnail_url, photo_url, avg_l, avg_a, avg_b, guest_name FROM event_photos WHERE event_id = $1 ORDER BY created_at`,
+      [event.id]
+    );
+    if (photosRes.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Keine Fotos vorhanden" });
+    }
+    const photos = photosRes.rows as Array<{ id: number; thumbnail_url: string; photo_url: string; avg_l: number; avg_a: number; avg_b: number; guest_name: string | null }>;
+
+    // Determine grid dimensions from target image aspect ratio
+    const targetBase64 = event.target_image_url.split(',')[1];
+    const targetBuffer = Buffer.from(targetBase64, 'base64');
+    const targetMeta = await sharp(targetBuffer).metadata();
+    const targetW = targetMeta.width || 1;
+    const targetH = targetMeta.height || 1;
+    const aspect = targetW / targetH;
+
+    // Calculate grid: aim for roughly photoCount cells in match mode, or fill fully in finalize
+    const photoCount = photos.length;
+    const totalTarget = mode === 'finalize' ? Math.max(photoCount * 2, 200) : photoCount;
+    const cols = Math.max(4, Math.round(Math.sqrt(totalTarget * aspect)));
+    const rows = Math.max(4, Math.round(cols / aspect));
+    const totalCells = cols * rows;
+
+    // Extract target image region colors
+    const { rgbToLab, deltaE2000 } = await import("./colorUtils.js");
+    const targetResized = await sharp(targetBuffer)
+      .resize(cols, rows, { fit: 'fill' })
+      .raw()
+      .toBuffer();
+
+    // Build LAB color per cell from target image
+    const cellColors: Array<{ l: number; a: number; b: number; col: number; row: number }> = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const idx = (r * cols + c) * 3;
+        const [l, a, b] = rgbToLab(targetResized[idx], targetResized[idx + 1], targetResized[idx + 2]);
+        cellColors.push({ l, a, b, col: c, row: r });
+      }
+    }
+
+    // Greedy matching: assign best photo to each cell
+    const usageCount = new Map<number, number>(); // photoIndex → times used
+    const assignment: Array<{ col: number; row: number; photoId: number; photoIndex: number; thumbnailUrl: string; guestName: string | null } | null> = [];
+
+    // Sort cells by saliency (edge strength) - match important regions first
+    const cellsWithSaliency = cellColors.map((cell, idx) => {
+      // Simple saliency: how different is this cell from the average?
+      const avgL = cellColors.reduce((s, c) => s + c.l, 0) / cellColors.length;
+      const avgA = cellColors.reduce((s, c) => s + c.a, 0) / cellColors.length;
+      const avgB = cellColors.reduce((s, c) => s + c.b, 0) / cellColors.length;
+      const saliency = deltaE2000(cell.l, cell.a, cell.b, avgL, avgA, avgB);
+      return { ...cell, idx, saliency };
+    }).sort((a, b) => b.saliency - a.saliency);
+
+    const cellAssignment = new Array<{ photoId: number; photoIndex: number; thumbnailUrl: string; guestName: string | null } | null>(totalCells).fill(null);
+
+    const isFinalize = mode === 'finalize';
+
+    for (const cell of cellsWithSaliency) {
+      let bestIdx = -1;
+      let bestDist = Infinity;
+
+      for (let i = 0; i < photos.length; i++) {
+        const uses = usageCount.get(i) || 0;
+        // In match mode: only allow one use per photo
+        // In finalize mode: allow reuse with increasing penalty
+        if (!isFinalize && uses >= 1) continue;
+        const p = photos[i];
+        const dist = deltaE2000(cell.l, cell.a, cell.b, p.avg_l, p.avg_a, p.avg_b);
+        const reusePenalty = uses * 15;
+        if (dist + reusePenalty < bestDist) {
+          bestDist = dist + reusePenalty;
+          bestIdx = i;
+        }
+      }
+
+      const cellIndex = cell.row * cols + cell.col;
+      if (bestIdx >= 0) {
+        usageCount.set(bestIdx, (usageCount.get(bestIdx) || 0) + 1);
+        cellAssignment[cellIndex] = {
+          photoId: photos[bestIdx].id,
+          photoIndex: bestIdx,
+          thumbnailUrl: photos[bestIdx].thumbnail_url,
+          guestName: photos[bestIdx].guest_name,
+        };
+      }
+    }
+
+    // Build response: grid dimensions + cell assignments
+    const cells = cellAssignment.map((a, idx) => ({
+      col: idx % cols,
+      row: Math.floor(idx / cols),
+      photoId: a?.photoId ?? null,
+      thumbnailUrl: a?.thumbnailUrl ?? null,
+      guestName: a?.guestName ?? null,
+    }));
+
+    const filledCount = cells.filter(c => c.photoId !== null).length;
+
+    res.json({
+      ok: true,
+      cols,
+      rows,
+      totalCells,
+      filledCount,
+      photoCount: photos.length,
+      cells,
+      targetAspect: aspect,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Render event mosaic as image ─────────────────────────────────────────
+app.post("/api/events/:slug/render", async (req, res) => {
+  try {
+    const user = extractUser(req);
+    const pool = db.getPool();
+    const { cells, cols, rows, overlayAlpha = 0.15 } = req.body;
+
+    // Get event
+    const eventRes = await pool.query(
+      `SELECT * FROM mosaic_events e WHERE e.slug = $1`, [req.params.slug]
+    );
+    if (eventRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Event nicht gefunden" });
+    const event = eventRes.rows[0];
+
+    if (!user || event.user_id !== user.id) {
+      return res.status(403).json({ ok: false, error: "Nicht autorisiert" });
+    }
+
+    if (!cells || !cols || !rows) {
+      return res.status(400).json({ ok: false, error: "cells, cols, rows required" });
+    }
+
+    // Build tiles array from cells
+    const tiles = (cells as Array<{ col: number; row: number; thumbnailUrl: string | null }>)
+      .filter(c => c.thumbnailUrl)
+      .map(c => ({ url: c.thumbnailUrl!, col: c.col, row: c.row }));
+
+    const tilePx = 128;
+    const hasTarget = event.target_image_url?.startsWith('data:');
+
+    const { renderMosaicOnServer } = await import("./mosaicExport.js");
+    const mosaicBuffer = await renderMosaicOnServer({
+      tiles,
+      cols,
+      rows,
+      tilePx,
+      overlayBase64: hasTarget ? event.target_image_url.split(',')[1] : undefined,
+      overlayAlpha: hasTarget ? overlayAlpha : 0,
+      sharpen: true,
+    });
+
+    // Return as base64 data URL for preview
+    const base64 = mosaicBuffer.toString('base64');
+    res.json({ ok: true, imageDataUrl: `data:image/png;base64,${base64}` });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ── Send mosaic to all participants ────────────────────────────────────────
 app.post("/api/events/:slug/send-mosaic", async (req, res) => {
   try {
