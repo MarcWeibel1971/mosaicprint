@@ -14,6 +14,7 @@ interface EventData {
 
 interface EventPhoto {
   id: number
+  photo_url: string
   thumbnail_url: string
   guest_name: string | null
   avg_l: number
@@ -44,6 +45,7 @@ export default function EventPage() {
   const [participantEmail, setParticipantEmail] = useState('')
   const [registering, setRegistering] = useState(false)
   const [registered, setRegistered] = useState(false)
+  const [previewPhoto, setPreviewPhoto] = useState<EventPhoto | null>(null)
 
   const fetchEvent = useCallback(async () => {
     if (!slug) return
@@ -282,7 +284,6 @@ export default function EventPage() {
               ref={fileInputRef}
               type="file"
               accept="image/*"
-              capture="environment"
               className="hidden"
               onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f) }}
             />
@@ -384,7 +385,7 @@ export default function EventPage() {
               </h3>
               <div className="grid grid-cols-4 gap-2">
                 {photos.slice(-16).reverse().map(photo => (
-                  <div key={photo.id} className="aspect-square rounded-lg overflow-hidden bg-gray-100">
+                  <div key={photo.id} className="aspect-square rounded-lg overflow-hidden bg-gray-100 cursor-pointer" onClick={() => setPreviewPhoto(photo)}>
                     <img src={photo.thumbnail_url} alt="" className="w-full h-full object-cover" />
                   </div>
                 ))}
@@ -442,6 +443,28 @@ export default function EventPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Photo Preview Lightbox */}
+      {previewPhoto && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" onClick={() => setPreviewPhoto(null)}>
+          <div className="relative max-w-[90vw] max-h-[85vh]" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setPreviewPhoto(null)}
+              className="absolute -top-3 -right-3 z-10 bg-white rounded-full p-1.5 shadow-lg text-gray-600 hover:text-gray-900"
+            >
+              <XIcon className="w-5 h-5" />
+            </button>
+            <img
+              src={previewPhoto.photo_url || previewPhoto.thumbnail_url}
+              alt=""
+              className="max-w-[90vw] max-h-[85vh] rounded-xl object-contain shadow-2xl"
+            />
+            {previewPhoto.guest_name && (
+              <p className="text-center text-white/80 text-sm mt-2">{previewPhoto.guest_name}</p>
+            )}
+          </div>
         </div>
       )}
 
