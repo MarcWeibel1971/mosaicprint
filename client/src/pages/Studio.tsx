@@ -536,6 +536,16 @@ export default function Studio() {
       const hrCtx = hrCanvas.getContext('2d')!;
       const rotations = assignmentRotRef.current;
 
+      // Helper: extract tile region from original rendered canvas (snapshot) as fallback
+      // This prevents gray patches when tile images are GC'd or broken
+      const snapshotCanvas = document.createElement('canvas');
+      const snapshotCtxHelper = snapshotCanvas.getContext('2d');
+      if (snapshot && snapshotCtxHelper) {
+        snapshotCanvas.width = snapshot.width;
+        snapshotCanvas.height = snapshot.height;
+        snapshotCtxHelper.putImageData(snapshot, 0, 0);
+      }
+
       for (let ci = 0; ci < totalCells; ci++) {
         const col = ci % cols;
         const row = Math.floor(ci / cols);
@@ -559,17 +569,30 @@ export default function Studio() {
               hrCtx.restore();
             }
           } catch {
-            // Fallback: fill with target color
-            const tci = ci * 3;
-            const tc = targetColorsRef.current;
-            hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#888';
-            hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+            // Fallback: copy tile region from original rendered canvas (preserves appearance)
+            const { tilePx: origTilePx } = params;
+            const srcX = col * origTilePx, srcY = row * origTilePx;
+            try {
+              hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, HR_TILE, HR_TILE);
+            } catch {
+              const tci = ci * 3;
+              const tc = targetColorsRef.current;
+              hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
+              hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+            }
           }
         } else {
-          const tci = ci * 3;
-          const tc = targetColorsRef.current;
-          hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#888';
-          hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+          // Image not available (GC'd or broken) – copy from original render as fallback
+          const { tilePx: origTilePx } = params;
+          const srcX = col * origTilePx, srcY = row * origTilePx;
+          try {
+            hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, HR_TILE, HR_TILE);
+          } catch {
+            const tci = ci * 3;
+            const tc = targetColorsRef.current;
+            hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
+            hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+          }
         }
 
         if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
@@ -2119,11 +2142,14 @@ export default function Studio() {
       }
       console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length})`);
     } else if (currentTileMode === 'mix' && currentUserTiles.length > 0) {
-      // Mix: user tiles + DB pool – prepend user tiles (they get priority in matching)
-      const userExpanded = [...currentUserTiles];
-      const userHiResExpanded: (HTMLImageElement | null)[] = currentUserTiles.map((_, i) => currentUserHiRes[i] || null);
-      // Add user tiles 3x to boost their presence in the mix
-      for (let rep = 0; rep < 2; rep++) {
+      // Mix: user tiles + DB pool – expand user tiles to ~30% of pool for strong presence
+      const dbPoolSize = validImgs.length;
+      // Target: user tiles should be ~30% of total pool (but at least 5x multiplied)
+      const targetUserCount = Math.max(currentUserTiles.length * 5, Math.ceil(dbPoolSize * 0.43)); // 0.43 of DB → ~30% of total
+      const reps = Math.max(1, Math.ceil(targetUserCount / currentUserTiles.length));
+      const userExpanded: HTMLImageElement[] = [];
+      const userHiResExpanded: (HTMLImageElement | null)[] = [];
+      for (let rep = 0; rep < reps; rep++) {
         userExpanded.push(...currentUserTiles);
         userHiResExpanded.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
       }
@@ -2131,7 +2157,7 @@ export default function Studio() {
       validImgs = [...userExpanded, ...validImgs];
       validTileIds = [...userIds, ...validTileIds];
       validImgsHiRes = [...userHiResExpanded, ...validImgsHiRes];
-      console.log(`[Studio] Tile source: MIX – ${currentUserTiles.length} user tiles (3x boosted) + ${validImgs.length - userExpanded.length} DB tiles`);
+      console.log(`[Studio] Tile source: MIX – ${currentUserTiles.length} user tiles (${reps}x = ${userExpanded.length}) + ${dbPoolSize} DB tiles (user share: ${Math.round(userExpanded.length / validImgs.length * 100)}%)`);
     } else {
       console.log(`[Studio] Tile source: POOL ONLY – ${validImgs.length} DB tiles`);
     }
@@ -2428,9 +2454,13 @@ export default function Studio() {
     }
     // Pre-collect user tile indices (negative IDs) for mix mode injection
     const userTileFilteredIndices: number[] = [];
+    const userTileFilteredSet = new Set<number>(); // fast lookup for scoring bonus
     if (currentTileSourceMode === 'mix') {
       for (const [tid, idx] of tileIdToIdx) {
-        if (tid < 0) userTileFilteredIndices.push(idx);
+        if (tid < 0) {
+          userTileFilteredIndices.push(idx);
+          userTileFilteredSet.add(idx);
+        }
       }
     }
 
@@ -2625,9 +2655,12 @@ export default function Studio() {
         const tileSatC = mf.saturation;
         const satDiff = Math.abs(targetSatC - tileSatC) / 100; // normalize 0-1
         // Repetition penalty: gentle growth to allow more reuse (reduces graininess)
-        // 1st reuse: +15, 2nd: +40, 3rd: +80, 4th+: +150
+        // User tiles in mix mode get much softer reuse penalty (they should appear frequently)
         const rc = useCount[j] || 0;
-        const repPenalty = rc === 0 ? 0 : rc === 1 ? 15 : rc === 2 ? 40 : rc === 3 ? 80 : 150;
+        const isUserTileMix = userTileFilteredSet.has(j);
+        const repPenalty = isUserTileMix
+          ? (rc === 0 ? 0 : rc <= 3 ? 3 : rc <= 8 ? 8 : rc <= 15 ? 20 : 40)
+          : (rc === 0 ? 0 : rc === 1 ? 15 : rc === 2 ? 40 : rc === 3 ? 80 : 150);
 
         // ── Compute baseDist: all scoring except quadDist (which is rotation-dependent) ──────────
         // quadDist (weight 0.15) is added in the rotation loop below.
@@ -2660,6 +2693,8 @@ export default function Studio() {
           // cheek/forehead: stronger penalty for non-skin tiles in skin areas
           const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
           if (isTargetSkin && !isTileSkin) baseDist += skinMismatchPenalty;
+          // MIX MODE: User tile preference bonus (user photos should appear prominently)
+          if (isUserTileMix) baseDist -= 25;
           // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
            // Exception: very bright target areas (L>75 = white hair/beard) – cool/neutral tiles are OK there
            if (!isVeryBright) {
@@ -2946,6 +2981,8 @@ export default function Studio() {
               baseDist += neutralBluePenalty;
             }
           }
+          // MIX MODE: User tile preference bonus (user photos should appear prominently)
+          if (isUserTileMix) baseDist -= 25;
           // Anti-repetition penalties
           baseDist += neighborPenalty + reusePenalty + repPenalty;
         } // end if (inFace) / else
@@ -3572,16 +3609,46 @@ export default function Studio() {
     const tileIdx = assignmentRef.current[ci];
     if (tileIdx < 0) return;
 
-    // Get tile URL
+    // Get tile URL – try multiple sources for best quality
     let tileUrl = '';
     const tileId = tileIdsRef.current[tileIdx];
     if (tileId && tileId > 0) {
       // DB tile – load from server at high resolution
       tileUrl = `/api/tile/${tileId}?size=256`;
-    } else if (validImgsRef.current[tileIdx]) {
-      // User-uploaded tile (negative ID or no ID) – use hi-res version if available
+    } else {
+      // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
-      tileUrl = (hiRes && hiRes.src) ? hiRes.src : validImgsRef.current[tileIdx].src;
+      if (hiRes && hiRes.src && hiRes.complete && hiRes.naturalWidth > 0) {
+        tileUrl = hiRes.src;
+      } else if (validImgsRef.current[tileIdx]?.src) {
+        tileUrl = validImgsRef.current[tileIdx].src;
+      }
+    }
+    // Fallback: extract tile region from rendered canvas as data URL
+    if (!tileUrl) {
+      try {
+        const snap = snapshotRef.current;
+        if (snap) {
+          const extractCanvas = document.createElement('canvas');
+          extractCanvas.width = tilePx; extractCanvas.height = tilePx;
+          const exCtx = extractCanvas.getContext('2d')!;
+          const srcX = col * tilePx, srcY = row * tilePx;
+          // Extract tile region from snapshot ImageData
+          const tileData = exCtx.createImageData(tilePx, tilePx);
+          for (let py = 0; py < tilePx; py++) {
+            for (let px = 0; px < tilePx; px++) {
+              const si = ((srcY + py) * snap.width + (srcX + px)) * 4;
+              const di = (py * tilePx + px) * 4;
+              tileData.data[di] = snap.data[si];
+              tileData.data[di+1] = snap.data[si+1];
+              tileData.data[di+2] = snap.data[si+2];
+              tileData.data[di+3] = 255;
+            }
+          }
+          exCtx.putImageData(tileData, 0, 0);
+          tileUrl = extractCanvas.toDataURL('image/jpeg', 0.9);
+        }
+      } catch { /* ignore */ }
     }
 
     // Get cell target color from snapshot
@@ -5437,6 +5504,36 @@ export default function Studio() {
                   src={tileDetail.tileUrl}
                   alt={`Tile ${tileDetail.col},${tileDetail.row}`}
                   className="w-full aspect-square object-cover"
+                  onError={(e) => {
+                    // If primary URL fails (e.g. DB tile proxy error), extract from canvas
+                    const img = e.currentTarget;
+                    if (img.dataset.retried) return;
+                    img.dataset.retried = 'true';
+                    try {
+                      const snap = snapshotRef.current;
+                      const params = mosaicParamsRef.current;
+                      if (snap && params) {
+                        const { tilePx } = params;
+                        const extractCanvas = document.createElement('canvas');
+                        extractCanvas.width = tilePx; extractCanvas.height = tilePx;
+                        const exCtx = extractCanvas.getContext('2d')!;
+                        const srcX = tileDetail.col * tilePx, srcY = tileDetail.row * tilePx;
+                        const tileData = exCtx.createImageData(tilePx, tilePx);
+                        for (let py = 0; py < tilePx; py++) {
+                          for (let px = 0; px < tilePx; px++) {
+                            const si = ((srcY + py) * snap.width + (srcX + px)) * 4;
+                            const di = (py * tilePx + px) * 4;
+                            tileData.data[di] = snap.data[si];
+                            tileData.data[di+1] = snap.data[si+1];
+                            tileData.data[di+2] = snap.data[si+2];
+                            tileData.data[di+3] = 255;
+                          }
+                        }
+                        exCtx.putImageData(tileData, 0, 0);
+                        img.src = extractCanvas.toDataURL('image/jpeg', 0.9);
+                      }
+                    } catch { /* ignore */ }
+                  }}
                 />
               ) : (
                 <div className="w-full aspect-square flex items-center justify-center text-gray-400 text-sm">
