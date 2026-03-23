@@ -3331,10 +3331,9 @@ export default function Studio() {
     const currentZ = zoomRef.current;
     const newZ = Math.min(8, Math.max(0.2, currentZ * factor));
 
-    // Block zoom beyond 1x until hi-res is ready
-    if (newZ > 1.05 && !hiResReadyRef.current) {
-      if (!hiResLoadingRef.current) triggerHiResRender();
-      return; // block zoom
+    // Always allow zoom – trigger hi-res render in background if not ready
+    if (newZ > 1.05 && !hiResReadyRef.current && !hiResLoadingRef.current) {
+      triggerHiResRender();
     }
 
     setZoom(newZ);
@@ -4298,7 +4297,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = zoom * 1.3; if (nz > 1.05 && !hiResReady) { if (!hiResLoading) triggerHiResRender(); return; } setZoom(Math.min(8, nz)); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) triggerHiResRender(); setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -4362,7 +4361,7 @@ export default function Studio() {
                   ref={canvasRef}
                   style={{
                     display: (ready || loading) && !popOutMode ? "block" : "none",
-                    opacity: (hiResReady && hiResImgUrl && zoom > 1.05) ? 0 : 1,
+                    opacity: 1,
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
@@ -4426,28 +4425,23 @@ export default function Studio() {
                 {/* Hi-Res loading overlay */}
                 {hiResLoading && (
                   <div style={{
-                    position: "absolute", inset: 0,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    background: "rgba(0,0,0,0.3)", borderRadius: 16, pointerEvents: "none",
+                    position: "absolute", top: 12, right: 12,
+                    pointerEvents: "none", zIndex: 10,
                   }}>
                     <div style={{
-                      background: "white", borderRadius: 16, padding: "24px 32px",
-                      textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
+                      background: "white", borderRadius: 12, padding: "8px 16px",
+                      textAlign: "center", boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
                     }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: "#1f2937", marginBottom: 4 }}>
-                        Zoomansicht wird gerendert...
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#1f2937", marginBottom: 2 }}>
+                        HD wird geladen...
                       </div>
-                      <div style={{ fontSize: 22, fontWeight: 800, color: "#6366f1", marginBottom: 8 }}>
-                        {progress}%
-                      </div>
-                      <div style={{ width: 220, height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ width: 100, height: 4, background: "#e5e7eb", borderRadius: 2, overflow: "hidden" }}>
                         <div style={{
                           height: "100%", background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
-                          borderRadius: 3, transition: "width 0.3s",
+                          borderRadius: 2, transition: "width 0.3s",
                           width: `${progress}%`,
                         }} />
                       </div>
-                      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>{progressMsg}</div>
                     </div>
                   </div>
                 )}
