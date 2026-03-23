@@ -130,7 +130,7 @@ export default function Projects() {
 
   const handleDeleteMosaic = async (id: number, e?: React.MouseEvent) => {
     e?.stopPropagation()
-    if (!confirm('Projekt wirklich loeschen?')) return
+    if (!confirm('Projekt wirklich löschen?')) return
     setDeleting(`mosaic-${id}`)
     try {
       await fetch(`/api/projects/${id}`, { method: 'DELETE', headers: authHeaders() })
@@ -142,7 +142,7 @@ export default function Projects() {
 
   const handleDeleteEvent = async (slug: string, name: string, e?: React.MouseEvent) => {
     e?.stopPropagation()
-    if (!confirm(`Event "${name}" wirklich loeschen? Alle Gaestefotos werden entfernt.`)) return
+    if (!confirm(`Event "${name}" wirklich löschen? Alle Gästefotos werden entfernt.`)) return
     setDeleting(`event-${slug}`)
     try {
       await fetch(`/api/events/${slug}`, { method: 'DELETE', headers: authHeaders() })
@@ -321,7 +321,7 @@ export default function Projects() {
       <div className="min-h-screen bg-gradient-to-b from-cream-50 to-white">
         <section className="max-w-5xl mx-auto px-6 py-12">
           <button onClick={() => { setSelectedEvent(null); setQrData(null) }} className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6 transition-colors">
-            <ArrowLeft className="w-4 h-4" /> Zurueck zu Projekten
+            <ArrowLeft className="w-4 h-4" /> Zurück zu Projekten
           </button>
 
           <div className="flex items-start gap-6 mb-8">
@@ -354,7 +354,7 @@ export default function Projects() {
               <div className="flex items-center gap-2 flex-wrap">
                 <a href={`/event/${selectedEvent.slug}`} target="_blank" rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm px-5 py-2.5 rounded-full shadow-md transition-all">
-                  <Play className="w-4 h-4" /> Event oeffnen
+                  <Play className="w-4 h-4" /> Event öffnen
                 </a>
                 <button onClick={() => {
                   const url = `${window.location.origin}/event/${selectedEvent.slug}`
@@ -370,7 +370,7 @@ export default function Projects() {
                 <button onClick={() => handleDeleteEvent(selectedEvent.slug, selectedEvent.name)}
                   disabled={deleting === `event-${selectedEvent.slug}`}
                   className="inline-flex items-center gap-2 text-sm text-red-500 font-medium px-4 py-2.5 rounded-full border border-red-200 hover:bg-red-50 transition-all">
-                  {deleting === `event-${selectedEvent.slug}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Loeschen
+                  {deleting === `event-${selectedEvent.slug}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Löschen
                 </button>
               </div>
             </div>
@@ -452,7 +452,7 @@ export default function Projects() {
       <div className="min-h-screen bg-gradient-to-b from-cream-50 to-white">
         <section className="max-w-5xl mx-auto px-6 py-12">
           <button onClick={() => setSelectedProject(null)} className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-6 transition-colors">
-            <ArrowLeft className="w-4 h-4" /> Zurueck zu Projekten
+            <ArrowLeft className="w-4 h-4" /> Zurück zu Projekten
           </button>
 
           <div className="flex items-start gap-6 mb-8">
@@ -476,11 +476,11 @@ export default function Projects() {
               <div className="flex items-center gap-3">
                 <button onClick={() => handleLoadMosaic(selectedProject.id)}
                   className="inline-flex items-center gap-2 bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm px-5 py-2.5 rounded-full shadow-md transition-all">
-                  <Play className="w-4 h-4" /> Im Studio oeffnen
+                  <Play className="w-4 h-4" /> Im Studio öffnen
                 </button>
                 <button onClick={() => handleDeleteMosaic(selectedProject.id)} disabled={deleting === `mosaic-${selectedProject.id}`}
                   className="inline-flex items-center gap-2 text-sm text-red-500 hover:text-red-600 font-medium px-4 py-2.5 rounded-full border border-red-200 hover:bg-red-50 transition-all">
-                  {deleting === `mosaic-${selectedProject.id}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Loeschen
+                  {deleting === `mosaic-${selectedProject.id}` ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Löschen
                 </button>
               </div>
             </div>
@@ -491,18 +491,18 @@ export default function Projects() {
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-bold text-gray-900">Meine Fotos</h2>
-                  <p className="text-sm text-gray-500">{userTiles.length} Bilder hochgeladen. Fotos hinzufuegen oder entfernen und dann im Studio neu rendern.</p>
+                  <p className="text-sm text-gray-500">{userTiles.length} Bilder hochgeladen. Fotos hinzufügen oder entfernen und dann im Studio neu rendern.</p>
                 </div>
                 <div className="flex items-center gap-2">
                   {tilesChanged && (
                     <button onClick={saveTiles} disabled={savingTiles}
                       className="inline-flex items-center gap-2 bg-purple-500 hover:bg-purple-600 text-white font-semibold text-sm px-4 py-2 rounded-full shadow-sm transition-all disabled:opacity-50">
-                      {savingTiles ? <RefreshCw className="w-4 h-4 animate-spin" /> : null} Aenderungen speichern
+                      {savingTiles ? <RefreshCw className="w-4 h-4 animate-spin" /> : null} Änderungen speichern
                     </button>
                   )}
                   <button onClick={() => tileUploadRef.current?.click()}
                     className="inline-flex items-center gap-2 bg-purple-50 hover:bg-purple-100 text-purple-700 font-semibold text-sm px-4 py-2 rounded-full border border-purple-200 transition-all">
-                    <Upload className="w-4 h-4" /> Fotos hinzufuegen
+                    <Upload className="w-4 h-4" /> Fotos hinzufügen
                   </button>
                   <input ref={tileUploadRef} type="file" multiple accept="image/*" className="hidden"
                     onChange={e => e.target.files && handleTileUpload(e.target.files)} />
@@ -514,7 +514,7 @@ export default function Projects() {
                   onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
                   onDrop={e => { e.preventDefault(); e.stopPropagation(); handleTileUpload(e.dataTransfer.files) }}>
                   <Image className="w-10 h-10 text-purple-300 mx-auto mb-2" />
-                  <p className="text-sm text-purple-500 font-medium">Fotos hierher ziehen oder klicken zum Hochladen</p>
+                  <p className="text-sm text-purple-500 font-medium">Fotos hierher ziehen oder klicken</p>
                   <p className="text-xs text-gray-400 mt-1">JPG, PNG - mind. 20 Bilder empfohlen</p>
                 </div>
               ) : (
@@ -548,7 +548,7 @@ export default function Projects() {
             )}
             {selectedProject.data?.qualityMetrics && (
               <div className="bg-white rounded-xl border border-cream-200 p-4">
-                <p className="text-xs text-gray-400 mb-1">Farbqualitaet</p>
+                <p className="text-xs text-gray-400 mb-1">Farbqualität</p>
                 <p className="text-lg font-bold text-gray-800">{selectedProject.data.qualityMetrics.avgDeltaE?.toFixed(1) || '–'} Delta-E</p>
                 <p className="text-xs text-gray-400">{selectedProject.data.qualityMetrics.matchedTiles || '–'} Tiles zugeordnet</p>
               </div>
@@ -639,7 +639,7 @@ export default function Projects() {
                       ) : (
                         <>
                           <a href={`/event/${item.event!.slug}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-                            className="text-xs text-coral-600 hover:text-coral-700 font-medium px-2 py-1 rounded-lg hover:bg-coral-50 transition-colors">Oeffnen</a>
+                            className="text-xs text-coral-600 hover:text-coral-700 font-medium px-2 py-1 rounded-lg hover:bg-coral-50 transition-colors">Öffnen</a>
                           <button onClick={(e) => handleDeleteEvent(item.event!.slug, item.name, e)} disabled={deleting === `event-${item.event!.slug}`}
                             className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors">
                             {deleting === `event-${item.event!.slug}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
