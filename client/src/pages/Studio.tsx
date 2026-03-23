@@ -408,10 +408,20 @@ export default function Studio() {
   hiResReadyRef.current = hiResReady;
   hiResLoadingRef.current = hiResLoading;
 
+  // Check if hi-res server render is possible (only DB tiles have valid positive IDs)
+  const canDoHiRes = useCallback(() => {
+    const ids = tileIdsRef.current;
+    if (!ids.length) return false;
+    // User-uploaded tiles have negative IDs – server can't render those
+    return ids.some(id => id > 0);
+  }, []);
+
   // Trigger server-side hi-res render for zoom
   const triggerHiResRender = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     if (hiResLoadingRef.current) return;
+    // Skip hi-res if using own photos (negative tile IDs) – server can't load them
+    if (!canDoHiRes()) return;
 
     setHiResLoading(true);
     setProgressMsg('Rendere Zoomansicht...');
@@ -479,7 +489,7 @@ export default function Studio() {
       setHiResLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canDoHiRes]);
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => {
