@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { Camera, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle, Trash2, Play, Lock, Download, Send, SlidersHorizontal } from 'lucide-react'
+import { Camera, RefreshCw, Image as ImageIcon, QrCode, X as XIcon, Mail, CheckCircle, Trash2, Play, Lock, Download, Send, SlidersHorizontal, Upload, Plus } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface EventData {
@@ -669,9 +669,9 @@ export default function EventPage() {
 
                 {/* Grid display: target image with placed photos */}
                 {matchResult && !renderedImage ? (
-                  <div className="rounded-xl overflow-hidden bg-gray-50 border border-gray-200">
+                  <div className="rounded-xl overflow-hidden bg-gray-50 border border-gray-200 relative">
                     <div
-                      className="grid"
+                      className="grid relative z-[1]"
                       style={{
                         gridTemplateColumns: `repeat(${matchResult.cols}, 1fr)`,
                         gap: '1px',
@@ -697,47 +697,106 @@ export default function EventPage() {
                         </div>
                       ))}
                     </div>
-                    {/* Overlay target image with CSS opacity */}
+                    {/* Overlay target image on top of the tile grid */}
                     {event.target_image_url && overlayAlpha > 0 && (
-                      <div className="relative -mt-[100%]" style={{ paddingBottom: `${(matchResult.rows / matchResult.cols) * 100}%` }}>
-                        <img
-                          src={event.target_image_url}
-                          alt="Overlay"
-                          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
-                          style={{ opacity: overlayAlpha, mixBlendMode: 'multiply' }}
-                        />
-                      </div>
+                      <img
+                        src={event.target_image_url}
+                        alt="Overlay"
+                        className="absolute inset-0 w-full h-full object-cover pointer-events-none z-[2]"
+                        style={{ opacity: overlayAlpha, mixBlendMode: 'multiply' }}
+                      />
                     )}
                   </div>
                 ) : !renderedImage ? (
-                  /* No match yet - show target image grid or photo grid */
-                  event.target_image_url ? (
-                    <div className="rounded-xl overflow-hidden relative">
-                      <img
-                        src={event.target_image_url}
-                        alt="Zielbild"
-                        className="w-full h-auto opacity-20"
-                      />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <p className="text-sm text-gray-500 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-xl">
-                          {isEventOwner
-                            ? 'Klicke "Rendering starten" um das Mosaik zu erstellen'
-                            : `${photos.length} Fotos hochgeladen`
-                          }
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-6 gap-1">
-                      {photos.slice(0, 36).map(photo => (
-                        <div key={photo.id} className="aspect-square rounded overflow-hidden bg-gray-100">
-                          <img src={photo.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                  /* No match yet - show photo grid with target overlay */
+                  <div className="rounded-xl overflow-hidden relative">
+                    {/* Photo tile grid as base layer */}
+                    <div
+                      className="grid relative z-[1]"
+                      style={{
+                        gridTemplateColumns: `repeat(${Math.min(Math.ceil(Math.sqrt(photos.length * 1.5)), 8)}, 1fr)`,
+                        gap: '1px',
+                        backgroundColor: '#e5e7eb',
+                      }}
+                    >
+                      {photos.map(photo => (
+                        <div key={photo.id} className="aspect-square overflow-hidden bg-gray-100">
+                          <img src={photo.thumbnail_url} alt="" className="w-full h-full object-cover" loading="lazy" />
                         </div>
                       ))}
                     </div>
-                  )
+                    {/* Target image overlay on top */}
+                    {event.target_image_url && (
+                      <img
+                        src={event.target_image_url}
+                        alt="Zielbild Overlay"
+                        className="absolute inset-0 w-full h-full object-cover pointer-events-none z-[2]"
+                        style={{ opacity: 0.3, mixBlendMode: 'multiply' }}
+                      />
+                    )}
+                    <div className="absolute inset-0 flex items-end justify-center pb-4 z-[3]">
+                      <p className="text-sm text-gray-600 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-xl shadow-sm">
+                        {isEventOwner
+                          ? `${photos.length} Fotos – klicke "Rendering starten"`
+                          : `${photos.length} Fotos hochgeladen`
+                        }
+                      </p>
+                    </div>
+                  </div>
                 ) : null}
               </div>
+
+              {/* Photo management for event owner */}
+              {isEventOwner && (
+                <div className="bg-white rounded-2xl shadow-lg border border-coral-100 p-4 mb-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-bold text-gray-700 flex items-center gap-2">
+                      <ImageIcon className="w-4 h-4 text-coral-500" />
+                      Fotos verwalten ({photos.length})
+                    </h3>
+                    <label className="flex items-center gap-1.5 bg-coral-500 hover:bg-coral-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer transition-colors">
+                      <Plus className="w-3.5 h-3.5" />
+                      Foto hinzufügen
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={e => {
+                          const file = e.target.files?.[0]
+                          if (file) handleUpload(file)
+                          e.target.value = ''
+                        }}
+                      />
+                    </label>
+                  </div>
+                  {uploading && (
+                    <div className="flex items-center gap-2 text-xs text-coral-600 mb-2">
+                      <RefreshCw className="w-3 h-3 animate-spin" /> Wird hochgeladen...
+                    </div>
+                  )}
+                  <div className="grid grid-cols-6 sm:grid-cols-8 gap-1.5 max-h-64 overflow-y-auto">
+                    {photos.map(photo => (
+                      <div key={photo.id} className="aspect-square rounded-lg overflow-hidden bg-gray-100 relative group cursor-pointer"
+                        onClick={() => setPreviewPhoto(photo)}
+                      >
+                        <img src={photo.thumbnail_url} alt={photo.guest_name || ''} className="w-full h-full object-cover" loading="lazy" />
+                        <button
+                          onClick={e => { e.stopPropagation(); handleDeletePhoto(photo.id) }}
+                          className="absolute top-0.5 right-0.5 bg-red-500/90 hover:bg-red-600 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Foto löschen"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        {photo.guest_name && (
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[8px] px-1 py-0.5 truncate opacity-0 group-hover:opacity-100 transition-opacity">
+                            {photo.guest_name}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Photo contributors */}
               <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-4 border border-coral-100">
