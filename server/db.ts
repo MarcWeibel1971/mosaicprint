@@ -359,6 +359,12 @@ export async function ensureSchema(): Promise<void> {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects (user_id)`);
 
+  // Add tile_source_mode and project_type columns to projects
+  await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS tile_source_mode TEXT DEFAULT 'pool'`);
+  await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_type TEXT DEFAULT 'mosaic'`);
+  // Store user-uploaded tile images as JSONB array of base64 strings
+  await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_tiles JSONB`);
+
   // Add user_id to events (nullable for backwards compatibility)
   await pool.query(`ALTER TABLE mosaic_events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`);
 
