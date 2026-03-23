@@ -304,6 +304,9 @@ export async function ensureSchema(): Promise<void> {
   // v9: blur_score – Laplacian Variance for blur detection (< 80 = blurry)
   await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS blur_score REAL DEFAULT NULL`);
 
+  // v10: tile256_url – 256px thumbnail for higher-quality mosaic rendering
+  await pool.query(`ALTER TABLE mosaic_images ADD COLUMN IF NOT EXISTS tile256_url TEXT DEFAULT NULL`);
+
   // ── Events table (interactive mosaic for events) ────────────────────────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mosaic_events (
@@ -385,14 +388,21 @@ export async function getMosaicImageCount(): Promise<number> {
 export async function getMosaicImagesForMatching() {
   const pool = getPool();
   const res = await pool.query(`
-    SELECT id, source_url as "sourceUrl", tile128_url as "tile128Url",
+    SELECT id, source_url as "sourceUrl",
+      COALESCE(tile256_url, tile128_url) as "tile128Url",
+      tile256_url as "tile256Url",
       avg_l as "avgL", avg_a as "avgA", avg_b as "avgB",
       tl_l as "tlL", tl_a as "tlA", tl_b as "tlB",
       tr_l as "trL", tr_a as "trA", tr_b as "trB",
       bl_l as "blL", bl_a as "blA", bl_b as "blB",
       br_l as "brL", br_a as "brA", br_b as "brB",
-      COALESCE(tile_type, 'medium') as "tileType"
-    FROM mosaic_images ORDER BY id ASC
+      COALESCE(tile_type, 'medium') as "tileType",
+      COALESCE(blur_score, 50.0) as "blurScore",
+      COALESCE(edge_energy, 0.05) as "edgeEnergy",
+      COALESCE(ai_mosaic_score, 68) as "aiMosaicScore"
+    FROM mosaic_images
+    WHERE tile128_url IS NOT NULL
+    ORDER BY id ASC
   `);
   return res.rows;
 }

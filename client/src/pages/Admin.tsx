@@ -3623,13 +3623,24 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-400">Schärfe (Blur):</span>
-                    <span className={selectedImage.blurScore != null ? (selectedImage.blurScore >= 200 ? 'text-green-600' : selectedImage.blurScore >= 80 ? 'text-yellow-600' : 'text-red-500') : 'text-gray-400'}>
-                      {selectedImage.blurScore != null ? selectedImage.blurScore.toFixed(0) : '–'}
+                    <span className={selectedImage.blurScore != null
+                      ? (selectedImage.blurScore >= 50 ? 'text-green-600' : selectedImage.blurScore >= 20 ? 'text-yellow-600' : 'text-red-500')
+                      : 'text-gray-400'}>
+                      {selectedImage.blurScore != null
+                        ? `${selectedImage.blurScore.toFixed(1)} ${selectedImage.blurScore >= 50 ? '(scharf)' : selectedImage.blurScore >= 20 ? '(mittel)' : '(unscharf)'}`
+                        : '–'}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-400">Kantendichte:</span>
-                    <span>{selectedImage.edgeEnergy != null ? (selectedImage.edgeEnergy * 100).toFixed(1) + '%' : '–'}</span>
+                    {/* edge_energy is Sobel-normalized 0-1 (64x64). Display as % of max (0.15 = typical busy image). */}
+                    <span className={selectedImage.edgeEnergy != null
+                      ? (selectedImage.edgeEnergy >= 0.10 ? 'text-orange-600' : selectedImage.edgeEnergy >= 0.04 ? 'text-green-600' : 'text-blue-500')
+                      : ''}>
+                      {selectedImage.edgeEnergy != null
+                        ? `${(selectedImage.edgeEnergy * 100).toFixed(2)}% ${selectedImage.edgeEnergy >= 0.10 ? '(busy)' : selectedImage.edgeEnergy >= 0.04 ? '(mittel)' : '(ruhig)'}`
+                        : '–'}
+                    </span>
                   </div>
                   {selectedImage.importQuery && (
                     <div className="flex justify-between">

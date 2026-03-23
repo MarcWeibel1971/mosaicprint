@@ -95,7 +95,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
       res.setHeader('Content-Length', cached.buf.length);
       res.setHeader('Cache-Control', 'public, max-age=3600');
       res.setHeader('X-Tile-Count', cached.tileCount.toString());
-      res.setHeader('X-Floats-Per-Tile', '16');
+      res.setHeader('X-Floats-Per-Tile', '18');
       res.setHeader('X-Cache', 'HIT');
       return res.send(cached.buf);
     }
@@ -112,6 +112,7 @@ app.get("/api/tile-lab-index", async (req, res) => {
               COALESCE(is_skin_friendly, (SQRT(avg_a * avg_a + avg_b * avg_b) < 25 AND avg_l >= 35 AND avg_l <= 80)) as is_skin_friendly,
               COALESCE(tile_type, 'medium') as tile_type,
               edge_energy,
+              blur_score,
               ai_is_calm,
               ai_suitability,
               ai_calm_score,
@@ -126,14 +127,15 @@ app.get("/api/tile-lab-index", async (req, res) => {
       queryParams
     );
     const rows = result.rows;
-    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity, mosaicScore] = 17 floats
+    // Pack as Float32Array: [id, L, a, b, tl_a, tl_b, tr_a, tr_b, bl_a, bl_b, br_a, br_b, edge, brightness, isSkinFriendly, tileComplexity, mosaicScore, blurNorm] = 18 floats
     // Quadrant a/b values encode color distribution per quadrant (TL, TR, BL, BR)
-    // edge: echter Sobel-Kantenwert aus DB (edge_energy), Fallback: L-Varianz-Proxy für ältere Tiles
+    // edge: echter Sobel-Kantenwert aus DB (edge_energy, 64x64 Sobel), Fallback: L-Varianz-Proxy
     // brightness: avg_l / 100
     // isSkinFriendly: 1.0 = skin-friendly tile, 0.0 = not skin-friendly
     // tileComplexity: 0.0=calm, 0.5=medium, 1.0=busy (from tile_type column)
     // mosaicScore: ai_mosaic_score / 100 (0.0-1.0, Tiebreaker: höher = besser)
-    const FLOATS_PER_TILE = 17;
+    // blurNorm: blur_score / 80 clamped 0-1 (0=blurry/unscharf, 1=sharp/scharf)
+    const FLOATS_PER_TILE = 18;
     const buf = Buffer.allocUnsafe(rows.length * FLOATS_PER_TILE * 4);
     let offset = 0;
     for (const row of rows) {
@@ -191,6 +193,11 @@ app.get("/api/tile-lab-index", async (req, res) => {
       // Fallback: 0.68 (Durchschnitt des Pools) für Tiles ohne AI-Score
       const mosaicScore = row.ai_mosaic_score != null ? Number(row.ai_mosaic_score) / 100 : 0.68;
       buf.writeFloatLE(mosaicScore, offset);      offset += 4;  // [16] mosaicScore (0=poor, 1=excellent)
+      // [17] blurNorm: blur_score normalized 0-1 (0=blurry, 1=sharp)
+      // blur_score is Laplacian variance: 0=blurry, ~80=sharp. Normalize to 0-1.
+      // Fallback: 0.625 (≈50/80, typical mid-quality tile) for tiles not yet reindexed
+      const blurNorm = row.blur_score != null ? Math.min(1, Number(row.blur_score) / 80) : 0.625;
+      buf.writeFloatLE(blurNorm, offset);          offset += 4;  // [17] blurNorm (0=blurry, 1=sharp)
     }
     // Cache the result
     indexCacheMap.set(theme, { buf, tileCount: rows.length, builtAt: Date.now(), theme });

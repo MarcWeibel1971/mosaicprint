@@ -1322,9 +1322,10 @@ export default function Studio() {
       } catch { /* fallback to legacy below */ }
     }
 
-    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity), 17 (17D with mosaicScore)
+    const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity), 17 (17D with mosaicScore), 18 (18D with blurNorm)
     const IS_16D = FPT >= 16; // includes tileComplexity
     const IS_17D = FPT >= 17; // includes mosaicScore (AI quality tiebreaker)
+    const IS_18D = FPT >= 18; // includes blurNorm (Laplacian sharpness, 0=blurry, 1=sharp)
     const currentTileSourceMode = tileSourceModeRef.current;
     const skipDbTiles = currentTileSourceMode === 'own' && userTileImagesRef.current.length >= MIN_OWN_TILES;
     const USE_2STAGE = !skipDbTiles && labIndex !== null && labIndex.length >= (FPT);
@@ -1497,6 +1498,17 @@ export default function Studio() {
         const mosaicScore = IS_17D ? labIndex[i + 16] : 0.68;
         if (IS_17D && mosaicScore < 1.0) {
           dist += (1.0 - mosaicScore) * 450; // max +450 for score=0
+        }
+        // blurNorm penalty (18D): penalize blurry tiles
+        // blurNorm=0.0 (very blurry) → +300 penalty
+        // blurNorm=0.5 (medium)      → +150 penalty
+        // blurNorm=1.0 (sharp)       → +0 penalty
+        // Ensures sharp tiles beat blurry tiles at equal LAB distance
+        if (IS_18D) {
+          const blurNorm = labIndex[i + 17]; // 0=blurry, 1=sharp
+          if (blurNorm < 1.0) {
+            dist += (1.0 - blurNorm) * 300; // max +300 for blurNorm=0
+          }
         }
         if (heap.length < (TOP_K)) {
           heap.push({ tileId: id, labDist: dist, mosaicScore });
