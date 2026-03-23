@@ -2869,36 +2869,61 @@ app.post("/api/events/:slug/match", async (req, res) => {
       }
     }
 
-    // Greedy matching: assign best photo to each cell
+    // ── Optimized matching with warm-color awareness ──────────────────────
     const usageCount = new Map<number, number>(); // photoIndex → times used
-    const assignment: Array<{ col: number; row: number; photoId: number; photoIndex: number; thumbnailUrl: string; guestName: string | null } | null> = [];
 
-    // Sort cells by saliency (edge strength) - match important regions first
+    // Compute global average LAB once (was O(n²) before)
+    const avgL = cellColors.reduce((s, c) => s + c.l, 0) / cellColors.length;
+    const avgA = cellColors.reduce((s, c) => s + c.a, 0) / cellColors.length;
+    const avgB = cellColors.reduce((s, c) => s + c.b, 0) / cellColors.length;
+
+    // Compute chroma for each cell – high chroma = saturated (warm orange/beer, vivid blues etc.)
+    const cellChroma = cellColors.map(c => Math.sqrt(c.a * c.a + c.b * c.b));
+
+    // Compute photo chroma histogram to detect underrepresented color ranges
+    const photoChroma = photos.map(p => Math.sqrt(p.avg_a * p.avg_a + p.avg_b * p.avg_b));
+    const photoHue = photos.map((p, i) => photoChroma[i] > 5 ? (Math.atan2(p.avg_b, p.avg_a) * 180 / Math.PI + 360) % 360 : -1);
+
+    // Count photos in warm hue range (15°-75° covers orange/amber/beer tones)
+    const warmPhotoCount = photoHue.filter(h => h >= 15 && h <= 75).length;
+    const warmPhotoRatio = photos.length > 0 ? warmPhotoCount / photos.length : 0;
+
+    // Saliency: color distance from average + chroma boost for saturated cells
+    // Warm saturated cells (orange/beer) get extra priority when warm photos are scarce
     const cellsWithSaliency = cellColors.map((cell, idx) => {
-      // Simple saliency: how different is this cell from the average?
-      const avgL = cellColors.reduce((s, c) => s + c.l, 0) / cellColors.length;
-      const avgA = cellColors.reduce((s, c) => s + c.a, 0) / cellColors.length;
-      const avgB = cellColors.reduce((s, c) => s + c.b, 0) / cellColors.length;
-      const saliency = deltaE2000(cell.l, cell.a, cell.b, avgL, avgA, avgB);
-      return { ...cell, idx, saliency };
+      const baseSaliency = deltaE2000(cell.l, cell.a, cell.b, avgL, avgA, avgB);
+      const chroma = cellChroma[idx];
+      // Boost saturated cells: chroma > 30 is vivid, scale proportionally
+      const chromaBoost = Math.max(0, (chroma - 20) * 0.3);
+      // Extra boost for warm hues (orange/amber 15°-75°) when warm photos are scarce
+      const hue = chroma > 5 ? (Math.atan2(cell.b, cell.a) * 180 / Math.PI + 360) % 360 : -1;
+      const isWarm = hue >= 15 && hue <= 75;
+      const warmBoost = isWarm && warmPhotoRatio < 0.3 ? chroma * 0.2 : 0;
+      return { ...cell, idx, saliency: baseSaliency + chromaBoost + warmBoost };
     }).sort((a, b) => b.saliency - a.saliency);
 
     const cellAssignment = new Array<{ photoId: number; photoIndex: number; thumbnailUrl: string; guestName: string | null } | null>(totalCells).fill(null);
+    // Track which photo was assigned to each cell index (for refinement)
+    const cellPhotoIdx = new Int32Array(totalCells).fill(-1);
 
     const isFinalize = mode === 'finalize';
 
+    // Phase 1: Greedy assignment with adaptive reuse penalty
     for (const cell of cellsWithSaliency) {
       let bestIdx = -1;
       let bestDist = Infinity;
+      const cellChr = cellChroma[cell.idx];
 
       for (let i = 0; i < photos.length; i++) {
         const uses = usageCount.get(i) || 0;
-        // In match mode: only allow one use per photo
-        // In finalize mode: allow reuse with increasing penalty
         if (!isFinalize && uses >= 1) continue;
         const p = photos[i];
         const dist = deltaE2000(cell.l, cell.a, cell.b, p.avg_l, p.avg_a, p.avg_b);
-        const reusePenalty = uses * 15;
+        // Adaptive reuse penalty: higher for saturated/distinctive colors
+        // so rare warm-toned photos spread more carefully
+        const basePenalty = 15;
+        const chromaFactor = 1 + Math.max(0, (cellChr - 20) * 0.03);
+        const reusePenalty = uses * basePenalty * chromaFactor;
         if (dist + reusePenalty < bestDist) {
           bestDist = dist + reusePenalty;
           bestIdx = i;
@@ -2908,12 +2933,54 @@ app.post("/api/events/:slug/match", async (req, res) => {
       const cellIndex = cell.row * cols + cell.col;
       if (bestIdx >= 0) {
         usageCount.set(bestIdx, (usageCount.get(bestIdx) || 0) + 1);
+        cellPhotoIdx[cellIndex] = bestIdx;
         cellAssignment[cellIndex] = {
           photoId: photos[bestIdx].id,
           photoIndex: bestIdx,
           thumbnailUrl: photos[bestIdx].thumbnail_url,
           guestName: photos[bestIdx].guest_name,
         };
+      }
+    }
+
+    // Phase 2: Refinement – pairwise swap pass to reduce total error
+    // Especially helps warm color regions where greedy order may be suboptimal
+    let improved = true;
+    let passes = 0;
+    const maxPasses = 3;
+    while (improved && passes < maxPasses) {
+      improved = false;
+      passes++;
+      for (let i = 0; i < totalCells; i++) {
+        if (cellPhotoIdx[i] < 0) continue;
+        const ci = cellColors[i];
+        const pi = photos[cellPhotoIdx[i]];
+        const distI = deltaE2000(ci.l, ci.a, ci.b, pi.avg_l, pi.avg_a, pi.avg_b);
+
+        for (let j = i + 1; j < totalCells; j++) {
+          if (cellPhotoIdx[j] < 0) continue;
+          if (cellPhotoIdx[i] === cellPhotoIdx[j]) continue; // same photo, skip
+          const cj = cellColors[j];
+          const pj = photos[cellPhotoIdx[j]];
+          const distJ = deltaE2000(cj.l, cj.a, cj.b, pj.avg_l, pj.avg_a, pj.avg_b);
+          const currentTotal = distI + distJ;
+
+          // Try swapping
+          const swapDistI = deltaE2000(ci.l, ci.a, ci.b, pj.avg_l, pj.avg_a, pj.avg_b);
+          const swapDistJ = deltaE2000(cj.l, cj.a, cj.b, pi.avg_l, pi.avg_a, pi.avg_b);
+          const swapTotal = swapDistI + swapDistJ;
+
+          if (swapTotal < currentTotal - 0.5) { // threshold to avoid trivial swaps
+            // Perform swap
+            const tmpIdx = cellPhotoIdx[i];
+            cellPhotoIdx[i] = cellPhotoIdx[j];
+            cellPhotoIdx[j] = tmpIdx;
+            const tmpAssign = cellAssignment[i];
+            cellAssignment[i] = cellAssignment[j];
+            cellAssignment[j] = tmpAssign;
+            improved = true;
+          }
+        }
       }
     }
 
@@ -3053,31 +3120,43 @@ app.post("/api/events/:slug/send-mosaic", async (req, res) => {
         }
       }
 
-      // Greedy matching: assign best photo to each cell (CIEDE2000)
-      const used = new Set<number>();
-      const assigned: Array<{ url: string; col: number; row: number }> = [];
+      // Optimized matching with warm-color awareness (CIEDE2000)
+      const usageCnt = new Map<number, number>();
+      const assigned: Array<{ url: string; col: number; row: number }> = new Array(totalCells);
 
-      // Process cells in random order to avoid bias
-      const shuffled = [...cellColors].sort(() => Math.random() - 0.5);
+      // Compute global averages once
+      const smAvgL = cellColors.reduce((s, c) => s + c.l, 0) / cellColors.length;
+      const smAvgA = cellColors.reduce((s, c) => s + c.a, 0) / cellColors.length;
+      const smAvgB = cellColors.reduce((s, c) => s + c.b, 0) / cellColors.length;
 
-      for (const cell of shuffled) {
+      // Sort by saliency with chroma boost for saturated warm colors
+      const smSorted = cellColors.map((cell, idx) => {
+        const baseSal = deltaE2000(cell.l, cell.a, cell.b, smAvgL, smAvgA, smAvgB);
+        const chroma = Math.sqrt(cell.a * cell.a + cell.b * cell.b);
+        const chromaBoost = Math.max(0, (chroma - 20) * 0.3);
+        return { ...cell, idx, saliency: baseSal + chromaBoost };
+      }).sort((a, b) => b.saliency - a.saliency);
+
+      for (const cell of smSorted) {
         let bestIdx = 0;
         let bestDist = Infinity;
+        const cellChr = Math.sqrt(cell.a * cell.a + cell.b * cell.b);
         for (let i = 0; i < photos.length; i++) {
-          if (used.has(i) && photos.length >= totalCells) continue; // avoid reuse if enough photos
+          const uses = usageCnt.get(i) || 0;
+          if (uses >= 1 && photos.length >= totalCells) continue;
           const p = photos[i];
           const dist = deltaE2000(cell.l, cell.a, cell.b, p.avg_l, p.avg_a, p.avg_b);
-          // Penalty for reuse
-          const reusePenalty = used.has(i) ? 20 : 0;
+          const chromaFactor = 1 + Math.max(0, (cellChr - 20) * 0.03);
+          const reusePenalty = uses * 20 * chromaFactor;
           if (dist + reusePenalty < bestDist) {
             bestDist = dist + reusePenalty;
             bestIdx = i;
           }
         }
-        used.add(bestIdx);
-        assigned.push({ url: photos[bestIdx].thumbnail_url, col: cell.col, row: cell.row });
+        usageCnt.set(bestIdx, (usageCnt.get(bestIdx) || 0) + 1);
+        assigned[cell.row * cols + cell.col] = { url: photos[bestIdx].thumbnail_url, col: cell.col, row: cell.row };
       }
-      tiles = assigned;
+      tiles = assigned.filter(Boolean);
     } else {
       // No target image: simple grid layout
       tiles = photos.slice(0, totalCells).map((p, i) => ({
