@@ -565,19 +565,30 @@ export default function Studio() {
         if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
-      // 2. Composite color-corrected mosaic snapshot as overlay for color accuracy
-      // Scale the small snapshot (TILE_PX-resolution) up to HR_TILE resolution
-      // and blend at ~35% to nudge tile colors toward the target
-      const colorCanvas = document.createElement('canvas');
-      colorCanvas.width = cols * tilePx;
-      colorCanvas.height = rows * tilePx;
-      const colorCtx = colorCanvas.getContext('2d')!;
-      colorCtx.putImageData(snapshot, 0, 0);
-
-      hrCtx.globalAlpha = 0.35;
-      hrCtx.imageSmoothingEnabled = true;
-      hrCtx.drawImage(colorCanvas, 0, 0, hrW, hrH);
-      hrCtx.globalAlpha = 1.0;
+      // 2. Per-tile color correction: tint each hi-res tile toward the target color
+      // Instead of overlaying the blurry 16px snapshot (causes color cast),
+      // apply a subtle per-tile multiply tint using the target cell colors.
+      const tc = targetColorsRef.current;
+      if (tc.length >= totalCells * 3) {
+        const tintCanvas = document.createElement('canvas');
+        tintCanvas.width = hrW;
+        tintCanvas.height = hrH;
+        const tintCtx = tintCanvas.getContext('2d')!;
+        // Draw flat target color per tile
+        for (let ci = 0; ci < totalCells; ci++) {
+          const col = ci % cols;
+          const row = Math.floor(ci / cols);
+          const tci = ci * 3;
+          tintCtx.fillStyle = `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})`;
+          tintCtx.fillRect(col * HR_TILE, row * HR_TILE, HR_TILE, HR_TILE);
+        }
+        // Multiply blend: darkens tiles toward target color without blue-casting
+        hrCtx.globalCompositeOperation = 'multiply';
+        hrCtx.globalAlpha = 0.18;
+        hrCtx.drawImage(tintCanvas, 0, 0);
+        hrCtx.globalCompositeOperation = 'source-over';
+        hrCtx.globalAlpha = 1.0;
+      }
 
       // 3. Convert to blob URL
       const blob = await new Promise<Blob | null>(resolve =>
@@ -4504,7 +4515,26 @@ export default function Studio() {
                     maxWidth: "none",
                   }}
                 />
-                {/* User overlay - original photo shown on top with user-controlled opacity */}
+                {/* Hi-Res image overlay - sharp zoom (rendered BEFORE user overlay so overlay shows on top) */}
+                {hiResImgUrl && hiResReady && zoom > 1.05 && (
+                  <img
+                    src={hiResImgUrl}
+                    alt=""
+                    style={{
+                      display: "block",
+                      position: "absolute" as const,
+                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                      transformOrigin: "center center",
+                      transition: isDragging.current ? "none" : "transform 0.1s ease",
+                      width: canvasRef.current?.style.width,
+                      height: canvasRef.current?.style.height,
+                      maxWidth: "none",
+                      pointerEvents: "none",
+                      imageRendering: zoom > 2 ? "pixelated" as const : "auto" as const,
+                    }}
+                  />
+                )}
+                {/* User overlay - original photo shown on top of everything (including hi-res) */}
                 {userPhotoImg && userOverlay > 0 && ready && (
                   <img
                     src={userPhotoImg.src}
@@ -4521,25 +4551,6 @@ export default function Studio() {
                       opacity: userOverlay / 100,
                       pointerEvents: "none",
                       mixBlendMode: "normal",
-                    }}
-                  />
-                )}
-                {/* Hi-Res image overlay - server-rendered for sharp zoom (only visible when zoomed in) */}
-                {hiResImgUrl && hiResReady && zoom > 1.05 && (
-                  <img
-                    src={hiResImgUrl}
-                    alt=""
-                    style={{
-                      display: "block",
-                      position: "absolute" as const,
-                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                      transformOrigin: "center center",
-                      transition: isDragging.current ? "none" : "transform 0.1s ease",
-                      width: canvasRef.current?.style.width,
-                      height: canvasRef.current?.style.height,
-                      maxWidth: "none",
-                      pointerEvents: "none",
-                      imageRendering: zoom > 2 ? "pixelated" as const : "auto" as const,
                     }}
                   />
                 )}
