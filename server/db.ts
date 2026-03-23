@@ -365,6 +365,17 @@ export async function ensureSchema(): Promise<void> {
   // Store user-uploaded tile images as JSONB array of base64 strings
   await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_tiles JSONB`);
 
+  // Backfill tile_source_mode from JSONB data for existing projects (one-time migration)
+  try {
+    await pool.query(`
+      UPDATE projects
+      SET tile_source_mode = data->>'tileSourceMode'
+      WHERE tile_source_mode = 'pool'
+        AND data->>'tileSourceMode' IS NOT NULL
+        AND data->>'tileSourceMode' != 'pool'
+    `);
+  } catch { /* ignore if already migrated */ }
+
   // Add user_id to events (nullable for backwards compatibility)
   await pool.query(`ALTER TABLE mosaic_events ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`);
 
