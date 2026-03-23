@@ -192,6 +192,8 @@ export default function Studio() {
   const [userTileFiles, setUserTileFiles] = useState<File[]>([]);
   const [userTileImages, setUserTileImages] = useState<HTMLImageElement[]>([]);
   const userTileImagesRef = useRef<HTMLImageElement[]>([]);
+  const userTileHiResRef = useRef<HTMLImageElement[]>([]); // hi-res versions (512px) for detail/zoom
+  const validImgsHiResRef = useRef<(HTMLImageElement | null)[]>([]); // parallel to validImgsRef: hi-res for user tiles, null for DB tiles
   const tileSourceModeRef = useRef<'pool' | 'own' | 'mix'>('pool');
   const tileUploadRef = useRef<HTMLInputElement>(null);
   const MIN_OWN_TILES = 20; // minimum tiles for 'own' mode
@@ -502,6 +504,7 @@ export default function Studio() {
   const triggerClientHiResRender = useCallback(async () => {
     const assignment = assignmentRef.current;
     const validImgs = validImgsRef.current;
+    const hiResImgs = validImgsHiResRef.current;
     const params = mosaicParamsRef.current;
     const snapshot = snapshotRef.current;
     if (!assignment.length || !validImgs.length || !params || !snapshot) return;
@@ -538,7 +541,10 @@ export default function Studio() {
         const row = Math.floor(ci / cols);
         const x = col * HR_TILE;
         const y = row * HR_TILE;
-        const img = validImgs[assignment[ci]];
+        const tileIdx = assignment[ci];
+        // Prefer hi-res (512px) over thumbnail (64px) for sharper zoom
+        const hiImg = hiResImgs[tileIdx];
+        const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
         const rot = rotations[ci] || 0;
 
         if (img && img.complete && img.naturalWidth > 0) {
@@ -1128,25 +1134,44 @@ export default function Studio() {
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (imageFiles.length === 0) return;
     setUserTileFiles(prev => [...prev, ...imageFiles]);
-    // Load all images to 64px thumbnails for the mosaic pipeline
-    const loadPromises = imageFiles.map(file => new Promise<HTMLImageElement | null>(resolve => {
+    // Load all images: 64px thumbnail for matching + 512px hi-res for detail/zoom
+    const HR_SIZE = 512;
+    const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement} | null>(resolve => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
         img.onload = () => {
-          // Resize to 64x64 for tile matching (same as DB tiles)
-          const canvas = document.createElement('canvas');
-          canvas.width = 64; canvas.height = 64;
-          const ctx = canvas.getContext('2d')!;
           // Center-crop to square
           const s = Math.min(img.naturalWidth, img.naturalHeight);
           const sx = (img.naturalWidth - s) / 2;
           const sy = (img.naturalHeight - s) / 2;
-          ctx.drawImage(img, sx, sy, s, s, 0, 0, 64, 64);
-          const tileImg = new Image();
-          tileImg.onload = () => resolve(tileImg);
-          tileImg.onerror = () => resolve(null);
-          tileImg.src = canvas.toDataURL('image/jpeg', 0.85);
+
+          // 64x64 thumbnail for tile matching
+          const thumbCanvas = document.createElement('canvas');
+          thumbCanvas.width = 64; thumbCanvas.height = 64;
+          const thumbCtx = thumbCanvas.getContext('2d')!;
+          thumbCtx.drawImage(img, sx, sy, s, s, 0, 0, 64, 64);
+
+          // 512x512 hi-res for detail popup and zoom rendering
+          const hiresSize = Math.min(HR_SIZE, s); // don't upscale tiny originals
+          const hiresCanvas = document.createElement('canvas');
+          hiresCanvas.width = hiresSize; hiresCanvas.height = hiresSize;
+          const hiresCtx = hiresCanvas.getContext('2d')!;
+          hiresCtx.drawImage(img, sx, sy, s, s, 0, 0, hiresSize, hiresSize);
+
+          let loaded = 0;
+          const thumbImg = new Image();
+          const hiresImg = new Image();
+          const checkDone = () => {
+            loaded++;
+            if (loaded === 2) resolve({ thumb: thumbImg, hires: hiresImg });
+          };
+          thumbImg.onload = checkDone;
+          thumbImg.onerror = () => resolve(null);
+          hiresImg.onload = checkDone;
+          hiresImg.onerror = () => resolve(null);
+          thumbImg.src = thumbCanvas.toDataURL('image/jpeg', 0.85);
+          hiresImg.src = hiresCanvas.toDataURL('image/jpeg', 0.92);
         };
         img.onerror = () => resolve(null);
         img.src = e.target?.result as string;
@@ -1154,13 +1179,16 @@ export default function Studio() {
       reader.onerror = () => resolve(null);
       reader.readAsDataURL(file);
     }));
-    Promise.all(loadPromises).then(imgs => {
-      const valid = imgs.filter(Boolean) as HTMLImageElement[];
+    Promise.all(loadPromises).then(results => {
+      const valid = results.filter(Boolean) as {thumb: HTMLImageElement; hires: HTMLImageElement}[];
+      const thumbs = valid.map(v => v.thumb);
+      const hires = valid.map(v => v.hires);
       setUserTileImages(prev => {
-        const next = [...prev, ...valid];
+        const next = [...prev, ...thumbs];
         userTileImagesRef.current = next;
         return next;
       });
+      userTileHiResRef.current = [...userTileHiResRef.current, ...hires];
     });
   }, []);
 
@@ -1171,6 +1199,7 @@ export default function Studio() {
       userTileImagesRef.current = next;
       return next;
     });
+    userTileHiResRef.current = userTileHiResRef.current.filter((_, i) => i !== index);
   }, []);
 
   // Auto-render when photo is loaded
@@ -2086,25 +2115,34 @@ export default function Studio() {
     // -- Tile Source Mode: merge user-uploaded tiles into the pool ----------------
     const currentTileMode = tileSourceModeRef.current;
     const currentUserTiles = userTileImagesRef.current;
+    const currentUserHiRes = userTileHiResRef.current;
+    let validImgsHiRes: (HTMLImageElement | null)[] = new Array(validImgs.length).fill(null);
 
     if (currentTileMode === 'own' && currentUserTiles.length > 0) {
       // Only user tiles – replace entire pool
       validImgs = [...currentUserTiles];
       validTileIds = currentUserTiles.map((_, i) => -(i + 1)); // negative IDs for user tiles
+      validImgsHiRes = currentUserTiles.map((_, i) => currentUserHiRes[i] || null);
       // Duplicate tiles to fill pool if too few (repeat to reach ~200 minimum for variety)
       while (validImgs.length < 200 && currentUserTiles.length > 0) {
         validImgs.push(...currentUserTiles);
         validTileIds.push(...currentUserTiles.map((_, i) => -(i + 1)));
+        validImgsHiRes.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
       }
       console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length})`);
     } else if (currentTileMode === 'mix' && currentUserTiles.length > 0) {
       // Mix: user tiles + DB pool – prepend user tiles (they get priority in matching)
       const userExpanded = [...currentUserTiles];
+      const userHiResExpanded: (HTMLImageElement | null)[] = currentUserTiles.map((_, i) => currentUserHiRes[i] || null);
       // Add user tiles 3x to boost their presence in the mix
-      for (let rep = 0; rep < 2; rep++) userExpanded.push(...currentUserTiles);
+      for (let rep = 0; rep < 2; rep++) {
+        userExpanded.push(...currentUserTiles);
+        userHiResExpanded.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
+      }
       const userIds = userExpanded.map((_, i) => -(i + 1));
       validImgs = [...userExpanded, ...validImgs];
       validTileIds = [...userIds, ...validTileIds];
+      validImgsHiRes = [...userHiResExpanded, ...validImgsHiRes];
       console.log(`[Studio] Tile source: MIX – ${currentUserTiles.length} user tiles (3x boosted) + ${validImgs.length - userExpanded.length} DB tiles`);
     } else {
       console.log(`[Studio] Tile source: POOL ONLY – ${validImgs.length} DB tiles`);
@@ -2218,6 +2256,7 @@ export default function Studio() {
     const goodImgFeatures: ImgFeature[] = [];
     const goodValidImgs: HTMLImageElement[] = [];
     const goodTileIds: number[] = [];
+    const goodHiRes: (HTMLImageElement | null)[] = [];
     // Compute target image average brightness to calibrate dark-tile filter
     let targetAvgL = 0;
     for (let ci2 = 0; ci2 < (TOTAL_TILES); ci2++) { targetAvgL += cellLab[ci2][0]; }
@@ -2236,6 +2275,7 @@ export default function Studio() {
         goodImgFeatures.push(f);
         goodValidImgs.push(validImgs[i]);
         goodTileIds.push(validTileIds[i]);
+        goodHiRes.push(validImgsHiRes[i] || null);
       }
     }
     console.log(`[Mosaic] Filtered ${imgFeatures.length - goodImgFeatures.length} clipart tiles, ${goodImgFeatures.length} remaining`);
@@ -2270,6 +2310,7 @@ export default function Studio() {
     const filteredImgFeatures = diversifiedIndices.map(i => goodImgFeatures[i]);
     const filteredValidImgs = diversifiedIndices.map(i => goodValidImgs[i]);
     const filteredTileIds = diversifiedIndices.map(i => goodTileIds[i]);
+    const filteredHiRes = diversifiedIndices.map(i => goodHiRes[i] || null);
     console.log(`[Mosaic] Pool diversification: removed ${extremeYellowIndices.length} extreme yellow tiles (b>${EXTREME_YELLOW_THRESHOLD}), capped ${moderateYellowIndices.length}->${keptModerateIndices.length} moderate yellow tiles, total: ${filteredImgFeatures.length}`);
 
     // Cell features from target image
@@ -2953,6 +2994,7 @@ export default function Studio() {
     assignmentRef.current = assignment;
     assignmentRotRef.current = [...assignmentRotation];
     validImgsRef.current = filteredValidImgs;
+    validImgsHiResRef.current = filteredHiRes;
     tileIdsRef.current = filteredTileIds;
     // Store overlay data for server-side overlay in print/digital downloads
     const targetColorsFlat: number[] = new Array(TOTAL_TILES * 3);
@@ -3549,8 +3591,9 @@ export default function Studio() {
       // DB tile – load from server at high resolution
       tileUrl = `/api/tile/${tileId}?size=256`;
     } else if (validImgsRef.current[tileIdx]) {
-      // User-uploaded tile (negative ID or no ID) – use the original image src
-      tileUrl = validImgsRef.current[tileIdx].src;
+      // User-uploaded tile (negative ID or no ID) – use hi-res version if available
+      const hiRes = validImgsHiResRef.current[tileIdx];
+      tileUrl = (hiRes && hiRes.src) ? hiRes.src : validImgsRef.current[tileIdx].src;
     }
 
     // Get cell target color from snapshot
