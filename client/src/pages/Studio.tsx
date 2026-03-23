@@ -506,12 +506,15 @@ export default function Studio() {
     setHiResLoading(true);
     const { cols, rows, tilePx } = params;
     const totalCells = cols * rows;
-    const HR_TILE = 64; // hi-res tile size (4x-8x the preview tile)
+    // Adaptive hi-res tile size: use largest that fits within canvas limits
+    const maxCanvasDim = 16000;
+    const maxTileFromLimit = Math.floor(maxCanvasDim / Math.max(cols, rows));
+    const HR_TILE = Math.min(128, Math.max(32, maxTileFromLimit)); // 128px ideal, min 32px
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
 
     // Safety: don't create canvases > 16k pixels
-    if (hrW > 16000 || hrH > 16000) {
+    if (hrW > maxCanvasDim || hrH > maxCanvasDim) {
       setHiResLoading(false);
       return;
     }
@@ -3491,10 +3494,12 @@ export default function Studio() {
 
     // Get tile URL
     let tileUrl = '';
-    if (tileIdsRef.current.length > 0) {
-      const tileId = tileIdsRef.current[tileIdx];
+    const tileId = tileIdsRef.current[tileIdx];
+    if (tileId && tileId > 0) {
+      // DB tile – load from server at high resolution
       tileUrl = `/api/tile/${tileId}?size=256`;
     } else if (validImgsRef.current[tileIdx]) {
+      // User-uploaded tile (negative ID or no ID) – use the original image src
       tileUrl = validImgsRef.current[tileIdx].src;
     }
 
