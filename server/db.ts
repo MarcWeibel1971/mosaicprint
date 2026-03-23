@@ -12,8 +12,16 @@ export function getPool(): pg.Pool {
     if (!url) throw new Error("DATABASE_URL not set");
     _pool = new pg.Pool({
       connectionString: url,
-      ssl: { rejectUnauthorized: false }, // TiDB requires SSL always (local dev + production)
+      ssl: { rejectUnauthorized: false },
       max: 10,
+      idleTimeoutMillis: 30_000,        // close idle clients after 30s
+      connectionTimeoutMillis: 10_000,   // fail connect after 10s
+      keepAlive: true,                   // prevent Railway proxy from dropping idle TCP
+      keepAliveInitialDelayMillis: 10_000,
+    });
+    // Log pool errors to prevent unhandled ECONNRESET crashes
+    _pool.on('error', (err) => {
+      console.error('[pg.Pool] Unexpected client error:', err.message);
     });
   }
   return _pool;

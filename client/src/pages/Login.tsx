@@ -28,7 +28,7 @@ export default function Login() {
     <div className="min-h-[calc(100vh-8rem)] flex items-center justify-center px-4 py-12 bg-gradient-to-b from-cream-50 to-white">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <h1 className="font-serif text-3xl text-gray-900 mb-2">Willkommen zurueck</h1>
+          <h1 className="font-serif text-3xl text-gray-900 mb-2">Willkommen zurück</h1>
           <p className="text-gray-500">Melde dich an, um deine Projekte zu verwalten.</p>
         </div>
 
