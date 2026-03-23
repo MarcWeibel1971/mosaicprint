@@ -178,6 +178,8 @@ export default function Studio() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [sharpness, setSharpness] = useState(80);
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
+  const [colorEnhance, setColorEnhance] = useState(0); // 0-100: tint tiles toward target color
+  const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
   const [compareMode, setCompareMode] = useState(false);
   const [distancePreview, setDistancePreview] = useState(false); // Simulate 2-3m viewing distance
   const [comparePos, setComparePos] = useState(50);
@@ -393,6 +395,8 @@ export default function Studio() {
   const edgeMapRef = useRef<number[]>([]);      // edge strength 0-1 per cell
   const faceMaskRef = useRef<boolean[]>([]);     // face region flag per cell
   const assignmentRotRef = useRef<number[]>([]);  // rotation per cell (0-3)
+  const colorEnhanceCanvasRef = useRef<HTMLCanvasElement | null>(null); // small canvas with target colors per cell
+  const colorEnhanceRef = useRef(0); // current colorEnhance value for use in callbacks
 
   // HI-RES ZOOM: server-rendered high-resolution image for sharp zooming
   // When user zooms beyond 1x, we trigger a server-side render at 128px/tile,
@@ -582,9 +586,11 @@ export default function Studio() {
           tintCtx.fillStyle = `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})`;
           tintCtx.fillRect(col * HR_TILE, row * HR_TILE, HR_TILE, HR_TILE);
         }
-        // Multiply blend: darkens tiles toward target color without blue-casting
+        // Multiply blend: darkens tiles toward target color
+        // Base 18% + additional boost from Color Enhance slider
+        const ceAlpha = Math.min(0.85, 0.18 + (colorEnhanceRef.current / 100) * 0.45);
         hrCtx.globalCompositeOperation = 'multiply';
-        hrCtx.globalAlpha = 0.18;
+        hrCtx.globalAlpha = ceAlpha;
         hrCtx.drawImage(tintCanvas, 0, 0);
         hrCtx.globalCompositeOperation = 'source-over';
         hrCtx.globalAlpha = 1.0;
@@ -2960,6 +2966,27 @@ export default function Studio() {
     edgeMapRef.current = [...edgeMap];
     faceMaskRef.current = [...faceMask];
 
+    // Build color enhance canvas: 1 pixel per cell with target color
+    // Used as a real-time multiply overlay controlled by the Color Enhance slider
+    {
+      const ceCanvas = document.createElement('canvas');
+      ceCanvas.width = COLS;
+      ceCanvas.height = ROWS;
+      const ceCtx = ceCanvas.getContext('2d')!;
+      const ceData = ceCtx.createImageData(COLS, ROWS);
+      for (let ci = 0; ci < TOTAL_TILES; ci++) {
+        const pi = ci * 4;
+        const ti = ci * 3;
+        ceData.data[pi]     = targetColorsFlat[ti];
+        ceData.data[pi + 1] = targetColorsFlat[ti + 1];
+        ceData.data[pi + 2] = targetColorsFlat[ti + 2];
+        ceData.data[pi + 3] = 255;
+      }
+      ceCtx.putImageData(ceData, 0, 0);
+      colorEnhanceCanvasRef.current = ceCanvas;
+      setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
+    }
+
     // -- Compute Quality Metrics ----------------------------------------------
     // Compute after matching so we have the final assignment
     try {
@@ -4534,6 +4561,27 @@ export default function Studio() {
                     }}
                   />
                 )}
+                {/* Color Enhance overlay - target colors per tile with multiply blend */}
+                {colorEnhance > 0 && ready && colorEnhanceUrl && (
+                  <img
+                    src={colorEnhanceUrl}
+                    alt=""
+                    style={{
+                      display: "block",
+                      position: "absolute",
+                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                      transformOrigin: "center center",
+                      transition: isDragging.current ? "none" : "transform 0.1s ease",
+                      width: canvasRef.current?.style.width,
+                      height: canvasRef.current?.style.height,
+                      maxWidth: "none",
+                      pointerEvents: "none",
+                      imageRendering: "pixelated" as const,
+                      mixBlendMode: "multiply" as const,
+                      opacity: colorEnhance / 100,
+                    }}
+                  />
+                )}
                 {/* User overlay - original photo shown on top of everything (including hi-res) */}
                 {userPhotoImg && userOverlay > 0 && ready && (
                   <img
@@ -4662,6 +4710,29 @@ export default function Studio() {
                 <div className="flex justify-between text-xs text-gray-400 mt-1">
                   <span>Nur Mosaik</span>
                   <span>Mehr Originalfoto</span>
+                </div>
+              </div>
+            )}
+
+            {/* Color Enhance slider */}
+            {ready && (
+              <div className="mb-4 bg-white rounded-2xl border border-purple-100 shadow-sm p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <p className="text-sm font-bold text-gray-800">Color Enhance</p>
+                    <p className="text-xs text-gray-500">Farben Richtung Originalbild verstaerken</p>
+                  </div>
+                  <span className="text-xs font-bold text-purple-600 bg-purple-50 rounded px-2 py-0.5">{colorEnhance}%</span>
+                </div>
+                <input
+                  type="range" min={0} max={100} step={5} value={colorEnhance}
+                  onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
+                  className="w-full h-2 rounded-full cursor-pointer"
+                  style={{ accentColor: '#8B5CF6' }}
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>Keine Verstaerkung</span>
+                  <span>Maximale Farbkorrektur</span>
                 </div>
               </div>
             )}
