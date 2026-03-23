@@ -72,6 +72,22 @@ const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "50mb" }));
 
+// Request logging middleware
+app.use((req, _res, next) => {
+  if (req.path.startsWith('/api/')) {
+    console.log(`[REQ] ${req.method} ${req.path} from ${req.ip} origin=${req.headers.origin || '-'}`);
+  }
+  next();
+});
+
+// Graceful error handling to prevent crashes
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED]', reason);
+});
+
 // ---- REST endpoints expected by Studio.tsx ----
 
 // GET /api/tile-lab-index
