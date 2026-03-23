@@ -392,6 +392,7 @@ export default function Studio() {
   const targetColorsRef = useRef<number[]>([]); // flat [r,g,b,r,g,b,...] per cell (COLS×ROWS)
   const edgeMapRef = useRef<number[]>([]);      // edge strength 0-1 per cell
   const faceMaskRef = useRef<boolean[]>([]);     // face region flag per cell
+  const assignmentRotRef = useRef<number[]>([]);  // rotation per cell (0-3)
 
   // HI-RES ZOOM: server-rendered high-resolution image for sharp zooming
   // When user zooms beyond 1x, we trigger a server-side render at 128px/tile,
@@ -490,6 +491,109 @@ export default function Studio() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canDoHiRes]);
+
+  // Client-side hi-res render for own photos (where server render can't work)
+  // Draws tiles at larger resolution using the original HTMLImageElements,
+  // then composites the color-transferred mosaic as a tint overlay.
+  const triggerClientHiResRender = useCallback(async () => {
+    const assignment = assignmentRef.current;
+    const validImgs = validImgsRef.current;
+    const params = mosaicParamsRef.current;
+    const snapshot = snapshotRef.current;
+    if (!assignment.length || !validImgs.length || !params || !snapshot) return;
+    if (hiResLoadingRef.current) return;
+
+    setHiResLoading(true);
+    const { cols, rows, tilePx } = params;
+    const totalCells = cols * rows;
+    const HR_TILE = 64; // hi-res tile size (4x-8x the preview tile)
+    const hrW = cols * HR_TILE;
+    const hrH = rows * HR_TILE;
+
+    // Safety: don't create canvases > 16k pixels
+    if (hrW > 16000 || hrH > 16000) {
+      setHiResLoading(false);
+      return;
+    }
+
+    try {
+      await new Promise(r => setTimeout(r, 0)); // yield to UI
+
+      // 1. Draw hi-res tiles from original images
+      const hrCanvas = document.createElement('canvas');
+      hrCanvas.width = hrW;
+      hrCanvas.height = hrH;
+      const hrCtx = hrCanvas.getContext('2d')!;
+      const rotations = assignmentRotRef.current;
+
+      for (let ci = 0; ci < totalCells; ci++) {
+        const col = ci % cols;
+        const row = Math.floor(ci / cols);
+        const x = col * HR_TILE;
+        const y = row * HR_TILE;
+        const img = validImgs[assignment[ci]];
+        const rot = rotations[ci] || 0;
+
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            if (rot === 0) {
+              hrCtx.drawImage(img, x, y, HR_TILE, HR_TILE);
+            } else {
+              hrCtx.save();
+              hrCtx.translate(x + HR_TILE / 2, y + HR_TILE / 2);
+              hrCtx.rotate(rot * Math.PI / 2);
+              hrCtx.drawImage(img, -HR_TILE / 2, -HR_TILE / 2, HR_TILE, HR_TILE);
+              hrCtx.restore();
+            }
+          } catch {
+            // Fallback: fill with target color
+            const tci = ci * 3;
+            const tc = targetColorsRef.current;
+            hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#888';
+            hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+          }
+        } else {
+          const tci = ci * 3;
+          const tc = targetColorsRef.current;
+          hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#888';
+          hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+        }
+
+        if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+
+      // 2. Composite color-corrected mosaic snapshot as overlay for color accuracy
+      // Scale the small snapshot (TILE_PX-resolution) up to HR_TILE resolution
+      // and blend at ~35% to nudge tile colors toward the target
+      const colorCanvas = document.createElement('canvas');
+      colorCanvas.width = cols * tilePx;
+      colorCanvas.height = rows * tilePx;
+      const colorCtx = colorCanvas.getContext('2d')!;
+      colorCtx.putImageData(snapshot, 0, 0);
+
+      hrCtx.globalAlpha = 0.35;
+      hrCtx.imageSmoothingEnabled = true;
+      hrCtx.drawImage(colorCanvas, 0, 0, hrW, hrH);
+      hrCtx.globalAlpha = 1.0;
+
+      // 3. Convert to blob URL
+      const blob = await new Promise<Blob | null>(resolve =>
+        hrCanvas.toBlob(resolve, 'image/jpeg', 0.92)
+      );
+
+      if (blob) {
+        if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
+        const url = URL.createObjectURL(blob);
+        hiResImgUrlRef.current = url;
+        setHiResImgUrl(url);
+        setHiResReady(true);
+      }
+    } catch (e) {
+      console.error('[ClientHiRes] Failed:', e);
+    } finally {
+      setHiResLoading(false);
+    }
+  }, []);
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => {
@@ -2815,6 +2919,7 @@ export default function Studio() {
 
     // Store assignment and valid images for hi-res re-render
     assignmentRef.current = assignment;
+    assignmentRotRef.current = [...assignmentRotation];
     validImgsRef.current = filteredValidImgs;
     tileIdsRef.current = filteredTileIds;
     // Store overlay data for server-side overlay in print/digital downloads
@@ -3331,11 +3436,12 @@ export default function Studio() {
 
     // Always allow zoom – trigger hi-res render in background if not ready
     if (newZ > 1.05 && !hiResReadyRef.current && !hiResLoadingRef.current) {
-      triggerHiResRender();
+      if (canDoHiRes()) triggerHiResRender();
+      else triggerClientHiResRender();
     }
 
     setZoom(newZ);
-  }, [triggerHiResRender]);
+  }, [triggerHiResRender, triggerClientHiResRender, canDoHiRes]);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     isDragging.current = true; lastMouse.current = { x: e.clientX, y: e.clientY };
     clickStartRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
@@ -4295,7 +4401,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) triggerHiResRender(); setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) { if (canDoHiRes()) triggerHiResRender(); else triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -4363,7 +4469,7 @@ export default function Studio() {
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
                     transition: isDragging.current ? "none" : "transform 0.1s ease",
-                    imageRendering: zoom > 1 && !distancePreview ? "pixelated" : "auto",
+                    imageRendering: zoom > 1 && !distancePreview && !hiResReady ? "pixelated" : "auto",
                     filter: distancePreview ? "blur(2px)" : "none",
                     maxWidth: "none",
                   }}
