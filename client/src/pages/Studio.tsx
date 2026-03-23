@@ -5448,7 +5448,7 @@ export default function Studio() {
                   onClick={() => { setSaveMode('overwrite'); fetchExistingProjects(); }}
                   className={`flex-1 text-sm font-medium py-2 rounded-md transition-colors ${saveMode === 'overwrite' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                 >
-                  Ueberschreiben
+                  Überschreiben
                 </button>
               </div>
             )}
@@ -5468,7 +5468,7 @@ export default function Studio() {
               </>
             ) : (
               <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Projekt zum Ueberschreiben waehlen</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Projekt zum Überschreiben wählen</label>
                 {loadingExistingProjects ? (
                   <div className="flex justify-center py-4"><RefreshCw className="w-5 h-5 text-gray-300 animate-spin" /></div>
                 ) : existingProjects.length === 0 ? (
@@ -5497,7 +5497,7 @@ export default function Studio() {
                           <p className="text-xs text-gray-400">{new Date(p.updated_at).toLocaleDateString('de-CH')}</p>
                         </div>
                         {selectedOverwriteId === p.id && (
-                          <span className="text-green-600 text-xs font-semibold flex-shrink-0">Gewaehlt</span>
+                          <span className="text-green-600 text-xs font-semibold flex-shrink-0">Gewählt</span>
                         )}
                       </button>
                     ))}
@@ -5524,7 +5524,7 @@ export default function Studio() {
                 disabled={savingProject || (saveMode === 'overwrite' && !selectedOverwriteId)}
                 className="flex-1 px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white text-sm font-semibold transition-colors"
               >
-                {savingProject ? 'Speichert...' : saveMode === 'overwrite' ? 'Ueberschreiben' : 'Speichern'}
+                {savingProject ? 'Speichert...' : saveMode === 'overwrite' ? 'Überschreiben' : 'Speichern'}
               </button>
             </div>
           </div>

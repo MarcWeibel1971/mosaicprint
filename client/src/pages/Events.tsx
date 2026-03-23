@@ -68,8 +68,8 @@ export default function Events() {
             Gemeinsam ein Mosaik erschaffen
           </h1>
           <p className="text-lg text-gray-500 max-w-xl mx-auto">
-            Lade Gaeste ein, Fotos beizusteuern — jedes Bild wird Teil eines einzigartigen Mosaiks.
-            Perfekt fuer Hochzeiten, Firmenevents und Feiern.
+            Lade Gäste ein, Fotos beizusteuern — jedes Bild wird Teil eines einzigartigen Mosaiks.
+            Perfekt für Hochzeiten, Firmenevents und Feiern.
           </p>
         </div>
       </section>
@@ -78,9 +78,9 @@ export default function Events() {
       <section className="max-w-4xl mx-auto px-6 pb-12">
         <div className="grid md:grid-cols-3 gap-6">
           {[
-            { icon: QrCode, title: 'QR-Code teilen', desc: 'Gaeste scannen den Code mit dem Handy' },
-            { icon: Camera, title: 'Fotos hochladen', desc: 'Jeder Gast laedt ein oder mehrere Fotos hoch' },
-            { icon: Users, title: 'Mosaik waechst', desc: 'Das Mosaik wird live aus allen Fotos zusammengesetzt' },
+            { icon: QrCode, title: 'QR-Code teilen', desc: 'Gäste scannen den Code mit dem Handy' },
+            { icon: Camera, title: 'Fotos hochladen', desc: 'Jeder Gast lädt ein oder mehrere Fotos hoch' },
+            { icon: Users, title: 'Mosaik wächst', desc: 'Das Mosaik wird live aus allen Fotos zusammengesetzt' },
           ].map(({ icon: Icon, title, desc }) => (
             <div key={title} className="bg-white rounded-2xl border border-cream-200 p-6 text-center">
               <div className="w-12 h-12 mx-auto mb-4 bg-coral-50 rounded-xl flex items-center justify-center">
@@ -155,7 +155,7 @@ export default function Events() {
         {createdEvent && createdEvent.qrDataUrl && (
           <div className="mt-6 bg-white rounded-2xl p-8 border border-green-200 shadow-sm text-center">
             <h3 className="font-bold text-lg text-gray-900 mb-2">Event "{createdEvent.name}" erstellt!</h3>
-            <p className="text-sm text-gray-500 mb-4">Teile diesen QR-Code mit deinen Gaesten.</p>
+            <p className="text-sm text-gray-500 mb-4">Teile diesen QR-Code mit deinen Gästen.</p>
             <img src={createdEvent.qrDataUrl} alt="QR Code" className="w-64 h-64 mx-auto mb-4 rounded-xl border border-gray-200" />
             {createdEvent.eventUrl && (
               <p className="text-xs text-gray-400 break-all mb-4">{createdEvent.eventUrl}</p>
