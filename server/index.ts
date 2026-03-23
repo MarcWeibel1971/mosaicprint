@@ -2465,11 +2465,11 @@ app.post("/api/projects", requireAuth, async (req, res) => {
   try {
     const pool = db.getPool();
     const user = (req as any).user as AuthUser;
-    const { name, data, thumbnailUrl } = req.body;
+    const { name, data, thumbnailUrl, tileSourceMode, projectType, userTiles } = req.body;
     if (!data) return res.status(400).json({ ok: false, error: "Projektdaten fehlen" });
     const result = await pool.query(
-      "INSERT INTO projects (user_id, name, data, thumbnail_url) VALUES ($1, $2, $3, $4) RETURNING id, name, thumbnail_url, created_at",
-      [user.id, name || "Mein Mosaik", data, thumbnailUrl || null]
+      "INSERT INTO projects (user_id, name, data, thumbnail_url, tile_source_mode, project_type, user_tiles) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name, thumbnail_url, tile_source_mode, project_type, created_at",
+      [user.id, name || "Mein Mosaik", data, thumbnailUrl || null, tileSourceMode || 'pool', projectType || 'mosaic', userTiles ? JSON.stringify(userTiles) : null]
     );
     res.json({ ok: true, project: result.rows[0] });
   } catch (e) {
@@ -2483,7 +2483,7 @@ app.get("/api/projects", requireAuth, async (req, res) => {
     const pool = db.getPool();
     const user = (req as any).user as AuthUser;
     const result = await pool.query(
-      "SELECT id, name, thumbnail_url, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
+      "SELECT id, name, thumbnail_url, tile_source_mode, project_type, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
       [user.id]
     );
     res.json({ ok: true, projects: result.rows });
@@ -2513,13 +2513,33 @@ app.put("/api/projects/:id", requireAuth, async (req, res) => {
   try {
     const pool = db.getPool();
     const user = (req as any).user as AuthUser;
-    const { name, data, thumbnailUrl } = req.body;
+    const { name, data, thumbnailUrl, tileSourceMode, userTiles } = req.body;
     const result = await pool.query(
-      "UPDATE projects SET name = COALESCE($1, name), data = COALESCE($2, data), thumbnail_url = COALESCE($3, thumbnail_url), updated_at = NOW() WHERE id = $4 AND user_id = $5 RETURNING id, name, thumbnail_url, updated_at",
-      [name, data, thumbnailUrl, req.params.id, user.id]
+      `UPDATE projects SET name = COALESCE($1, name), data = COALESCE($2, data), thumbnail_url = COALESCE($3, thumbnail_url),
+       tile_source_mode = COALESCE($4, tile_source_mode), user_tiles = COALESCE($5, user_tiles),
+       updated_at = NOW() WHERE id = $6 AND user_id = $7 RETURNING id, name, thumbnail_url, tile_source_mode, updated_at`,
+      [name, data, thumbnailUrl, tileSourceMode, userTiles ? JSON.stringify(userTiles) : null, req.params.id, user.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Projekt nicht gefunden" });
     res.json({ ok: true, project: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Update project user tiles only (for photo management)
+app.put("/api/projects/:id/tiles", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const { userTiles } = req.body;
+    if (!userTiles || !Array.isArray(userTiles)) return res.status(400).json({ ok: false, error: "userTiles array required" });
+    const result = await pool.query(
+      "UPDATE projects SET user_tiles = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3 RETURNING id, name, updated_at",
+      [JSON.stringify(userTiles), req.params.id, user.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: "Projekt nicht gefunden" });
+    res.json({ ok: true, project: result.rows[0], tileCount: userTiles.length });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }

@@ -3637,7 +3637,15 @@ export default function Studio() {
         const res = await fetch('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ name, data, thumbnailUrl }),
+          body: JSON.stringify({
+            name, data, thumbnailUrl,
+            tileSourceMode,
+            projectType: 'mosaic',
+            // Save user tile hi-res images for own/mix mode
+            userTiles: (tileSourceMode === 'own' || tileSourceMode === 'mix') && userTileHiResRef.current.length > 0
+              ? userTileHiResRef.current.map(img => img?.src || null).filter(Boolean)
+              : null,
+          }),
         });
         const result = await res.json();
         if (result.ok) {
@@ -3749,6 +3757,39 @@ export default function Studio() {
           if (data.assignment) assignmentRef.current = data.assignment;
           if (data.tileIds) tileIdsRef.current = data.tileIds;
           if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+
+          // Restore user tiles from project if available
+          const savedTiles = result.project.user_tiles;
+          if (savedTiles && Array.isArray(savedTiles) && savedTiles.length > 0) {
+            const parsedTiles = typeof savedTiles === 'string' ? JSON.parse(savedTiles) : savedTiles;
+            // Load hi-res images
+            const hiResImgs: HTMLImageElement[] = [];
+            const thumbImgs: HTMLImageElement[] = [];
+            await Promise.all((parsedTiles as string[]).map((src: string) => new Promise<void>(resolve => {
+              // Hi-res version (original 512px)
+              const hiImg = new Image();
+              hiImg.onload = () => {
+                hiResImgs.push(hiImg);
+                // Create 64px thumbnail for matching
+                const thumbCanvas = document.createElement('canvas');
+                thumbCanvas.width = 64; thumbCanvas.height = 64;
+                const tCtx = thumbCanvas.getContext('2d')!;
+                tCtx.drawImage(hiImg, 0, 0, 64, 64);
+                const thumbImg = new Image();
+                thumbImg.onload = () => { thumbImgs.push(thumbImg); resolve(); };
+                thumbImg.onerror = () => resolve();
+                thumbImg.src = thumbCanvas.toDataURL('image/jpeg', 0.85);
+              };
+              hiImg.onerror = () => resolve();
+              hiImg.src = src;
+            })));
+            if (thumbImgs.length > 0) {
+              setUserTileImages(thumbImgs);
+              userTileImagesRef.current = thumbImgs;
+              userTileHiResRef.current = hiResImgs;
+            }
+          }
+
           if (data.mosaicImage && data.mosaicParams) {
             const img = new Image();
             img.onload = () => {
