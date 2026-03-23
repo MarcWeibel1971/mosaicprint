@@ -306,6 +306,10 @@ export default function Studio() {
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [saveProjectName, setSaveProjectName] = useState('');
   const [savingProject, setSavingProject] = useState(false);
+  const [saveMode, setSaveMode] = useState<'new' | 'overwrite'>('new');
+  const [existingProjects, setExistingProjects] = useState<Array<{ id: number; name: string; thumbnail_url: string | null; updated_at: string }>>([]);
+  const [selectedOverwriteId, setSelectedOverwriteId] = useState<number | null>(null);
+  const [loadingExistingProjects, setLoadingExistingProjects] = useState(false);
 
   // Update cache size display
   useEffect(() => {
@@ -3666,8 +3670,20 @@ export default function Studio() {
     setTileDetail({ col, row, tileIdx, tileUrl, cellColor });
   }, [ready, zoom, pan]);
 
+  // Fetch existing projects for the overwrite option
+  const fetchExistingProjects = useCallback(async () => {
+    if (!user) return;
+    setLoadingExistingProjects(true);
+    try {
+      const res = await fetch('/api/projects', { headers: authHeaders() });
+      const data = await res.json();
+      if (data.ok) setExistingProjects(data.projects);
+    } catch { /* ignore */ }
+    finally { setLoadingExistingProjects(false); }
+  }, [user, authHeaders]);
+
   // Project save handler — saves to server if logged in, otherwise localStorage
-  const saveProject = useCallback(async (projectName?: string) => {
+  const saveProject = useCallback(async (projectName?: string, overwriteId?: number) => {
     setSavingProject(true);
     try {
       const name = projectName?.trim() || 'Mein Mosaik';
@@ -3688,7 +3704,6 @@ export default function Studio() {
       let thumbnailUrl: string | undefined;
       if (canvasRef.current) {
         data.mosaicImage = canvasRef.current.toDataURL('image/jpeg', 0.7);
-        // Create smaller thumbnail for project listing
         const thumbCanvas = document.createElement('canvas');
         thumbCanvas.width = 300;
         thumbCanvas.height = Math.round(300 * (canvasRef.current.height / canvasRef.current.width));
@@ -3699,34 +3714,39 @@ export default function Studio() {
         }
       }
 
+      const userTilesPayload = (tileSourceMode === 'own' || tileSourceMode === 'mix') && userTileHiResRef.current.length > 0
+        ? userTileHiResRef.current.map(img => img?.src || null).filter(Boolean)
+        : null;
+
       // Save to server if logged in
       if (user) {
-        const res = await fetch('/api/projects', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({
-            name, data, thumbnailUrl,
-            tileSourceMode,
-            projectType: 'mosaic',
-            // Save user tile hi-res images for own/mix mode
-            userTiles: (tileSourceMode === 'own' || tileSourceMode === 'mix') && userTileHiResRef.current.length > 0
-              ? userTileHiResRef.current.map(img => img?.src || null).filter(Boolean)
-              : null,
-          }),
-        });
+        let res: Response;
+        if (overwriteId) {
+          // Overwrite existing project
+          res = await fetch(`/api/projects/${overwriteId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ name, data, thumbnailUrl, tileSourceMode, userTiles: userTilesPayload }),
+          });
+        } else {
+          // Create new project
+          res = await fetch('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ name, data, thumbnailUrl, tileSourceMode, projectType: 'mosaic', userTiles: userTilesPayload }),
+          });
+        }
         const result = await res.json();
         if (result.ok) {
           setHasSavedProject(true);
           setShowSaveModal(false);
         } else {
           console.warn('[Project Save] Server error:', result.error);
-          // Fallback to localStorage
           localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
           setHasSavedProject(true);
           setShowSaveModal(false);
         }
       } else {
-        // Not logged in: save to localStorage
         localStorage.setItem('mosaicprint_saved_project', JSON.stringify(data));
         setHasSavedProject(true);
         setShowSaveModal(false);
@@ -5395,23 +5415,85 @@ export default function Studio() {
       {/* Save Project Modal */}
       {showSaveModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-900">Projekt speichern</h3>
               <button onClick={() => setShowSaveModal(false)} className="text-gray-400 hover:text-gray-700">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Projektname</label>
-            <input
-              type="text"
-              value={saveProjectName}
-              onChange={e => setSaveProjectName(e.target.value)}
-              placeholder="z.B. Familienportrait, Hochzeit 2024..."
-              className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-400 focus:border-green-400 mb-4"
-              autoFocus
-              onKeyDown={e => { if (e.key === 'Enter' && !savingProject) saveProject(saveProjectName); }}
-            />
+
+            {/* Tab: New vs Overwrite */}
+            {user && (
+              <div className="flex gap-1 mb-4 bg-gray-100 rounded-lg p-0.5">
+                <button
+                  onClick={() => { setSaveMode('new'); setSelectedOverwriteId(null); }}
+                  className={`flex-1 text-sm font-medium py-2 rounded-md transition-colors ${saveMode === 'new' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Neues Projekt
+                </button>
+                <button
+                  onClick={() => { setSaveMode('overwrite'); fetchExistingProjects(); }}
+                  className={`flex-1 text-sm font-medium py-2 rounded-md transition-colors ${saveMode === 'overwrite' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Ueberschreiben
+                </button>
+              </div>
+            )}
+
+            {saveMode === 'new' ? (
+              <>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Projektname</label>
+                <input
+                  type="text"
+                  value={saveProjectName}
+                  onChange={e => setSaveProjectName(e.target.value)}
+                  placeholder="z.B. Familienportrait, Hochzeit 2024..."
+                  className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-400 focus:border-green-400 mb-4"
+                  autoFocus
+                  onKeyDown={e => { if (e.key === 'Enter' && !savingProject) saveProject(saveProjectName); }}
+                />
+              </>
+            ) : (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Projekt zum Ueberschreiben waehlen</label>
+                {loadingExistingProjects ? (
+                  <div className="flex justify-center py-4"><RefreshCw className="w-5 h-5 text-gray-300 animate-spin" /></div>
+                ) : existingProjects.length === 0 ? (
+                  <p className="text-sm text-gray-400 py-3 text-center">Keine bestehenden Projekte</p>
+                ) : (
+                  <div className="max-h-48 overflow-y-auto space-y-1.5 border border-gray-200 rounded-xl p-2">
+                    {existingProjects.map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => { setSelectedOverwriteId(p.id); setSaveProjectName(p.name); }}
+                        className={`w-full flex items-center gap-3 p-2 rounded-lg text-left transition-colors ${
+                          selectedOverwriteId === p.id ? 'bg-green-50 border border-green-300' : 'hover:bg-gray-50 border border-transparent'
+                        }`}
+                      >
+                        <div className="w-10 h-10 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
+                          {p.thumbnail_url ? (
+                            <img src={p.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-gray-300">
+                              <FolderOpen className="w-4 h-4" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{p.name}</p>
+                          <p className="text-xs text-gray-400">{new Date(p.updated_at).toLocaleDateString('de-CH')}</p>
+                        </div>
+                        {selectedOverwriteId === p.id && (
+                          <span className="text-green-600 text-xs font-semibold flex-shrink-0">Gewaehlt</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex gap-3">
               <button
                 onClick={() => setShowSaveModal(false)}
@@ -5420,11 +5502,17 @@ export default function Studio() {
                 Abbrechen
               </button>
               <button
-                onClick={() => saveProject(saveProjectName)}
-                disabled={savingProject}
+                onClick={() => {
+                  if (saveMode === 'overwrite' && selectedOverwriteId) {
+                    saveProject(saveProjectName, selectedOverwriteId);
+                  } else {
+                    saveProject(saveProjectName);
+                  }
+                }}
+                disabled={savingProject || (saveMode === 'overwrite' && !selectedOverwriteId)}
                 className="flex-1 px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white text-sm font-semibold transition-colors"
               >
-                {savingProject ? 'Speichert...' : 'Speichern'}
+                {savingProject ? 'Speichert...' : saveMode === 'overwrite' ? 'Ueberschreiben' : 'Speichern'}
               </button>
             </div>
           </div>

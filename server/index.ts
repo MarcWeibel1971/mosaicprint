@@ -2638,6 +2638,21 @@ app.get("/api/events", async (_req, res) => {
   }
 });
 
+// Get current user's events (for Projects page)
+app.get("/api/my-events", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    const result = await pool.query(`
+      SELECT e.*, (SELECT COUNT(*) FROM event_photos WHERE event_id = e.id) as photo_count
+      FROM mosaic_events e WHERE e.user_id = $1 ORDER BY e.created_at DESC
+    `, [user.id]);
+    res.json({ ok: true, events: result.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // Get event by slug (public)
 app.get("/api/events/:slug", async (req, res) => {
   try {
