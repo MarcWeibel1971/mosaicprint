@@ -3665,6 +3665,20 @@ export default function Studio() {
     }
   }, [popOutMode, ready, renderPopOut]);
 
+  // Auto-start Hi-Res rendering in background once mosaic is ready
+  useEffect(() => {
+    if (!ready) return;
+    if (hiResReadyRef.current || hiResLoadingRef.current) return;
+    // Short delay so UI renders first
+    const timer = setTimeout(() => {
+      if (hiResReadyRef.current || hiResLoadingRef.current) return;
+      if (canDoHiRes()) triggerHiResRender();
+      else triggerClientHiResRender();
+    }, 1500);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const factor = e.deltaY > 0 ? 0.85 : 1.18;
@@ -4965,20 +4979,24 @@ export default function Studio() {
                     }}
                   />
                 )}
-                {/* Hi-Res loading overlay */}
+                {/* Hi-Res loading overlay - subtle when background preloading, prominent when user is zoomed */}
                 {hiResLoading && (
                   <div style={{
                     position: "absolute", top: 12, right: 12,
                     pointerEvents: "none", zIndex: 10,
+                    opacity: zoom > 1.05 ? 1 : 0.7,
+                    transition: "opacity 0.3s",
                   }}>
                     <div style={{
-                      background: "white", borderRadius: 12, padding: "8px 16px",
+                      background: "white", borderRadius: zoom > 1.05 ? 12 : 8,
+                      padding: zoom > 1.05 ? "8px 16px" : "5px 10px",
                       textAlign: "center", boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+                      transition: "all 0.3s",
                     }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "#1f2937", marginBottom: 2 }}>
-                        HD wird geladen...
+                      <div style={{ fontSize: zoom > 1.05 ? 11 : 10, fontWeight: 600, color: "#1f2937", marginBottom: 2 }}>
+                        {zoom > 1.05 ? 'HD wird geladen...' : 'HD wird vorbereitet…'}
                       </div>
-                      <div style={{ width: 100, height: 4, background: "#e5e7eb", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{ width: zoom > 1.05 ? 100 : 70, height: zoom > 1.05 ? 4 : 3, background: "#e5e7eb", borderRadius: 2, overflow: "hidden" }}>
                         <div style={{
                           height: "100%", background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
                           borderRadius: 2, transition: "width 0.3s",
@@ -5116,7 +5134,7 @@ export default function Studio() {
                     ) : hiResLoading ? (
                       <span className="text-xs font-semibold text-amber-600 bg-amber-100 rounded px-2 py-1">Wird geladen...</span>
                     ) : (
-                      <span className="text-xs text-gray-500 bg-gray-100 rounded px-2 py-1">Wird beim Zoomen aktiviert</span>
+                      <span className="text-xs text-gray-500 bg-gray-100 rounded px-2 py-1">Wird automatisch vorbereitet…</span>
                     )}
                   </div>
 
