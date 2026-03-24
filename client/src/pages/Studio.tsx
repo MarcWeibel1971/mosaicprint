@@ -2545,8 +2545,10 @@ export default function Studio() {
     // Also store best rotation per tile (0=0deg, 1=90deg, 2=180deg, 3=270deg)
     const assignmentRotation: number[] = new Array(TOTAL_TILES).fill(0);
     // Repetition Lock: radius 4, penalty 160 (portrait-optimized per feedback)
+    // For small pools (own photos), reduce penalties to allow better color matching
+    const isSmallPool = poolSize < 500;
     const NEIGHBOR_RADIUS = savedSettings.neighborRadius ?? 4;
-    const NEIGHBOR_PENALTY = savedSettings.neighborPenalty ?? 160;
+    const NEIGHBOR_PENALTY = savedSettings.neighborPenalty ?? (isSmallPool ? 60 : 160);
     const ENABLE_ROTATION = savedSettings.enableRotation ?? true; // Tile rotation for better matching
 
     // Pre-compute rotated features for all tiles (0deg, 90deg, 180deg, 270deg)
@@ -2609,8 +2611,10 @@ export default function Studio() {
         }
       } else {
         // Legacy fallback: binary search in sortedByL
-        const PRE_FILTER_COUNT = Math.min(80, filteredValidImgs.length);
-        if (filteredValidImgs.length > (PRE_FILTER_COUNT) * 2) {
+        // For small pools (<500 tiles), use ALL tiles as candidates - no pre-filtering needed
+        // This ensures every cell considers every tile, giving the best possible color match
+        const PRE_FILTER_COUNT = Math.min(isSmallPool ? filteredValidImgs.length : 80, filteredValidImgs.length);
+        if (!isSmallPool && filteredValidImgs.length > (PRE_FILTER_COUNT) * 2) {
           const targetL = tf.lab[0];
           let lo = 0, hi = sortedByL.length - 1;
           while (lo < hi) {
@@ -2636,10 +2640,12 @@ export default function Studio() {
       const rotations = ENABLE_ROTATION ? [0, 1, 2, 3] : [0];
       // Hoist cell-level constants outside candidate + rotation loops (settings don't change per render)
       const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
-      const wSsdBase = noOverlay ? 0.50 : 0.38;
-      const wLabBase = savedSettings.labWeight ?? 0.15;
+      // For small pools: boost LAB (color accuracy) and SSD, reduce texture/edge
+      // With 203 photos, color match matters most - texture variety is limited anyway
+      const wSsdBase = noOverlay ? 0.50 : (isSmallPool ? 0.45 : 0.38);
+      const wLabBase = savedSettings.labWeight ?? (isSmallPool ? 0.30 : 0.15);
       const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
-      const wTextureBase = savedSettings.textureWeight ?? 0.08;
+      const wTextureBase = savedSettings.textureWeight ?? (isSmallPool ? 0.03 : 0.08);
       // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
       const wSatBase = savedSettings.saturationWeight ?? 0.25;
       // Cell-level features (constant across all candidates for this cell)
@@ -2651,25 +2657,27 @@ export default function Studio() {
         // neighborPenalty applied uniformly - no special reduction for bright tiles
         // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        // Face regions with small pools: dramatically boost reuse for warm/skin tiles
-        // With 203 photos for 10800 cells, each photo must be used ~53x.
-        // Warm/skin tiles should be heavily reused in face areas rather than filling with blue tiles.
-        const isTileWarmSkin = mf.lab[1] > 0 && mf.lab[2] > 0 && mf.lab[0] >= 25 && mf.lab[0] <= 90;
-        const isTileCool = mf.lab[2] < -3; // blue-ish tile
-        const isSmallPool = poolSize < TOTAL_TILES;
+        // Small pool strategy: with 203 photos for 10800 cells, prioritize color accuracy
+        // over variety. Allow high reuse, especially for warm tiles in face regions.
+        const isTileWarm = mf.lab[2] > 0; // positive b = warm (yellow/orange/brown)
+        const isTileCool = mf.lab[2] < -5; // negative b = cool (blue)
         let effectiveMaxReuse = cellMaxReuse;
         let neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
-        if (inFace && isSmallPool) {
-          if (isTileWarmSkin) {
-            // Warm tiles in face: unlimited reuse, minimal neighbor penalty
-            effectiveMaxReuse = cellMaxReuse * 5;
-            neighborPenalty = Math.round(neighborPenalty * 0.3); // reduce neighbor penalty to 30%
-          } else if (isTileCool) {
-            // Cool/blue tiles in face: extra strict reuse
-            effectiveMaxReuse = Math.max(2, Math.floor(cellMaxReuse * 0.3));
+        if (isSmallPool) {
+          // Global: boost reuse for all tiles in small pools
+          effectiveMaxReuse = cellMaxReuse * 3;
+          if (inFace) {
+            if (isTileWarm) {
+              // Warm tiles in face: very high reuse, minimal neighbor penalty
+              effectiveMaxReuse = cellMaxReuse * 8;
+              neighborPenalty = Math.round(neighborPenalty * 0.15);
+            } else if (isTileCool) {
+              // Cool/blue tiles in face: heavily penalized reuse
+              effectiveMaxReuse = Math.max(1, Math.floor(cellMaxReuse * 0.2));
+            }
           }
         }
-        const reusePenalty = useCount[j] >= effectiveMaxReuse ? 25 * (useCount[j] - effectiveMaxReuse + 1) : 0;
+        const reusePenalty = useCount[j] >= effectiveMaxReuse ? 30 * (useCount[j] - effectiveMaxReuse + 1) : 0;
 
         // ── Rotation-independent metrics (computed once per candidate, not per rotation) ──────────
         // 0. Pixel-accurate SSD score (8x8 RGB comparison - most accurate signal)
