@@ -399,6 +399,7 @@ export default function Studio() {
   const tileUrlIndexRef = useRef<Record<string, string> | null>(null);
   const tileUrlIndexLoadedRef = useRef<boolean>(false);
   const mosaicParamsRef = useRef<{cols:number; rows:number; tilePx:number; canvasW:number; canvasH:number} | null>(null);
+  const skipAutoRenderRef = useRef(false); // Skip auto-render when loading a project (already has rendered image)
   // Overlay data: stored from renderMosaic for server-side overlay in print/digital downloads
   const targetColorsRef = useRef<number[]>([]); // flat [r,g,b,r,g,b,...] per cell (COLS×ROWS)
   const edgeMapRef = useRef<number[]>([]);      // edge strength 0-1 per cell
@@ -1227,6 +1228,11 @@ export default function Studio() {
   // Auto-render when photo is loaded
   useEffect(() => {
     if (!userPhotoImg) return;
+    // Skip auto-render when loading a saved project (it already has a rendered mosaic image)
+    if (skipAutoRenderRef.current) {
+      skipAutoRenderRef.current = false;
+      return;
+    }
     const run = async () => {
       setLoading(true);
       setProgress(0);
@@ -1499,12 +1505,17 @@ export default function Studio() {
           floatsPerTileRef.current = floatsPerTile;
           const buf = await r.arrayBuffer();
           labIndex = new Float32Array(buf);
+          console.log(`[Studio] LAB index loaded: ${labIndex.length} floats, ${floatsPerTile} per tile = ${Math.floor(labIndex.length / floatsPerTile)} tiles`);
           if (currentTheme === 'alle') {
             labIndexRef.current = labIndex;
             labIndexLoadedRef.current = true;
           }
+        } else {
+          console.warn(`[Studio] LAB index fetch failed: HTTP ${r.status}`);
         }
-      } catch { /* fallback to legacy below */ }
+      } catch (labErr) {
+        console.warn('[Studio] LAB index fetch error:', labErr);
+      }
     }
 
     const FPT = floatsPerTileRef.current; // floats per tile: 4 (legacy), 7 (7D), 14 (14D), 15 (15D with isSkinFriendly), 16 (16D with tileComplexity), 17 (17D with mosaicScore), 18 (18D with blurNorm)
@@ -1868,6 +1879,7 @@ export default function Studio() {
       return smallImg;
     }
 
+    console.log(`[Studio] Pre-load: USE_2STAGE=${USE_2STAGE}, neededTileIds.size=${neededTileIds.size}, urlIndex=${tileUrlIndexRef.current ? Object.keys(tileUrlIndexRef.current).length : 'null'}`);
     if (USE_2STAGE && neededTileIds.size > 0) {
       try {
       // -- Strategy: Direct R2/CDN loading (preferred) or Atlas fallback --
@@ -2101,6 +2113,7 @@ export default function Studio() {
 
     if (!USE_2STAGE || tileImgMap.size === 0) {
       // Legacy: load a fixed pool of images
+      console.warn(`[Studio] Fallback triggered: USE_2STAGE=${USE_2STAGE}, tileImgMap.size=${tileImgMap.size}, labIndex=${labIndex ? labIndex.length : 'null'}, FPT=${FPT}`);
       setProgressMsg("Lade Kachel-Pool (Fallback)...");
       const isPortrait = savedSettings.portraitMode === true;
       const TARGET_POOL = isMobileOrSlow ? 600 : (isPortrait ? 2500 : 1500);
@@ -3845,8 +3858,9 @@ export default function Studio() {
         img.src = data.mosaicImage;
       }
 
-      // Restore user photo as image element
+      // Restore user photo as image element (skip auto-render: project already has rendered image)
       if (data.userPhoto) {
+        skipAutoRenderRef.current = true;
         const uImg = new Image();
         uImg.onload = () => setUserPhotoImg(uImg);
         uImg.src = data.userPhoto;
@@ -3865,11 +3879,16 @@ export default function Studio() {
   }, []);
 
   // Load project from server if ?project=ID in URL
+  const [projectLoading, setProjectLoading] = useState(false);
+  const [projectLoadMsg, setProjectLoadMsg] = useState('');
   useEffect(() => {
     const projectId = searchParams.get('project');
     if (!projectId || !user) return;
     (async () => {
       try {
+        setProjectLoading(true);
+        setProjectLoadMsg('Projektdaten laden...');
+
         const res = await fetch(`/api/projects/${projectId}`, { headers: authHeaders() });
         const result = await res.json();
         if (result.ok && result.project?.data) {
@@ -3887,26 +3906,31 @@ export default function Studio() {
           // Restore user tiles from project if available
           const savedTiles = result.project.user_tiles;
           if (savedTiles && Array.isArray(savedTiles) && savedTiles.length > 0) {
+            setProjectLoadMsg('Fotos werden geladen...');
             const parsedTiles = typeof savedTiles === 'string' ? JSON.parse(savedTiles) : savedTiles;
-            // Load hi-res images
+            const totalTiles = (parsedTiles as string[]).length;
+            let loadedCount = 0;
             const hiResImgs: HTMLImageElement[] = [];
             const thumbImgs: HTMLImageElement[] = [];
             await Promise.all((parsedTiles as string[]).map((src: string) => new Promise<void>(resolve => {
-              // Hi-res version (original 512px)
               const hiImg = new Image();
               hiImg.onload = () => {
                 hiResImgs.push(hiImg);
-                // Create 64px thumbnail for matching
                 const thumbCanvas = document.createElement('canvas');
                 thumbCanvas.width = 64; thumbCanvas.height = 64;
                 const tCtx = thumbCanvas.getContext('2d')!;
                 tCtx.drawImage(hiImg, 0, 0, 64, 64);
                 const thumbImg = new Image();
-                thumbImg.onload = () => { thumbImgs.push(thumbImg); resolve(); };
-                thumbImg.onerror = () => resolve();
+                thumbImg.onload = () => {
+                  thumbImgs.push(thumbImg);
+                  loadedCount++;
+                  setProjectLoadMsg(`Fotos laden: ${loadedCount}/${totalTiles}`);
+                  resolve();
+                };
+                thumbImg.onerror = () => { loadedCount++; resolve(); };
                 thumbImg.src = thumbCanvas.toDataURL('image/jpeg', 0.85);
               };
-              hiImg.onerror = () => resolve();
+              hiImg.onerror = () => { loadedCount++; resolve(); };
               hiImg.src = src;
             })));
             if (thumbImgs.length > 0) {
@@ -3916,28 +3940,44 @@ export default function Studio() {
             }
           }
 
+          setProjectLoadMsg('Mosaik wird angezeigt...');
+
           if (data.mosaicImage && data.mosaicParams) {
-            const img = new Image();
-            img.onload = () => {
-              const canvas = canvasRef.current;
-              if (!canvas) return;
-              const { canvasW, canvasH } = data.mosaicParams;
-              canvas.width = canvasW;
-              canvas.height = canvasH;
-              const displayScale = data.mosaicParams._displayScale ?? 0.5;
-              canvas.style.width = `${Math.round(canvasW * displayScale)}px`;
-              canvas.style.height = `${Math.round(canvasH * displayScale)}px`;
-              const ctx = canvas.getContext('2d');
-              if (ctx) {
-                ctx.drawImage(img, 0, 0, canvasW, canvasH);
-                snapshotRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
-              }
-              setReady(true);
-              setShowOrderPanel(true);
-            };
-            img.src = data.mosaicImage;
+            await new Promise<void>((resolve) => {
+              const img = new Image();
+              img.onload = () => {
+                const canvas = canvasRef.current;
+                if (!canvas) { resolve(); return; }
+                const { canvasW, canvasH } = data.mosaicParams;
+                canvas.width = canvasW;
+                canvas.height = canvasH;
+                const displayScale = data.mosaicParams._displayScale ?? 0.5;
+                canvas.style.width = `${Math.round(canvasW * displayScale)}px`;
+                canvas.style.height = `${Math.round(canvasH * displayScale)}px`;
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                  ctx.drawImage(img, 0, 0, canvasW, canvasH);
+                  snapshotRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+                }
+                setReady(true);
+                setShowOrderPanel(true);
+                // Auto-zoom to fit
+                const containerW = canvas.parentElement?.clientWidth ?? 700;
+                const containerH = window.innerHeight * 0.65;
+                const displayW2 = canvasW * displayScale;
+                const displayH2 = canvasH * displayScale;
+                const fitZoom = Math.min(containerW / displayW2, containerH / displayH2) * 0.92;
+                setZoom(Math.min(Math.max(fitZoom, 0.3), 1.5));
+                setPan({ x: 0, y: 0 });
+                resolve();
+              };
+              img.onerror = () => resolve();
+              img.src = data.mosaicImage;
+            });
           }
+          // Restore user photo (skip auto-render: project already has rendered image)
           if (data.userPhoto) {
+            skipAutoRenderRef.current = true;
             const uImg = new Image();
             uImg.onload = () => setUserPhotoImg(uImg);
             uImg.src = data.userPhoto;
@@ -3945,6 +3985,9 @@ export default function Studio() {
         }
       } catch (e) {
         console.warn('[Project Load] Failed:', e);
+      } finally {
+        setProjectLoading(false);
+        setProjectLoadMsg('');
       }
     })();
   }, [searchParams, user, authHeaders]);
@@ -4737,8 +4780,17 @@ export default function Studio() {
           </div>
         )}
 
+        {/* Project loading overlay */}
+        {projectLoading && (
+          <div className="max-w-md mx-auto bg-white rounded-2xl p-10 shadow-lg border border-cream-200 mb-8 text-center">
+            <img src="/mosaicprint/favicon.png" alt="MosaicPrint" className="w-16 h-16 mx-auto mb-5 animate-spin" style={{ animationDuration: '2s' }} />
+            <p className="font-bold text-lg text-gray-900 mb-2">Projekt wird geladen</p>
+            <p className="text-sm text-gray-500">{projectLoadMsg}</p>
+          </div>
+        )}
+
         {/* Upload area (when no photo) */}
-        {!userPhoto && !loading && (
+        {!userPhoto && !loading && !projectLoading && (
           <div
             className={`max-w-xl mx-auto border-2 border-dashed border-coral-200 rounded-3xl p-12 text-center cursor-pointer hover:border-coral-400 hover:bg-coral-50 transition-all group mb-8 ${
               tileSourceMode === 'own' && userTileImages.length < MIN_OWN_TILES ? 'opacity-50 pointer-events-none' : ''
