@@ -528,7 +528,10 @@ export default function Studio() {
     const hiResImgs = validImgsHiResRef.current;
     const params = mosaicParamsRef.current;
     const snapshot = snapshotRef.current;
-    if (!assignment.length || !validImgs.length || !params || !snapshot) return;
+    if (!assignment.length || !validImgs.length || !params) {
+      console.warn('[ClientHiRes] Skipped: assignment=', assignment.length, 'validImgs=', validImgs.length, 'params=', !!params);
+      return;
+    }
     if (hiResLoadingRef.current) return;
 
     setHiResLoading(true);
@@ -651,12 +654,14 @@ export default function Studio() {
       });
 
       if (blob) {
-        console.log(`[ClientHiRes] Success: blob=${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px`);
+        console.log(`[ClientHiRes] Success: blob=${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
         if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
         const url = URL.createObjectURL(blob);
         hiResImgUrlRef.current = url;
         setHiResImgUrl(url);
         setHiResReady(true);
+      } else {
+        console.error('[ClientHiRes] toBlob returned null');
       }
     } catch (e) {
       console.error('[ClientHiRes] Failed:', e);
@@ -1178,8 +1183,10 @@ export default function Studio() {
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (imageFiles.length === 0) return;
     setUserTileFiles(prev => [...prev, ...imageFiles]);
-    // Load all images: 64px thumbnail for matching + 512px hi-res for detail/zoom
-    const HR_SIZE = 512;
+    // Load all images: 64px thumbnail for matching + hi-res for detail/zoom
+    // Mobile: smaller hi-res to avoid memory issues (203 × 512² = 53MB in memory)
+    const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const HR_SIZE = isMobile ? 256 : 512;
     const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement} | null>(resolve => {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -1196,12 +1203,20 @@ export default function Studio() {
           const thumbCtx = thumbCanvas.getContext('2d')!;
           thumbCtx.drawImage(img, sx, sy, s, s, 0, 0, 64, 64);
 
-          // 512x512 hi-res for detail popup and zoom rendering
+          // Hi-res for detail popup and zoom rendering
           const hiresSize = Math.min(HR_SIZE, s); // don't upscale tiny originals
           const hiresCanvas = document.createElement('canvas');
           hiresCanvas.width = hiresSize; hiresCanvas.height = hiresSize;
-          const hiresCtx = hiresCanvas.getContext('2d')!;
-          hiresCtx.drawImage(img, sx, sy, s, s, 0, 0, hiresSize, hiresSize);
+          const hiresCtx = hiresCanvas.getContext('2d');
+          if (hiresCtx) {
+            hiresCtx.drawImage(img, sx, sy, s, s, 0, 0, hiresSize, hiresSize);
+          } else {
+            // Fallback: use thumbnail as hi-res (better than nothing)
+            console.warn('[TileUpload] hi-res canvas context failed, using thumbnail');
+          }
+
+          const thumbDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.85);
+          const hiresDataUrl = hiresCtx ? hiresCanvas.toDataURL('image/jpeg', 0.92) : thumbDataUrl;
 
           let loaded = 0;
           const thumbImg = new Image();
@@ -1213,9 +1228,9 @@ export default function Studio() {
           thumbImg.onload = checkDone;
           thumbImg.onerror = () => resolve(null);
           hiresImg.onload = checkDone;
-          hiresImg.onerror = () => resolve(null);
-          thumbImg.src = thumbCanvas.toDataURL('image/jpeg', 0.85);
-          hiresImg.src = hiresCanvas.toDataURL('image/jpeg', 0.92);
+          hiresImg.onerror = () => { console.warn('[TileUpload] hires image load failed'); resolve({ thumb: thumbImg, hires: thumbImg }); };
+          thumbImg.src = thumbDataUrl;
+          hiresImg.src = hiresDataUrl;
         };
         img.onerror = () => resolve(null);
         img.src = e.target?.result as string;
@@ -2656,14 +2671,14 @@ export default function Studio() {
       const rotations = ENABLE_ROTATION ? [0, 1, 2, 3] : [0];
       // Hoist cell-level constants outside candidate + rotation loops (settings don't change per render)
       const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
-      // For small pools: boost LAB (color accuracy) and SSD, reduce texture/edge
-      // With 203 photos, color match matters most - texture variety is limited anyway
-      const wSsdBase = noOverlay ? 0.50 : (isSmallPool ? 0.45 : 0.38);
-      const wLabBase = savedSettings.labWeight ?? (isSmallPool ? 0.30 : 0.15);
-      const wBrightBase = savedSettings.brightnessWeight ?? 0.40; // KEY: brightness drives face structure
-      const wTextureBase = savedSettings.textureWeight ?? (isSmallPool ? 0.03 : 0.08);
-      // Read saturation weight from settings (portrait preset: 0.45, default: 0.25)
-      const wSatBase = savedSettings.saturationWeight ?? 0.25;
+      // Small pools: SSD-only scoring. The 8×8 pixel comparison already captures
+      // color, brightness, texture, and spatial distribution in one metric.
+      // Other weights are redundant and can cause worse matches by overriding SSD.
+      const wSsdBase = isSmallPool ? 1.0 : (noOverlay ? 0.50 : 0.38);
+      const wLabBase = isSmallPool ? 0 : (savedSettings.labWeight ?? 0.15);
+      const wBrightBase = isSmallPool ? 0 : (savedSettings.brightnessWeight ?? 0.40);
+      const wTextureBase = isSmallPool ? 0 : (savedSettings.textureWeight ?? 0.08);
+      const wSatBase = isSmallPool ? 0 : (savedSettings.saturationWeight ?? 0.25);
       // Cell-level features (constant across all candidates for this cell)
       const targetSatC = tf.saturation;
       const cellEdge = edgeMap[ci]; // 0-1
@@ -2701,7 +2716,7 @@ export default function Studio() {
         const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
         // 5. Edge Priority Matching: adaptive weight 0.05-0.50 based on cell edge strength
         const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
-        const edgeWeight = 0.05 + cellEdge * 0.75; // 0.05 (flat) to 0.80 (sharp edge) — increased for crisper contours
+        const edgeWeight = isSmallPool ? 0 : (0.05 + cellEdge * 0.75); // small pools: SSD-only; otherwise 0.05-0.80
         // 6. Saturation difference
         // Prevents gray tiles in colorful areas and vice versa
         // saturation = sqrt(a^2+b^2), range 0-100
@@ -2725,8 +2740,8 @@ export default function Studio() {
           // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
           // nose: high brightness, moderate edge, strong sat penalty (skin area)
           // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
-          const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-          const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4; // increased for better face clarity
+          const wSsdFace   = isSmallPool ? 1.0 : (subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50);
+          const wLabF      = isSmallPool ? 0 : (subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4);
           // Dynamic brightness weight:
           // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
           //   so the algorithm picks light tiles, not dark/cool ones
