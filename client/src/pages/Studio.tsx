@@ -4960,11 +4960,11 @@ export default function Studio() {
           </div>
         )}
 
-        {/* Canvas container */}
-        {(ready || loading) && (
+        {/* Canvas container - always in DOM (hidden when not needed) for ref availability */}
+        {(ready || loading || projectLoading) && (
           <>
-            {/* Controls */}
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            {/* Controls - hidden during project loading */}
+            <div className={`flex flex-wrap items-center justify-between gap-3 mb-4${projectLoading ? ' hidden' : ''}`}>
               <div className="flex items-center gap-2">
                 {userPhoto && (
                   <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-1.5 shadow-sm">
@@ -5058,7 +5058,7 @@ export default function Studio() {
                   <canvas
                     ref={canvasRef}
                     style={{
-                      display: (ready || loading) && !popOutMode ? "block" : "none",
+                      display: (ready || loading || projectLoading) && !popOutMode ? "block" : "none",
                       imageRendering: zoom > 1 && !distancePreview && !hiResReady ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
