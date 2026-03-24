@@ -5014,6 +5014,46 @@ export default function Studio() {
               </div>
             )}
 
+            {/* Inline sliders: Foto-Overlay & Color Enhance side by side */}
+            {ready && (
+              <div className="flex gap-4 mb-4">
+                {userPhotoImg && (
+                  <div className="flex-1 bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-xs font-medium text-gray-600">Foto-Overlay</p>
+                      <span className="text-xs font-bold text-blue-600">{userOverlay}%</span>
+                    </div>
+                    <input
+                      type="range" min={0} max={80} step={5} value={userOverlay}
+                      onChange={e => setUserOverlay(Number(e.target.value))}
+                      className="w-full h-1.5 rounded-full cursor-pointer"
+                      style={{ accentColor: '#3B82F6' }}
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+                      <span>Mosaik</span>
+                      <span>Originalfoto</span>
+                    </div>
+                  </div>
+                )}
+                <div className="flex-1 bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-xs font-medium text-gray-600">Farbkorrektur</p>
+                    <span className="text-xs font-bold text-purple-600">{colorEnhance}%</span>
+                  </div>
+                  <input
+                    type="range" min={0} max={100} step={5} value={colorEnhance}
+                    onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
+                    className="w-full h-1.5 rounded-full cursor-pointer"
+                    style={{ accentColor: '#8B5CF6' }}
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+                    <span>Keine</span>
+                    <span>Maximal</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Statistiken & Einstellungen Modal */}
             {showStatsModal && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={() => setShowStatsModal(false)}>
