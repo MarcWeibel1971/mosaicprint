@@ -1514,24 +1514,56 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     }
     updateProgress(10, `DB: ${uniqueIds.length} unique tiles, ${result.rows.length} URLs gefunden`);
 
-    // Load tile images in parallel batches with disk cache
+    // Load tile images in parallel batches with memory cache, disk cache, then URL fallback
     const tileBuffers: Record<number, Buffer> = {};
     const CONCURRENCY = 25;
     let downloadedCount = 0;
+    let memCacheHits = 0;
     for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
       const batch = uniqueIds.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (id) => {
         const urls = urlMap[id];
         if (!urls) return;
+
+        // 1. Check in-memory tileCacheMap (populated by atlas builder) - any cached size works
+        // Try exact size first, then common sizes (64, 128) as resize source
+        for (const trySize of [TILE_PX, 128, 64]) {
+          const memCached = tileCacheMap.get(`${id}-${trySize}`);
+          if (memCached) {
+            try {
+              const resized = trySize === TILE_PX ? memCached.buf
+                : await sharp(memCached.buf)
+                    .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
+                    .jpeg({ quality: 92 })
+                    .toBuffer();
+              if (resized) {
+                tileBuffers[id] = resized;
+                downloadedCount++;
+                memCacheHits++;
+                return;
+              }
+            } catch { /* fall through to disk/url */ }
+          }
+        }
+
+        // 2. Check disk cache
         const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.jpg`);
         if (fs.existsSync(cacheFile)) {
           try { tileBuffers[id] = fs.readFileSync(cacheFile); downloadedCount++; return; } catch { /* fall through */ }
         }
+
+        // 3. Download from URLs (hiRes, fallback)
         const urlsToTry = [urls.hiRes, urls.fallback].filter(Boolean);
         for (const url of urlsToTry) {
           try {
             if (url.startsWith('data:')) {
-              tileBuffers[id] = Buffer.from(url.split(',')[1], 'base64');
+              const rawBuf = Buffer.from(url.split(',')[1], 'base64');
+              const resized = await sharp(rawBuf)
+                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
+                .jpeg({ quality: 92 })
+                .toBuffer()
+                .catch(() => rawBuf);
+              tileBuffers[id] = resized;
               downloadedCount++;
               break;
             }
@@ -1558,8 +1590,9 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         }
       }));
       const dlPct = Math.round(10 + (downloadedCount / uniqueIds.length) * 40);
-      updateProgress(dlPct, `Tiles laden: ${downloadedCount}/${uniqueIds.length}`);
+      updateProgress(dlPct, `Tiles laden: ${downloadedCount}/${uniqueIds.length} (${memCacheHits} aus Cache)`);
     }
+    console.log(`[print-render] Tiles loaded: ${downloadedCount}/${uniqueIds.length} (${memCacheHits} from memory cache)`);
 
     // Strip-based compositing to control memory
     const STRIP_ROWS = Math.max(1, Math.floor(6000 / TILE_PX));
