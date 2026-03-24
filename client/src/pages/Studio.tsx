@@ -538,30 +538,42 @@ export default function Studio() {
     // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
     // Desktop can handle much larger canvases (up to ~268 MP).
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const maxCanvasArea = isMob ? 16_000_000 : 200_000_000; // 16 MP mobile, 200 MP desktop
-    const maxCanvasDim = isMob ? 4096 : 16000;
+    // Mobile Safari: very conservative canvas limits (some devices crash at >8MP)
+    // iOS WebKit limits are device-dependent, 8MP is safe for all iPhones
+    const maxCanvasArea = isMob ? 8_000_000 : 200_000_000;
+    const maxCanvasDim = isMob ? 3072 : 16000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    const HR_TILE = Math.min(isMob ? 64 : 128, Math.max(24, Math.min(maxTileFromArea, maxTileFromDim)));
-    const hrW = cols * HR_TILE;
-    const hrH = rows * HR_TILE;
-    console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, canvas=${hrW}×${hrH} (${(hrW*hrH/1e6).toFixed(1)}MP, mobile=${isMob})`);
-
-    // Safety: don't create canvases beyond limits
-    if (hrW > maxCanvasDim || hrH > maxCanvasDim || hrW * hrH > maxCanvasArea) {
-      console.warn(`[ClientHiRes] Canvas too large: ${hrW}×${hrH}, aborting`);
-      setHiResLoading(false);
-      return;
-    }
+    const HR_TILE = Math.min(isMob ? 48 : 128, Math.max(16, Math.min(maxTileFromArea, maxTileFromDim)));
+    console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, target=${cols*HR_TILE}×${rows*HR_TILE} (${(cols*HR_TILE*rows*HR_TILE/1e6).toFixed(1)}MP, mobile=${isMob})`);
 
     try {
       await new Promise(r => setTimeout(r, 0)); // yield to UI
 
       // 1. Draw hi-res tiles from original images
-      const hrCanvas = document.createElement('canvas');
-      hrCanvas.width = hrW;
-      hrCanvas.height = hrH;
-      const hrCtx = hrCanvas.getContext('2d')!;
+      // Try creating canvas, with progressive fallback for mobile memory limits
+      let hrCanvas: HTMLCanvasElement | null = null;
+      let hrCtx: CanvasRenderingContext2D | null = null;
+      let actualTile = HR_TILE;
+      for (const tryTile of [HR_TILE, Math.floor(HR_TILE * 0.6), Math.floor(HR_TILE * 0.4), 12]) {
+        const c = document.createElement('canvas');
+        c.width = cols * tryTile;
+        c.height = rows * tryTile;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          hrCanvas = c;
+          hrCtx = ctx;
+          actualTile = tryTile;
+          if (tryTile !== HR_TILE) console.warn(`[ClientHiRes] Fallback to tile=${tryTile}px (${c.width}×${c.height})`);
+          break;
+        }
+        console.warn(`[ClientHiRes] getContext failed for tile=${tryTile}px (${c.width}×${c.height})`);
+      }
+      if (!hrCanvas || !hrCtx) {
+        console.error('[ClientHiRes] All canvas sizes failed, aborting');
+        setHiResLoading(false);
+        return;
+      }
       const rotations = assignmentRotRef.current;
 
       // Helper: extract tile region from original rendered canvas (snapshot) as fallback
@@ -577,8 +589,8 @@ export default function Studio() {
       for (let ci = 0; ci < totalCells; ci++) {
         const col = ci % cols;
         const row = Math.floor(ci / cols);
-        const x = col * HR_TILE;
-        const y = row * HR_TILE;
+        const x = col * actualTile;
+        const y = row * actualTile;
         const tileIdx = assignment[ci];
         // Prefer hi-res (512px) over thumbnail (64px) for sharper zoom
         const hiImg = hiResImgs[tileIdx];
@@ -588,12 +600,12 @@ export default function Studio() {
         if (img && img.complete && img.naturalWidth > 0) {
           try {
             if (rot === 0) {
-              hrCtx.drawImage(img, x, y, HR_TILE, HR_TILE);
+              hrCtx.drawImage(img, x, y, actualTile, actualTile);
             } else {
               hrCtx.save();
-              hrCtx.translate(x + HR_TILE / 2, y + HR_TILE / 2);
+              hrCtx.translate(x + actualTile / 2, y + actualTile / 2);
               hrCtx.rotate(rot * Math.PI / 2);
-              hrCtx.drawImage(img, -HR_TILE / 2, -HR_TILE / 2, HR_TILE, HR_TILE);
+              hrCtx.drawImage(img, -actualTile / 2, -actualTile / 2, actualTile, actualTile);
               hrCtx.restore();
             }
           } catch {
@@ -601,12 +613,12 @@ export default function Studio() {
             const { tilePx: origTilePx } = params;
             const srcX = col * origTilePx, srcY = row * origTilePx;
             try {
-              hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, HR_TILE, HR_TILE);
+              hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, actualTile, actualTile);
             } catch {
               const tci = ci * 3;
               const tc = targetColorsRef.current;
               hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
-              hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+              hrCtx.fillRect(x, y, actualTile, actualTile);
             }
           }
         } else {
@@ -614,12 +626,12 @@ export default function Studio() {
           const { tilePx: origTilePx } = params;
           const srcX = col * origTilePx, srcY = row * origTilePx;
           try {
-            hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, HR_TILE, HR_TILE);
+            hrCtx.drawImage(snapshotCanvas, srcX, srcY, origTilePx, origTilePx, x, y, actualTile, actualTile);
           } catch {
             const tci = ci * 3;
             const tc = targetColorsRef.current;
             hrCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
-            hrCtx.fillRect(x, y, HR_TILE, HR_TILE);
+            hrCtx.fillRect(x, y, actualTile, actualTile);
           }
         }
 
@@ -630,12 +642,16 @@ export default function Studio() {
       // The CSS Color Enhance overlay (colorEnhanceUrl) handles it in real-time.
       // Baking it in caused double-tinting (blue/dark tint) when zooming.
 
-      // 3. Convert to blob URL
-      const blob = await new Promise<Blob | null>(resolve =>
-        hrCanvas.toBlob(resolve, 'image/jpeg', 0.92)
-      );
+      // 3. Convert to blob URL (with timeout for mobile)
+      const blob = await new Promise<Blob | null>(resolve => {
+        const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 15000);
+        try {
+          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.80 : 0.92);
+        } catch (e) { clearTimeout(timeout); console.error('[ClientHiRes] toBlob error:', e); resolve(null); }
+      });
 
       if (blob) {
+        console.log(`[ClientHiRes] Success: blob=${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px`);
         if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
         const url = URL.createObjectURL(blob);
         hiResImgUrlRef.current = url;
