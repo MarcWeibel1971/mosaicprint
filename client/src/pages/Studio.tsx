@@ -4850,93 +4850,81 @@ export default function Studio() {
                 position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
-                <canvas
-                  ref={canvasRef}
-                  style={{
-                    display: (ready || loading) && !popOutMode ? "block" : "none",
-                    opacity: 1,
-                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                    transformOrigin: "center center",
-                    transition: isDragging.current ? "none" : "transform 0.1s ease",
-                    imageRendering: zoom > 1 && !distancePreview && !hiResReady ? "pixelated" : "auto",
-                    filter: distancePreview ? "blur(2px)" : "none",
-                    maxWidth: "none",
-                  }}
-                />
-                {/* Pop-Out overlay canvas */}
-                <canvas
-                  ref={popOutCanvasRef}
-                  style={{
-                    display: popOutMode && ready ? "block" : "none",
-                    position: "absolute",
-                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                    transformOrigin: "center center",
-                    transition: isDragging.current ? "none" : "transform 0.1s ease",
-                    imageRendering: zoom > 1 ? "pixelated" : "auto",
-                    maxWidth: "none",
-                  }}
-                />
-                {/* Hi-Res image overlay - sharp zoom (rendered BEFORE user overlay so overlay shows on top) */}
-                {hiResImgUrl && hiResReady && zoom > 1.05 && (
-                  <img
-                    src={hiResImgUrl}
-                    alt=""
+                {/* Wrapper: all layers share position via this relative container */}
+                <div style={{
+                  position: "relative",
+                  display: "inline-block",
+                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                  transformOrigin: "center center",
+                  transition: isDragging.current ? "none" : "transform 0.1s ease",
+                }}>
+                  <canvas
+                    ref={canvasRef}
                     style={{
-                      display: "block",
-                      position: "absolute" as const,
-                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                      transformOrigin: "center center",
-                      transition: isDragging.current ? "none" : "transform 0.1s ease",
-                      width: canvasRef.current?.style.width,
-                      height: canvasRef.current?.style.height,
+                      display: (ready || loading) && !popOutMode ? "block" : "none",
+                      imageRendering: zoom > 1 && !distancePreview && !hiResReady ? "pixelated" : "auto",
+                      filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
-                      pointerEvents: "none",
-                      imageRendering: "pixelated" as const,
                     }}
                   />
-                )}
-                {/* Color Enhance overlay - target colors per tile with color blend */}
-                {colorEnhance > 0 && ready && colorEnhanceUrl && (
-                  <img
-                    src={colorEnhanceUrl}
-                    alt=""
+                  {/* Pop-Out overlay canvas */}
+                  <canvas
+                    ref={popOutCanvasRef}
                     style={{
-                      display: "block",
+                      display: popOutMode && ready ? "block" : "none",
                       position: "absolute",
-                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                      transformOrigin: "center center",
-                      transition: isDragging.current ? "none" : "transform 0.1s ease",
-                      width: canvasRef.current?.style.width,
-                      height: canvasRef.current?.style.height,
+                      top: 0, left: 0, width: "100%", height: "100%",
+                      imageRendering: zoom > 1 ? "pixelated" : "auto",
                       maxWidth: "none",
-                      pointerEvents: "none",
-                      imageRendering: "pixelated" as const,
-                      mixBlendMode: "color" as const,
-                      opacity: colorEnhance / 100,
                     }}
                   />
-                )}
-                {/* User overlay - original photo shown on top of everything (including hi-res) */}
-                {userPhotoImg && userOverlay > 0 && ready && (
-                  <img
-                    src={userPhotoImg.src}
-                    alt=""
-                    style={{
-                      display: "block",
-                      position: "absolute",
-                      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                      transformOrigin: "center center",
-                      transition: isDragging.current ? "none" : "transform 0.1s ease",
-                      maxWidth: "none",
-                      width: canvasRef.current?.style.width,
-                      height: canvasRef.current?.style.height,
-                      opacity: userOverlay / 100,
-                      pointerEvents: "none",
-                      mixBlendMode: "normal",
-                    }}
-                  />
-                )}
-                {/* Hi-Res loading overlay - subtle when background preloading, prominent when user is zoomed */}
+                  {/* Hi-Res image overlay - sharp zoom (rendered BEFORE user overlay so overlay shows on top) */}
+                  {hiResImgUrl && hiResReady && zoom > 1.05 && (
+                    <img
+                      src={hiResImgUrl}
+                      alt=""
+                      style={{
+                        display: "block",
+                        position: "absolute",
+                        top: 0, left: 0, width: "100%", height: "100%",
+                        pointerEvents: "none",
+                        imageRendering: "pixelated" as const,
+                      }}
+                    />
+                  )}
+                  {/* Color Enhance overlay - target colors per tile with color blend */}
+                  {colorEnhance > 0 && ready && colorEnhanceUrl && (
+                    <img
+                      src={colorEnhanceUrl}
+                      alt=""
+                      style={{
+                        display: "block",
+                        position: "absolute",
+                        top: 0, left: 0, width: "100%", height: "100%",
+                        pointerEvents: "none",
+                        imageRendering: "pixelated" as const,
+                        mixBlendMode: "color" as const,
+                        opacity: colorEnhance / 100,
+                      }}
+                    />
+                  )}
+                  {/* User overlay - original photo shown on top of everything (including hi-res) */}
+                  {userPhotoImg && userOverlay > 0 && ready && (
+                    <img
+                      src={userPhotoImg.src}
+                      alt=""
+                      style={{
+                        display: "block",
+                        position: "absolute",
+                        top: 0, left: 0, width: "100%", height: "100%",
+                        opacity: userOverlay / 100,
+                        pointerEvents: "none",
+                        mixBlendMode: "normal",
+                      }}
+                    />
+                  )}
+                </div>
+                {/* Hi-Res loading overlay - fixed position in viewport, not affected by zoom */}
                 {hiResLoading && (
                   <div style={{
                     position: "absolute", top: 12, right: 12,
