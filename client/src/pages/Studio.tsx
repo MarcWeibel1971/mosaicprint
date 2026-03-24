@@ -2645,13 +2645,25 @@ export default function Studio() {
         // Base penalties (rotation-independent)
         // neighborPenalty applied uniformly - no special reduction for bright tiles
         // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
-        const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        // Face regions with small pools: allow MUCH higher reuse for skin-matching tiles
-        // This prevents blue/green tiles from filling face areas when the pool lacks skin-toned tiles
-        const isTileWarmSkin = mf.lab[1] > 2 && mf.lab[2] > 2 && mf.lab[0] >= 30 && mf.lab[0] <= 85;
-        const faceReuseBoost = (inFace && isTileWarmSkin && poolSize < TOTAL_TILES) ? Math.max(cellMaxReuse, cellMaxReuse * 3) : cellMaxReuse;
-        const effectiveMaxReuse = inFace ? faceReuseBoost : cellMaxReuse;
+        // Face regions with small pools: dramatically boost reuse for warm/skin tiles
+        // With 203 photos for 10800 cells, each photo must be used ~53x.
+        // Warm/skin tiles should be heavily reused in face areas rather than filling with blue tiles.
+        const isTileWarmSkin = mf.lab[1] > 0 && mf.lab[2] > 0 && mf.lab[0] >= 25 && mf.lab[0] <= 90;
+        const isTileCool = mf.lab[2] < -3; // blue-ish tile
+        const isSmallPool = poolSize < TOTAL_TILES;
+        let effectiveMaxReuse = cellMaxReuse;
+        let neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
+        if (inFace && isSmallPool) {
+          if (isTileWarmSkin) {
+            // Warm tiles in face: unlimited reuse, minimal neighbor penalty
+            effectiveMaxReuse = cellMaxReuse * 5;
+            neighborPenalty = Math.round(neighborPenalty * 0.3); // reduce neighbor penalty to 30%
+          } else if (isTileCool) {
+            // Cool/blue tiles in face: extra strict reuse
+            effectiveMaxReuse = Math.max(2, Math.floor(cellMaxReuse * 0.3));
+          }
+        }
         const reusePenalty = useCount[j] >= effectiveMaxReuse ? 25 * (useCount[j] - effectiveMaxReuse + 1) : 0;
 
         // ── Rotation-independent metrics (computed once per candidate, not per rotation) ──────────
