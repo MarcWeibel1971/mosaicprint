@@ -5,7 +5,7 @@ import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
   Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check,
   ImagePlus, Images, Sparkles, Grid3X3, Palette, BarChart3,
-  Save, FolderOpen, Info, Search
+  Save, FolderOpen, Info, Search, SlidersHorizontal
 } from "lucide-react";
 import { buildUnsplashPool, UNSPLASH_PHOTO_IDS } from "../lib/unsplash-pool";
 import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
@@ -176,7 +176,8 @@ export default function Studio() {
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [sharpness, setSharpness] = useState(80);
+  const [sharpness] = useState(100); // always 100% hi-res
+  const [showStatsModal, setShowStatsModal] = useState(false);
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [colorEnhance, setColorEnhance] = useState(0); // 0-100: tint tiles toward target color
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
@@ -4642,7 +4643,7 @@ export default function Studio() {
                     <button
                       onClick={() => setShowPhotoPreview(true)}
                       className="flex items-center gap-2 hover:opacity-80 transition-opacity"
-                      title="Hochgeladenes Foto vergroessern"
+                      title="Hochgeladenes Foto vergrössern"
                     >
                       <img src={userPhoto} alt="Dein Foto" className="w-8 h-8 rounded-lg object-cover" />
                       <span className="text-xs font-semibold text-gray-700">Dein Foto</span>
@@ -4687,6 +4688,9 @@ export default function Studio() {
                     </button>
                     <button onClick={() => { setSaveProjectName(''); setShowSaveModal(true); }} className="p-2.5 rounded-xl bg-green-50 border border-green-200 shadow-sm hover:shadow-md transition-all text-green-600 hover:text-green-800" title="Projekt speichern">
                       <Save className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => setShowStatsModal(true)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Statistiken & Einstellungen">
+                      <SlidersHorizontal className="w-4 h-4" />
                     </button>
                   </>
                 )}
@@ -4850,118 +4854,113 @@ export default function Studio() {
               </div>
             )}
 
-            {/* Mosaik-Statistik-Leiste */}
-            {ready && qualityMetrics && (
-              <div className="mb-4 bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <BarChart3 className="w-4 h-4 text-gray-500" />
-                  <p className="text-sm font-bold text-gray-800">Mosaik-Statistik</p>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-gray-50 rounded-xl p-3 text-center">
-                    <div className="text-lg font-extrabold text-gray-900">{qualityMetrics.totalTiles.toLocaleString('de-CH')}</div>
-                    <div className="text-[11px] text-gray-500 font-medium">Kacheln total</div>
+            {/* Statistiken & Einstellungen Modal */}
+            {showStatsModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={() => setShowStatsModal(false)}>
+                <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <SlidersHorizontal className="w-5 h-5 text-gray-600" />
+                      <h2 className="text-lg font-bold text-gray-900">Statistiken & Einstellungen</h2>
+                    </div>
+                    <button onClick={() => setShowStatsModal(false)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700 transition-colors">
+                      <X className="w-5 h-5" />
+                    </button>
                   </div>
-                  <div className="bg-gray-50 rounded-xl p-3 text-center">
-                    <div className="text-lg font-extrabold text-teal-700">{qualityMetrics.uniqueTiles.toLocaleString('de-CH')}</div>
-                    <div className="text-[11px] text-gray-500 font-medium">Unique Bilder</div>
-                  </div>
-                  <div className="bg-gray-50 rounded-xl p-3 text-center">
-                    <div className="text-lg font-extrabold text-blue-700">{qualityMetrics.avgDeltaE.toFixed(1)}</div>
-                    <div className="text-[11px] text-gray-500 font-medium">Farbtreue (dE)</div>
-                  </div>
-                  <div className="bg-gray-50 rounded-xl p-3 text-center">
-                    <div className="text-lg font-extrabold text-coral-600">{Math.round(qualityMetrics.reuseRate * 100)}%</div>
-                    <div className="text-[11px] text-gray-500 font-medium">Pool-Nutzung</div>
-                  </div>
-                </div>
-                {/* Saturation distribution bar */}
-                <div className="mt-3">
-                  <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
-                    <span>Sättigung</span>
-                    <span>Gedämpft {Math.round(qualityMetrics.satLow)}% | Mittel {Math.round(qualityMetrics.satMid)}% | Lebendig {Math.round(qualityMetrics.satHigh)}%</span>
-                  </div>
-                  <div className="flex h-2 rounded-full overflow-hidden">
-                    <div className="bg-gray-300" style={{ width: `${qualityMetrics.satLow}%` }} />
-                    <div className="bg-amber-400" style={{ width: `${qualityMetrics.satMid}%` }} />
-                    <div className="bg-emerald-500" style={{ width: `${qualityMetrics.satHigh}%` }} />
-                  </div>
-                </div>
-              </div>
-            )}
 
-            {/* Overlay slider */}
-            {ready && userPhotoImg && (
-              <div className="mb-4 bg-white rounded-2xl border border-blue-100 shadow-sm p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div>
-                    <p className="text-sm font-bold text-gray-800">Foto-Overlay</p>
-                    <p className="text-xs text-gray-500">Originalfoto über dem Mosaik einblenden</p>
-                  </div>
-                  <span className="text-xs font-bold text-blue-600 bg-blue-50 rounded px-2 py-0.5">{userOverlay}%</span>
-                </div>
-                <input
-                  type="range" min={0} max={80} step={5} value={userOverlay}
-                  onChange={e => setUserOverlay(Number(e.target.value))}
-                  className="w-full h-2 rounded-full cursor-pointer"
-                  style={{ accentColor: '#3B82F6' }}
-                />
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>Nur Mosaik</span>
-                  <span>Mehr Originalfoto</span>
-                </div>
-              </div>
-            )}
+                  {/* Mosaik-Statistik */}
+                  {qualityMetrics && (
+                    <div className="mb-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <BarChart3 className="w-4 h-4 text-gray-500" />
+                        <p className="text-sm font-bold text-gray-800">Mosaik-Statistik</p>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-lg font-extrabold text-gray-900">{qualityMetrics.totalTiles.toLocaleString('de-CH')}</div>
+                          <div className="text-[11px] text-gray-500 font-medium">Kacheln total</div>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-lg font-extrabold text-teal-700">{qualityMetrics.uniqueTiles.toLocaleString('de-CH')}</div>
+                          <div className="text-[11px] text-gray-500 font-medium">Unique Bilder</div>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-lg font-extrabold text-blue-700">{qualityMetrics.avgDeltaE.toFixed(1)}</div>
+                          <div className="text-[11px] text-gray-500 font-medium">Farbtreue (dE)</div>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3 text-center">
+                          <div className="text-lg font-extrabold text-coral-600">{Math.round(qualityMetrics.reuseRate * 100)}%</div>
+                          <div className="text-[11px] text-gray-500 font-medium">Pool-Nutzung</div>
+                        </div>
+                      </div>
+                      {/* Saturation distribution bar */}
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                          <span>Sättigung</span>
+                          <span>Gedämpft {Math.round(qualityMetrics.satLow)}% | Mittel {Math.round(qualityMetrics.satMid)}% | Lebendig {Math.round(qualityMetrics.satHigh)}%</span>
+                        </div>
+                        <div className="flex h-2 rounded-full overflow-hidden">
+                          <div className="bg-gray-300" style={{ width: `${qualityMetrics.satLow}%` }} />
+                          <div className="bg-amber-400" style={{ width: `${qualityMetrics.satMid}%` }} />
+                          <div className="bg-emerald-500" style={{ width: `${qualityMetrics.satHigh}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
-            {/* Color Enhance slider */}
-            {ready && (
-              <div className="mb-4 bg-white rounded-2xl border border-purple-100 shadow-sm p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div>
-                    <p className="text-sm font-bold text-gray-800">Color Enhance</p>
-                    <p className="text-xs text-gray-500">Farben Richtung Originalbild verstärken</p>
-                  </div>
-                  <span className="text-xs font-bold text-purple-600 bg-purple-50 rounded px-2 py-0.5">{colorEnhance}%</span>
-                </div>
-                <input
-                  type="range" min={0} max={100} step={5} value={colorEnhance}
-                  onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
-                  className="w-full h-2 rounded-full cursor-pointer"
-                  style={{ accentColor: '#8B5CF6' }}
-                />
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>Keine Verstärkung</span>
-                  <span>Maximale Farbkorrektur</span>
-                </div>
-              </div>
-            )}
-
-            {/* Sharpness slider */}
-            {ready && (
-              <div className="mb-4 bg-white rounded-2xl border border-coral-100 shadow-sm p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div>
-                    <p className="text-sm font-bold text-gray-800">Mosaik-Schärfe</p>
-                    <p className="text-xs text-gray-500">Zoom &gt;= 1.5x: Regler steuert Schärfe der Tile-Fotos</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-coral-600 bg-coral-50 rounded px-2 py-0.5">{sharpness}%</span>
+                  {/* Hi-Res Status */}
+                  <div className="mb-5 bg-green-50 rounded-xl p-3 flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700">Hi-Res Rendering</span>
                     {hiResReady ? (
-                      <span className="text-xs font-semibold text-green-600 bg-green-50 rounded px-2 py-0.5">Hi-Res aktiv</span>
+                      <span className="text-xs font-semibold text-green-600 bg-green-100 rounded px-2 py-1">100% aktiv</span>
+                    ) : hiResLoading ? (
+                      <span className="text-xs font-semibold text-amber-600 bg-amber-100 rounded px-2 py-1">Wird geladen...</span>
                     ) : (
-                      <span className="text-xs text-gray-400 bg-gray-50 rounded px-2 py-0.5">Zoom in fuer Hi-Res</span>
+                      <span className="text-xs text-gray-500 bg-gray-100 rounded px-2 py-1">Wird beim Zoomen aktiviert</span>
                     )}
                   </div>
-                </div>
-                <input
-                  type="range" min={0} max={100} step={5} value={sharpness}
-                  onChange={e => setSharpness(Number(e.target.value))}
-                  className="w-full h-2 rounded-full cursor-pointer"
-                  style={{ accentColor: '#FF6B6B' }}
-                />
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>Kein Hi-Res</span>
-                  <span>Maximale Schaerfe</span>
+
+                  {/* Foto-Overlay slider (inside modal) */}
+                  {userPhotoImg && (
+                    <div className="mb-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium text-gray-700">Foto-Overlay</p>
+                        <span className="text-xs font-bold text-blue-600 bg-blue-50 rounded px-2 py-0.5">{userOverlay}%</span>
+                      </div>
+                      <input
+                        type="range" min={0} max={80} step={5} value={userOverlay}
+                        onChange={e => setUserOverlay(Number(e.target.value))}
+                        className="w-full h-2 rounded-full cursor-pointer"
+                        style={{ accentColor: '#3B82F6' }}
+                      />
+                      <div className="flex justify-between text-xs text-gray-400 mt-1">
+                        <span>Nur Mosaik</span>
+                        <span>Mehr Originalfoto</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Color Enhance slider (inside modal) */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-medium text-gray-700">Color Enhance</p>
+                      <span className="text-xs font-bold text-purple-600 bg-purple-50 rounded px-2 py-0.5">{colorEnhance}%</span>
+                    </div>
+                    <input
+                      type="range" min={0} max={100} step={5} value={colorEnhance}
+                      onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
+                      className="w-full h-2 rounded-full cursor-pointer"
+                      style={{ accentColor: '#8B5CF6' }}
+                    />
+                    <div className="flex justify-between text-xs text-gray-400 mt-1">
+                      <span>Keine Verstärkung</span>
+                      <span>Maximale Farbkorrektur</span>
+                    </div>
+                  </div>
+
+                  <button onClick={() => setShowStatsModal(false)} className="w-full mt-2 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-sm font-semibold text-gray-700 transition-colors">
+                    Schliessen
+                  </button>
                 </div>
               </div>
             )}
