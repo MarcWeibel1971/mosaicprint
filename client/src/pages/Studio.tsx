@@ -522,14 +522,21 @@ export default function Studio() {
     const { cols, rows, tilePx } = params;
     const totalCells = cols * rows;
     // Adaptive hi-res tile size: use largest that fits within canvas limits
-    const maxCanvasDim = 16000;
-    const maxTileFromLimit = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    const HR_TILE = Math.min(128, Math.max(32, maxTileFromLimit)); // 128px ideal, min 32px
+    // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
+    // Desktop can handle much larger canvases (up to ~268 MP).
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const maxCanvasArea = isMob ? 16_000_000 : 200_000_000; // 16 MP mobile, 200 MP desktop
+    const maxCanvasDim = isMob ? 4096 : 16000;
+    const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
+    const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
+    const HR_TILE = Math.min(isMob ? 64 : 128, Math.max(24, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
+    console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, canvas=${hrW}×${hrH} (${(hrW*hrH/1e6).toFixed(1)}MP, mobile=${isMob})`);
 
-    // Safety: don't create canvases > 16k pixels
-    if (hrW > maxCanvasDim || hrH > maxCanvasDim) {
+    // Safety: don't create canvases beyond limits
+    if (hrW > maxCanvasDim || hrH > maxCanvasDim || hrW * hrH > maxCanvasArea) {
+      console.warn(`[ClientHiRes] Canvas too large: ${hrW}×${hrH}, aborting`);
       setHiResLoading(false);
       return;
     }
@@ -4618,13 +4625,13 @@ export default function Studio() {
                 {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Portrait erkannt - Dynamische Einstellungen von Gemini aktiv'}
                 {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Landschaft erkannt - Dynamische Einstellungen von Gemini aktiv'}
                 {autoPresetApplied === 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Motiv erkannt - Dynamische Einstellungen von Gemini aktiv'}
-                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Portrait erkannt - Optimale Einstellungen fuer Gesichter aktiv'}
-                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Landschaft erkannt - Optimale Einstellungen fuer Natur & Architektur aktiv'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Portrait erkannt - Optimale Einstellungen für Gesichter aktiv'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Landschaft erkannt - Optimale Einstellungen für Natur & Architektur aktiv'}
                 {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Abstraktes Motiv erkannt - Standard-Einstellungen aktiv'}
               </p>
               <p className="text-xs text-gray-500 mt-0.5">
                 {autoPresetApplied === 'KI-Dynamisch' && 'Alle Parameter individuell auf dieses Bild angepasst (Gemini Vision)'}
-                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Feineres Raster . Staerkere Helligkeits- & Saettigungs-Gewichtung . Haut-Ton-Boost'}
+                {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'portrait' && 'Feineres Raster . Stärkere Helligkeits- & Sättigungs-Gewichtung . Haut-Ton-Boost'}
                 {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'landscape' && 'Groessere Kacheln . Mehr Farb-Genauigkeit . Weite Komposition'}
                 {autoPresetApplied !== 'KI-Dynamisch' && detectedImageType === 'abstract' && 'Ausgewogene Gewichtung fuer allgemeine Motive'}
               </p>
@@ -4696,7 +4703,7 @@ export default function Studio() {
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomOut className="w-4 h-4" />
                 </button>
-                <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Ansicht zuruecksetzen">
+                <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Ansicht zurücksetzen">
                   <Eye className="w-4 h-4" />
                 </button>
                 {ready && (
@@ -4913,8 +4920,8 @@ export default function Studio() {
                 {/* Saturation distribution bar */}
                 <div className="mt-3">
                   <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
-                    <span>Saettigung</span>
-                    <span>Gedaempft {Math.round(qualityMetrics.satLow)}% | Mittel {Math.round(qualityMetrics.satMid)}% | Lebendig {Math.round(qualityMetrics.satHigh)}%</span>
+                    <span>Sättigung</span>
+                    <span>Gedämpft {Math.round(qualityMetrics.satLow)}% | Mittel {Math.round(qualityMetrics.satMid)}% | Lebendig {Math.round(qualityMetrics.satHigh)}%</span>
                   </div>
                   <div className="flex h-2 rounded-full overflow-hidden">
                     <div className="bg-gray-300" style={{ width: `${qualityMetrics.satLow}%` }} />
@@ -4931,7 +4938,7 @@ export default function Studio() {
                 <div className="flex items-center justify-between mb-2">
                   <div>
                     <p className="text-sm font-bold text-gray-800">Foto-Overlay</p>
-                    <p className="text-xs text-gray-500">Originalfoto ueber dem Mosaik einblenden</p>
+                    <p className="text-xs text-gray-500">Originalfoto über dem Mosaik einblenden</p>
                   </div>
                   <span className="text-xs font-bold text-blue-600 bg-blue-50 rounded px-2 py-0.5">{userOverlay}%</span>
                 </div>
