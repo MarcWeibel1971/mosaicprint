@@ -1384,6 +1384,12 @@ function applyOverlay(
     return Math.round(Math.max(0, Math.min(255, result * 255)));
   };
 
+  // Scale overlay strength by tile size: at 8px (base canvas), full strength.
+  // At larger sizes (128-400px), the overlay must be much subtler to avoid
+  // washing out the actual tile photos with flat target colors.
+  const REFERENCE_TILE_PX = 8;
+  const strengthScale = tilePx <= REFERENCE_TILE_PX ? 1.0 : Math.min(1.0, Math.sqrt(REFERENCE_TILE_PX / tilePx));
+
   const stripRows = Math.ceil(height / tilePx);
   for (let lr = 0; lr < stripRows; lr++) {
     const row = stripRowStart + lr;
@@ -1396,7 +1402,7 @@ function applyOverlay(
       if (tr === undefined) continue; // no target data for this cell
       const edge = edgeMap[ci] ?? 0;
       const faceBoost = faceMask[ci] ? 0.25 : 0;
-      const strength = Math.min(0.85, baseOverlayVal + edge * edgeBoostVal + faceBoost);
+      const strength = Math.min(0.85, baseOverlayVal + edge * edgeBoostVal + faceBoost) * strengthScale;
 
       const pyStart = lr * tilePx;
       const pyEnd = Math.min((lr + 1) * tilePx, height);
@@ -1733,6 +1739,67 @@ app.get('/api/print-download/:token', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const stream = fs.createReadStream(tmpFile);
   stream.pipe(res);
+});
+
+// ── Customer Order Endpoints ──────────────────────────────────────────────
+
+// POST /api/orders/printolino – create a Printolino print order
+app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, res) => {
+  try {
+    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams } = req.body;
+    if (!formatLabel || !materialLabel) {
+      return res.status(400).json({ error: 'Missing format or material' });
+    }
+    const orderId = await db.createPrintolinoOrder({
+      userId: userId ?? null,
+      projectId: projectId ?? null,
+      formatLabel,
+      materialLabel,
+      priceChf: priceChf ?? 0,
+      customerEmail: customerEmail ?? null,
+      renderParams: renderParams ?? {},
+    });
+    console.log(`[orders] Created Printolino order #${orderId}: ${formatLabel} / ${materialLabel}`);
+    res.json({ ok: true, orderId });
+  } catch (e) {
+    console.error('[orders] Create failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET /api/admin/orders – list all orders for admin
+app.get('/api/admin/orders', async (_req, res) => {
+  try {
+    const orders = await db.getMosaicOrders();
+    res.json({ ok: true, orders });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/admin/orders/:id/status – update order status
+app.post('/api/admin/orders/:id/status', express.json(), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { status } = req.body;
+    if (!status) return res.status(400).json({ error: 'Missing status' });
+    await db.updateOrderStatus(orderId, status);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/admin/orders/:id/notes – update admin notes
+app.post('/api/admin/orders/:id/notes', express.json(), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { notes } = req.body;
+    await db.updateOrderNotes(orderId, notes ?? '');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage

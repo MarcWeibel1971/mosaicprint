@@ -638,7 +638,7 @@ export default function Admin() {
   useEffect(() => {
     try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
   }, []);
-  const [activeTab, setActiveTab] = useState<'database' | 'import' | 'algorithm' | 'quality'>('database')
+  const [activeTab, setActiveTab] = useState<'database' | 'import' | 'algorithm' | 'quality' | 'orders'>('database')
   const [stats, setStats] = useState<DbStats | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKeyStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1397,6 +1397,7 @@ export default function Admin() {
               { id: 'import', label: 'Import', icon: Upload },
               { id: 'algorithm', label: 'Algorithmus', icon: Settings },
               { id: 'quality', label: 'Qualität & Statistik', icon: BarChart2 },
+              { id: 'orders', label: 'Kundenbestellungen', icon: FileText },
             ] as const).map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -1993,6 +1994,10 @@ export default function Admin() {
           <QualityAssurance onMessage={setMessage} />
         )}
 
+        {/* ── TAB: Kundenbestellungen ── */}
+        {activeTab === 'orders' && (
+          <OrdersPanel onMessage={setMessage} />
+        )}
 
       </div>
 
@@ -6301,6 +6306,253 @@ function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: '
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Orders Panel (Kundenbestellungen) ────────────────────────────────────────
+interface OrderItem {
+  id: number
+  order_type: string
+  format_label: string
+  material_label: string
+  price_chf: number
+  customer_email: string | null
+  status: string
+  download_token: string | null
+  admin_notes: string | null
+  render_params: Record<string, any> | null
+  created_at: string
+  paid_at: string | null
+}
+
+function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const [orders, setOrders] = useState<OrderItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [renderingId, setRenderingId] = useState<number | null>(null)
+  const [renderProgress, setRenderProgress] = useState(0)
+  const [renderMsg, setRenderMsg] = useState('')
+
+  const fetchOrders = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/admin/orders')
+      const data = await res.json()
+      if (data.ok) setOrders(data.orders ?? [])
+    } catch {
+      onMessage({ text: 'Fehler beim Laden der Bestellungen', type: 'error' })
+    } finally { setLoading(false) }
+  }, [onMessage])
+
+  useEffect(() => { fetchOrders() }, [fetchOrders])
+
+  const updateStatus = async (id: number, status: string) => {
+    try {
+      await fetch(`/api/admin/orders/${id}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      fetchOrders()
+      onMessage({ text: `Bestellung #${id} auf "${status}" gesetzt`, type: 'success' })
+    } catch {
+      onMessage({ text: 'Fehler beim Aktualisieren', type: 'error' })
+    }
+  }
+
+  const updateNotes = async (id: number, notes: string) => {
+    try {
+      await fetch(`/api/admin/orders/${id}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
+      })
+    } catch { /* silent */ }
+  }
+
+  const renderAndDownload = async (order: OrderItem) => {
+    if (!order.render_params) {
+      onMessage({ text: 'Keine Render-Parameter vorhanden', type: 'error' })
+      return
+    }
+    setRenderingId(order.id)
+    setRenderProgress(5)
+    setRenderMsg('Starte Render...')
+
+    const jobId = `admin-order-${order.id}-${Date.now()}`
+    let sseSource: EventSource | null = null
+    try {
+      sseSource = new EventSource(`/api/print-progress/${jobId}`)
+      sseSource.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data)
+          if (d.progress) setRenderProgress(d.progress)
+          if (d.message) setRenderMsg(d.message)
+        } catch { /* ignore */ }
+      }
+    } catch { /* SSE not critical */ }
+
+    try {
+      const rp = order.render_params
+      const resp = await fetch('/api/print-render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tileIds: rp.tileIds,
+          assignment: rp.assignment,
+          cols: rp.cols,
+          rows: rp.rows,
+          tilePx: rp.tilePx ?? 200,
+          format: 'jpg',
+          jobId,
+          overlayMode: rp.overlayMode ?? 'softlight',
+          baseOverlay: rp.baseOverlay ?? 0.15,
+          edgeBoost: rp.edgeBoost ?? 0.20,
+          targetColors: rp.targetColors ?? [],
+          edgeMap: rp.edgeMap ?? [],
+          faceMask: rp.faceMask ?? [],
+        }),
+      })
+      if (sseSource) sseSource.close()
+      if (!resp.ok) throw new Error(`Render failed: ${resp.status}`)
+      const { token, filename } = await resp.json()
+
+      // Download the file
+      const dlLink = document.createElement('a')
+      dlLink.href = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`
+      dlLink.download = filename
+      dlLink.style.display = 'none'
+      document.body.appendChild(dlLink)
+      dlLink.click()
+      setTimeout(() => document.body.removeChild(dlLink), 2000)
+
+      onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' })
+    } catch (e) {
+      onMessage({ text: `Render-Fehler: ${e}`, type: 'error' })
+    } finally {
+      if (sseSource) sseSource.close()
+      setRenderingId(null)
+      setRenderProgress(0)
+      setRenderMsg('')
+    }
+  }
+
+  const statusColors: Record<string, string> = {
+    pending: 'bg-yellow-100 text-yellow-800',
+    ready: 'bg-blue-100 text-blue-800',
+    paid: 'bg-green-100 text-green-800',
+    ordered: 'bg-purple-100 text-purple-800',
+    shipped: 'bg-indigo-100 text-indigo-800',
+    completed: 'bg-gray-100 text-gray-600',
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">Kundenbestellungen</h2>
+          <p className="text-sm text-gray-500">{orders.length} Bestellung{orders.length !== 1 ? 'en' : ''}</p>
+        </div>
+        <button onClick={fetchOrders} disabled={loading} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50">
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Aktualisieren
+        </button>
+      </div>
+
+      {loading && orders.length === 0 && (
+        <div className="text-center py-12 text-gray-400">Lade Bestellungen...</div>
+      )}
+
+      {!loading && orders.length === 0 && (
+        <div className="text-center py-12 bg-gray-50 rounded-xl border border-gray-200">
+          <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+          <p className="text-gray-500 font-medium">Noch keine Bestellungen</p>
+          <p className="text-gray-400 text-sm mt-1">Kundenbestellungen erscheinen hier, sobald ein Kunde "Bei Printolino bestellen" klickt.</p>
+        </div>
+      )}
+
+      {orders.map(order => (
+        <div key={order.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-4 sm:p-5">
+            <div className="flex items-start justify-between mb-3">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-bold text-gray-900">#{order.id}</span>
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColors[order.status] ?? 'bg-gray-100 text-gray-600'}`}>
+                    {order.status}
+                  </span>
+                  {order.order_type === 'printolino' && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">Printolino</span>
+                  )}
+                </div>
+                <p className="text-sm text-gray-600">{order.format_label} / {order.material_label}</p>
+                {order.customer_email && (
+                  <p className="text-xs text-gray-400 mt-0.5">{order.customer_email}</p>
+                )}
+              </div>
+              <div className="text-right">
+                <p className="font-bold text-orange-700">CHF {order.price_chf?.toFixed(2) ?? '0.00'}</p>
+                <p className="text-xs text-gray-400">{new Date(order.created_at).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
+              </div>
+            </div>
+
+            {/* Render progress bar */}
+            {renderingId === order.id && (
+              <div className="mb-3">
+                <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
+                  <div className="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${renderProgress}%` }} />
+                </div>
+                <p className="text-xs text-gray-500">{renderMsg}</p>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
+              {order.render_params && (
+                <button
+                  onClick={() => renderAndDownload(order)}
+                  disabled={renderingId !== null}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Druckdatei herunterladen
+                </button>
+              )}
+
+              {/* Status buttons */}
+              {order.status === 'pending' && (
+                <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
+                  Als "bestellt" markieren
+                </button>
+              )}
+              {order.status === 'ready' && (
+                <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
+                  Bei Printolino bestellt
+                </button>
+              )}
+              {(order.status === 'ordered' || order.status === 'ready') && (
+                <button onClick={() => updateStatus(order.id, 'shipped')} className="px-3 py-1.5 bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-lg hover:bg-indigo-200">
+                  Versendet
+                </button>
+              )}
+              {order.status === 'shipped' && (
+                <button onClick={() => updateStatus(order.id, 'completed')} className="px-3 py-1.5 bg-green-100 text-green-700 text-xs font-semibold rounded-lg hover:bg-green-200">
+                  Abgeschlossen
+                </button>
+              )}
+
+              {/* Admin notes */}
+              <input
+                type="text"
+                placeholder="Notiz..."
+                defaultValue={order.admin_notes ?? ''}
+                onBlur={(e) => updateNotes(order.id, e.target.value)}
+                className="flex-1 min-w-[150px] px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none"
+              />
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
