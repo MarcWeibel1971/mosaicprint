@@ -2839,20 +2839,25 @@ export default function Studio() {
           // This is the KEY FIX for landscapes: cool/gray areas must not get warm tiles
           const tA = tf.lab[1], tB = tf.lab[2];
           const mA = mf.lab[1], mB = mf.lab[2];
-          // COOL TARGET (b < 0, slightly blue/neutral): penalize warm tiles (b > 8)
+          // COOL TARGET (b < 0): penalize warm tiles (b > 5)
           // This prevents beige/orange/yellow tiles in sky, water, fog, mist
-          if (tB < 0 && mB > 8) {
-            // The cooler the target, the stronger the penalty for warm tiles
-            baseDist += Math.min(600, (-tB + 1) * (mB - 8) * 4); // up to +600 for very cool target + very warm tile
+          if (tB < 0 && mB > 5) {
+            const coolWarmFactor = isSmallPool ? 8 : 4;
+            const coolWarmMax = isSmallPool ? 1000 : 600;
+            baseDist += Math.min(coolWarmMax, (-tB + 1) * (mB - 5) * coolWarmFactor);
           }
-          // COOL TARGET: also penalize tiles with strong warm red (a > 8) in cool areas
-          if (tA < 2 && mA > 8) {
-            baseDist += Math.min(400, (mA - 8) * (-tA + 3) * 5); // up to +400
+          // COOL TARGET: also penalize tiles with strong warm red (a > 5) in cool areas
+          if (tA < 2 && mA > 5) {
+            const coolRedFactor = isSmallPool ? 10 : 5;
+            baseDist += Math.min(isSmallPool ? 600 : 400, (mA - 5) * (-tA + 3) * coolRedFactor);
           }
-          // WARM TARGET (b > 10, a > 5): penalize cool/blue tiles
-          // This prevents blue tiles in sunset/warm areas
-          if (tB > 10 && mB < -5) {
-            baseDist += Math.min(400, (tB - 10) * (-mB - 5) * 3); // up to +400
+          // WARM TARGET (b > 5): penalize cool/blue tiles
+          // This prevents blue tiles in sunset/warm/skin-toned areas
+          // For small pools: stronger penalty to force color accuracy
+          if (tB > 5 && mB < -3) {
+            const warmCoolFactor = isSmallPool ? 8 : 3;
+            const warmCoolMax = isSmallPool ? 800 : 400;
+            baseDist += Math.min(warmCoolMax, (tB - 5) * (-mB - 3) * warmCoolFactor);
           }
           // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
           // Penalize tiles with strong hue in any direction
@@ -5118,10 +5123,9 @@ export default function Studio() {
                   {/* Color Enhance overlay - target colors per tile with color blend */}
                   {/* Auto-reduce at high zoom: individual tiles are visible, color overlay looks artificial */}
                   {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
-                    // Fade out color enhance as zoom increases beyond 100%
-                    // At <=100%: full strength (mosaic looks like photo). At 200%: ~33%. At 300%+: zero.
-                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0, 1.0 - (zoom - 1.0) / 2.0);
-                    const effectiveOpacity = (colorEnhance / 100) * zoomFade;
+                    // Color enhance is always active at the user's chosen strength
+                    // No zoom fade - the user controls it via the slider
+                    const effectiveOpacity = colorEnhance / 100;
                     if (effectiveOpacity < 0.01) return null;
                     return (
                       <img
