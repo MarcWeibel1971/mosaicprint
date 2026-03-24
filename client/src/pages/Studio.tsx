@@ -4955,7 +4955,11 @@ export default function Studio() {
         {/* Project loading overlay */}
         {projectLoading && (
           <div className="max-w-md mx-auto bg-white rounded-2xl p-10 shadow-lg border border-cream-200 mb-8 text-center">
-            <img src="/mosaicprint/favicon.png" alt="MosaicPrint" className="w-16 h-16 mx-auto mb-5 animate-spin" style={{ animationDuration: '2s' }} />
+            <div className="w-16 h-16 mx-auto mb-5 animate-spin rounded-xl overflow-hidden" style={{ animationDuration: '2s', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '2px', padding: '4px', background: '#1a1a1a' }}>
+              {["#e8573a","#3dbfb8","#f59e0b","#6366f1","#22c55e","#ec4899","#d44228","#2aada6","#d97706"].map((c, i) => (
+                <div key={i} style={{ backgroundColor: c, borderRadius: '3px' }} />
+              ))}
+            </div>
             <p className="font-bold text-lg text-gray-900 mb-2">Projekt wird geladen</p>
             <p className="text-sm text-gray-500">{projectLoadMsg}</p>
           </div>
