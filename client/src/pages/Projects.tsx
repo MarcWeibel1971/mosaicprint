@@ -75,6 +75,7 @@ export default function Projects() {
   const [savingTiles, setSavingTiles] = useState(false)
   const [tilesChanged, setTilesChanged] = useState(false)
   const tileUploadRef = useRef<HTMLInputElement>(null)
+  const [previewTile, setPreviewTile] = useState<string | null>(null) // enlarged tile preview
 
   // Event detail state
   const [qrData, setQrData] = useState<{ qrDataUrl: string; eventUrl: string } | null>(null)
@@ -522,9 +523,10 @@ export default function Projects() {
                   onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
                   onDrop={e => { e.preventDefault(); e.stopPropagation(); handleTileUpload(e.dataTransfer.files) }}>
                   {userTiles.map((tile, i) => (
-                    <div key={i} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200">
+                    <div key={i} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200 cursor-pointer"
+                      onClick={() => setPreviewTile(tile)}>
                       <img src={tile} alt="" className="w-full h-full object-cover" />
-                      <button onClick={() => removeTile(i)} className="absolute top-0.5 right-0.5 p-0.5 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={(e) => { e.stopPropagation(); removeTile(i); }} className="absolute top-0.5 right-0.5 p-0.5 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
                         <X className="w-3 h-3" />
                       </button>
                     </div>
@@ -560,6 +562,19 @@ export default function Projects() {
             </div>
           </div>
         </section>
+
+        {/* Tile preview modal */}
+        {previewTile && (
+          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setPreviewTile(null)}>
+            <div className="relative max-w-2xl max-h-[80vh]" onClick={e => e.stopPropagation()}>
+              <img src={previewTile} alt="Vorschau" className="max-w-full max-h-[80vh] rounded-xl shadow-2xl object-contain" />
+              <button onClick={() => setPreviewTile(null)}
+                className="absolute -top-3 -right-3 p-1.5 bg-white rounded-full shadow-lg hover:bg-gray-100 transition-colors">
+                <X className="w-5 h-5 text-gray-700" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
