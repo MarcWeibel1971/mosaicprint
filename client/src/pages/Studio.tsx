@@ -1661,8 +1661,13 @@ export default function Studio() {
           if (isTargetSkinArea) {
             // Grüne Tiles (a < -3): fast nie passend für Gesichter
             if (a < -3) dist += Math.min(800, (-a - 3) * 40);
-            // Blaue Tiles (b < -5): kühle Tiles in warmen Bereichen
-            if (b < -5) dist += Math.min(400, (-b - 5) * 25);
+            // Blaue/kühle Tiles (b < 2): Hauttöne haben typisch b > 10
+            // Verschärft von b < -5: auch leicht kühle Tiles (b 0 bis -5) erzeugen Blaustich
+            if (b < 2) dist += Math.min(600, (2 - b) * 30);
+            // Warm-Cool-Gap: Je wärmer das Ziel (hoher targetB), desto stärker die Strafe für kühle Tiles
+            if (targetB > 8 && b < 5) {
+              dist += Math.min(500, (targetB - 8) * (5 - b) * 4);
+            }
           }
 
           // (D) isSkinFriendly (15D): Nicht-Hautton-Tiles in Gesichtsbereichen bestrafen
@@ -2742,8 +2747,8 @@ export default function Studio() {
           // face regions (prevents obviously wrong green/blue tiles on skin).
           baseDist = ssdScore * 100;
           // Light green/blue guard: only for clearly wrong colors (not threshold-sensitive)
-          if (mf.lab[1] < -5) baseDist += Math.min(80, (-mf.lab[1] - 5) * 8); // green guard
-          if (mf.lab[2] < -5) baseDist += Math.min(80, (-mf.lab[2] - 5) * 8); // blue guard
+          if (mf.lab[1] < -3) baseDist += Math.min(80, (-mf.lab[1] - (-3)) * 8); // green guard
+          if (mf.lab[2] < 2) baseDist += Math.min(80, (2 - mf.lab[2]) * 6); // cool/blue guard (verschärft von b<-5)
           baseDist += neighborPenalty * 0.3 + reusePenalty * 0.2;
         } else if (inFace) {
           // Per-subregion weight multipliers (MediaPipe Face Mesh)
@@ -2782,10 +2787,11 @@ export default function Studio() {
                const greenFactor = isTargetSkin ? 100 : 60;
                baseDist += Math.min(2000, (-mf.lab[1] - (-3)) * greenFactor);
              }
-             // BLUE TILE PENALTY: cool tiles (b < -5) in face regions
-             if (mf.lab[2] < -5) {
-               const bluePenaltyFactor = isTargetSkin ? 100 : (mf.lab[0] < 65 ? 70 : 25);
-               baseDist += Math.min(2000, (-mf.lab[2] - 5) * bluePenaltyFactor);
+             // BLUE/COOL TILE PENALTY: cool tiles in face regions
+             // Verschärft: Hauttöne haben b > 10, daher auch leicht kühle Tiles (b < 2) bestrafen
+             if (mf.lab[2] < 2) {
+               const bluePenaltyFactor = isTargetSkin ? 80 : (mf.lab[0] < 65 ? 50 : 20);
+               baseDist += Math.min(2000, (2 - mf.lab[2]) * bluePenaltyFactor);
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
@@ -2800,6 +2806,15 @@ export default function Studio() {
              if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 25) {
                baseDist += 300; // strong penalty: cool/colorful tiles don't belong on skin
              }
+           }
+           // Warm-Cool-Gap Penalty: Hauttöne sind warm (b > 8), kühle Tiles (b < 5) bestrafen
+           // Proportional zum Abstand: je wärmer das Ziel & je kühler die Tile, desto stärker
+           if (isTargetSkin && tf.lab[2] > 8 && mf.lab[2] < 5) {
+             baseDist += Math.min(600, (tf.lab[2] - 8) * (5 - mf.lab[2]) * 5);
+           }
+           // Cool-A-Axis Penalty: Skin has positive a (red), penalize tiles with a < 1
+           if (isTargetSkin && tf.lab[1] > 5 && mf.lab[1] < 1) {
+             baseDist += Math.min(400, (tf.lab[1] - 5) * (1 - mf.lab[1]) * 4);
            }
            // tileComplexity Penalty in Face (Stage-2) - VERSCHÄRFT:
            // Penalize busy/detailed tiles in smooth skin areas.
@@ -2889,8 +2904,9 @@ export default function Studio() {
             baseDist += Math.min(400, (mA - 8) * (-tA + 3) * 5);
           }
           // WARM TARGET (b > 5, a > 0): penalize cool/blue tiles
-          if (tB > 5 && mB < -5) {
-            baseDist += Math.min(400, (tB - 5) * (-mB - 5) * 3);
+          // Verschärft: mB < 2 statt mB < -5 (leicht kühle Tiles erzeugen Blaustich in warmen Bereichen)
+          if (tB > 5 && mB < 2) {
+            baseDist += Math.min(500, (tB - 5) * (2 - mB) * 3);
           }
           // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
           // Penalize tiles with strong hue in any direction
