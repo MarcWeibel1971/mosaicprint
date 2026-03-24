@@ -15,6 +15,7 @@ import { rgbToLab, toLinear, deltaE2000 } from "../lib/colorUtils";
 import { loadImageCached, getMemoryCacheSize, getIDBCacheSize, warmUpCache } from "../lib/image-cache";
 import { loadTileAtlas, clearAtlasCache } from "../lib/tile-atlas";
 import { useAuth } from "../contexts/AuthContext";
+import MosaicProgress from "../components/MosaicProgress";
 
 
 // Canvas-based face/skin detection (replaces MediaPipe to avoid WASM issues)
@@ -4501,28 +4502,7 @@ export default function Studio() {
 
         {/* Loading progress */}
         {loading && (
-          <div className="max-w-xl mx-auto bg-white rounded-2xl p-8 shadow-sm border border-gray-100 mb-8 text-center">
-            <Loader2 className="w-10 h-10 text-coral-600 animate-spin mx-auto mb-4" />
-            <p className="font-bold text-gray-900 mb-2">{progressMsg}</p>
-            <div className="w-full bg-gray-100 rounded-full h-3 mb-2">
-              <div
-                className="bg-coral-500 h-3 rounded-full transition-all duration-300"
-                style={{ width: `${Math.max(progress, 2)}%` }}
-              />
-            </div>
-            <p className="text-sm text-gray-400">{progress}%</p>
-            {renderPass && (
-              <div className="mt-3 flex items-center justify-center gap-2">
-                <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border ${
-                  renderPass === 1
-                    ? 'bg-amber-50 border-amber-200 text-amber-700'
-                    : 'bg-coral-50 border-coral-200 text-coral-700'
-                }`}>
-                  {renderPass === 1 ? '? Pass 1: Schnellvorschau' : '? Pass 2: Praezisions-Matching'}
-                </span>
-              </div>
-            )}
-          </div>
+          <MosaicProgress progress={progress} message={progressMsg} renderPass={renderPass} />
         )}
 
         {/* Error */}

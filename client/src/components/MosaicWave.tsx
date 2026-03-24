@@ -5,11 +5,8 @@
  */
 import { useRef, useEffect } from "react";
 import gsap from "gsap";
-import { useGSAP } from "@gsap/react";
 
-gsap.registerPlugin(useGSAP);
-
-// Echte Mosaikbilder von R2 / Cloudflare (Fallback: Farbkacheln)
+// Farbpalette für das Demo-Grid
 const TILE_COLORS = [
   "#FF6B6B","#FF8C8C","#FF4444","#FF9F43","#E67E22","#FFB870",
   "#00C9B1","#00A896","#00DFC0","#4A90D9","#2980B9","#74B3E8",
@@ -31,7 +28,6 @@ interface MosaicWaveProps {
   tileSize?: number;
   gap?: number;
   showHeart?: boolean;
-  /** Welleneffekt-Modus: 'wave' = Welle von Mitte, 'seq' = eine nach der anderen */
   mode?: "wave" | "seq";
   className?: string;
   style?: React.CSSProperties;
@@ -49,78 +45,71 @@ export default function MosaicWave({
 }: MosaicWaveProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tlRef = useRef<gsap.core.Timeline | null>(null);
+  const tileRefsRef = useRef<HTMLDivElement[]>([]);
 
   // Tile-Farben vorberechnen
   const tiles = Array.from({ length: cols * rows }, (_, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
     const inHeart = showHeart && isInHeart(col, row, cols, rows);
-    const palette = inHeart
-      ? TILE_COLORS.slice(0, 12)   // warme Töne für Herz
-      : TILE_COLORS.slice(12);     // kühle Töne für Hintergrund
+    const palette = inHeart ? TILE_COLORS.slice(0, 12) : TILE_COLORS.slice(12);
     return palette[i % palette.length];
   });
 
-  useGSAP(
-    () => {
-      if (!containerRef.current) return;
-      const items = gsap.utils.toArray<HTMLElement>(".mw-tile", containerRef.current);
-      if (items.length === 0) return;
+  useEffect(() => {
+    const items = tileRefsRef.current.filter(Boolean);
+    if (items.length === 0) return;
 
-      // Ausgangszustand
-      gsap.set(items, {
-        scale: 1,
-        y: 0,
-        zIndex: 1,
-        boxShadow: "0 2px 6px rgba(0,0,0,0.12)",
-        transformOrigin: "center center",
-        opacity: 1,
+    // Ausgangszustand setzen
+    gsap.set(items, {
+      scale: 1,
+      y: 0,
+      transformOrigin: "center center",
+      willChange: "transform",
+    });
+
+    // Timeline erstellen
+    if (tlRef.current) tlRef.current.kill();
+
+    if (mode === "wave") {
+      tlRef.current = gsap.timeline({ repeat: -1, repeatDelay: 1.0 })
+        .to(items, {
+          scale: 1.2,
+          y: -5,
+          duration: 0.5,
+          ease: "power2.out",
+          stagger: {
+            amount: 1.6,
+            from: "center",
+            grid: [rows, cols],
+          },
+        })
+        .to(items, {
+          scale: 1,
+          y: 0,
+          duration: 0.45,
+          ease: "power2.inOut",
+          stagger: {
+            amount: 1.3,
+            from: "center",
+            grid: [rows, cols],
+          },
+        }, "+=0.15");
+    } else {
+      tlRef.current = gsap.timeline({ repeat: -1, defaults: { ease: "power2.inOut" } });
+      items.forEach((item) => {
+        tlRef.current!
+          .to(item, { scale: 1.15, y: -8, duration: 0.6 })
+          .to(item, { scale: 1, y: 0, duration: 0.5 }, "+=0.2");
       });
+    }
 
-      if (mode === "wave") {
-        // Welleneffekt: stagger von Mitte nach außen
-        tlRef.current = gsap.timeline({ repeat: -1, repeatDelay: 0.8 });
-        tlRef.current
-          .to(items, {
-            scale: 1.18,
-            y: -6,
-            zIndex: 2,
-            boxShadow: "0 10px 28px rgba(0,0,0,0.22)",
-            duration: 0.55,
-            ease: "power2.out",
-            stagger: {
-              amount: 1.4,
-              from: "center",
-              grid: [rows, cols],
-            },
-          })
-          .to(items, {
-            scale: 1,
-            y: 0,
-            zIndex: 1,
-            boxShadow: "0 2px 6px rgba(0,0,0,0.12)",
-            duration: 0.5,
-            ease: "power2.inOut",
-            stagger: {
-              amount: 1.2,
-              from: "center",
-              grid: [rows, cols],
-            },
-          }, "+=0.1");
-      } else {
-        // Sequenz: eine nach der anderen
-        tlRef.current = gsap.timeline({ repeat: -1, defaults: { ease: "power2.inOut" } });
-        items.forEach((item) => {
-          tlRef.current!
-            .to(item, { scale: 1.14, y: -8, zIndex: 2, boxShadow: "0 14px 32px rgba(0,0,0,0.2)", duration: 0.7 })
-            .to(item, { scale: 1, y: 0, zIndex: 1, boxShadow: "0 2px 6px rgba(0,0,0,0.12)", duration: 0.6 }, "+=0.3");
-        });
-      }
-    },
-    { scope: containerRef, dependencies: [mode, cols, rows] }
-  );
+    return () => {
+      tlRef.current?.kill();
+      tlRef.current = null;
+    };
+  }, [mode, cols, rows]);
 
-  // Pause bei Hover
   const handleMouseEnter = () => tlRef.current?.pause();
   const handleMouseLeave = () => tlRef.current?.resume();
 
@@ -146,11 +135,12 @@ export default function MosaicWave({
       {tiles.map((color, i) => (
         <div
           key={i}
-          className="mw-tile"
+          ref={(el) => { if (el) tileRefsRef.current[i] = el; }}
           style={{
             backgroundColor: color,
             borderRadius: 4,
-            willChange: "transform",
+            width: tileSize,
+            height: tileSize,
           }}
         />
       ))}
