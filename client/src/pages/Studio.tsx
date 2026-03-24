@@ -3,7 +3,7 @@ import { loadStripe } from "@stripe/stripe-js";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Upload, ZoomIn, ZoomOut, Download, Printer, Eye,
-  Loader2, X, RefreshCw, ExternalLink, ChevronDown, Check,
+  Loader2, X, RefreshCw, ChevronDown, Check,
   ImagePlus, Images, Sparkles, Grid3X3, Palette, BarChart3,
   Save, FolderOpen, Info, Search, SlidersHorizontal
 } from "lucide-react";
@@ -4235,6 +4235,187 @@ export default function Studio() {
     }
   }, [selectedDigitalFormat]);
 
+  // Admin max-quality download: always uses 400px/tile PNG (same as digital PNG Lossless)
+  const handleAdminMaxDownload = useCallback(async () => {
+    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
+    const { cols, rows } = mosaicParamsRef.current;
+    const SERVER_MAX_DIM = 16000;
+    let TILE_PX = 400;
+    if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
+      TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
+      TILE_PX = Math.max(32, TILE_PX);
+    }
+    const outW = cols * TILE_PX;
+    const outH = rows * TILE_PX;
+
+    try {
+      setLoading(true);
+      setProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px PNG)...`);
+      setProgress(5);
+
+      const jobId = `admin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      let sseSource: EventSource | null = null;
+      try {
+        sseSource = new EventSource(`/api/print-progress/${jobId}`);
+        sseSource.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.progress) setProgress(data.progress);
+            if (data.message) setProgressMsg(data.message);
+          } catch { /* ignore */ }
+        };
+      } catch { /* SSE not critical */ }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+      const resp = await fetch('/api/print-render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tileIds: tileIdsRef.current,
+          assignment: assignmentRef.current,
+          cols, rows,
+          tilePx: TILE_PX,
+          format: 'png',
+          jobId,
+          overlayMode: dlSettings.overlayMode ?? 'softlight',
+          baseOverlay: dlSettings.baseOverlay ?? 0.15,
+          edgeBoost: dlSettings.edgeBoost ?? 0.20,
+          targetColors: targetColorsRef.current,
+          edgeMap: edgeMapRef.current,
+          faceMask: faceMaskRef.current,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (sseSource) sseSource.close();
+
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      const { token, filename, size } = await resp.json();
+      setProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+
+      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      const dlLink = document.createElement('a');
+      dlLink.href = downloadUrl;
+      dlLink.download = filename;
+      dlLink.style.display = 'none';
+      document.body.appendChild(dlLink);
+      dlLink.click();
+      setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
+      setProgressMsg(`Download gestartet: ${filename}`);
+    } catch (e) {
+      console.error('[Admin Max Download] Failed:', e);
+      setProgressMsg(`Fehler: ${e}`);
+    } finally {
+      setLoading(false);
+      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+    }
+  }, []);
+
+  // Printolino order: create order + render file for admin fulfillment
+  const [printolinoLoading, setPrintolinoLoading] = useState(false);
+  const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
+  const handlePrintolinoOrder = useCallback(async () => {
+    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
+    const fmt = PRINT_FORMATS[selectedFormat];
+    const mat = MATERIALS[selectedMaterial];
+    const { cols, rows } = mosaicParamsRef.current;
+
+    setPrintolinoLoading(true);
+    try {
+      // 1. Calculate tilePx for the print format (matching handleDownload logic)
+      const PX_PER_CM = 300 / 2.54;
+      const tileSizeCm = fmt.widthCm / cols;
+      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
+      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+
+      // 2. Create order in DB with render params
+      const orderResp = await fetch('/api/orders/printolino', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          formatLabel: fmt.label,
+          materialLabel: mat.label,
+          priceChf: fmt.price + mat.surcharge,
+          customerEmail: user?.email ?? null,
+          userId: user?.id ?? null,
+          renderParams: {
+            tileIds: tileIdsRef.current,
+            assignment: assignmentRef.current,
+            cols, rows,
+            tilePx: PRINT_TILE_PX,
+            overlayMode: dlSettings.overlayMode ?? 'softlight',
+            baseOverlay: dlSettings.baseOverlay ?? 0.15,
+            edgeBoost: dlSettings.edgeBoost ?? 0.20,
+            targetColors: targetColorsRef.current,
+            edgeMap: edgeMapRef.current,
+            faceMask: faceMaskRef.current,
+          },
+        }),
+      });
+      const orderData = await orderResp.json();
+      if (!orderData.ok) throw new Error(orderData.error || 'Order creation failed');
+
+      // 3. Now render the file for this order
+      setProgressMsg(`Rendere Druckdatei fuer Printolino (${fmt.label})...`);
+      setProgress(10);
+      const jobId = `prt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      let sseSource: EventSource | null = null;
+      try {
+        sseSource = new EventSource(`/api/print-progress/${jobId}`);
+        sseSource.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.progress) setProgress(data.progress);
+            if (data.message) setProgressMsg(data.message);
+          } catch { /* ignore */ }
+        };
+      } catch { /* SSE not critical */ }
+
+      const renderResp = await fetch('/api/print-render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tileIds: tileIdsRef.current,
+          assignment: assignmentRef.current,
+          cols, rows,
+          tilePx: PRINT_TILE_PX,
+          format: 'jpg',
+          jobId,
+          overlayMode: dlSettings.overlayMode ?? 'softlight',
+          baseOverlay: dlSettings.baseOverlay ?? 0.15,
+          edgeBoost: dlSettings.edgeBoost ?? 0.20,
+          targetColors: targetColorsRef.current,
+          edgeMap: edgeMapRef.current,
+          faceMask: faceMaskRef.current,
+        }),
+      });
+      if (sseSource) sseSource.close();
+      if (!renderResp.ok) throw new Error('Render failed');
+      const { token } = await renderResp.json();
+
+      // 4. Update order with download token
+      await fetch(`/api/admin/orders/${orderData.orderId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'ready', downloadToken: token }),
+      });
+
+      setPrintolinoSuccess(true);
+      setProgressMsg('Bestellung erfolgreich erstellt!');
+      setProgress(100);
+      setTimeout(() => { setProgressMsg(''); setProgress(0); setPrintolinoSuccess(false); }, 5000);
+    } catch (e) {
+      console.error('[Printolino] Order failed:', e);
+      setProgressMsg(`Fehler: ${e}`);
+      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+    } finally {
+      setPrintolinoLoading(false);
+    }
+  }, [selectedFormat, selectedMaterial, user]);
+
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
     setPaymentLoading(true);
@@ -5095,9 +5276,16 @@ export default function Studio() {
                 <div className="mb-5">
                   <p className="text-sm font-bold text-gray-700 mb-3">Aufloesung waehlen</p>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {DIGITAL_FORMATS.map(({ label, desc, tilePx, price, format }, idx) => {
+                    {DIGITAL_FORMATS.map(({ label, desc, tilePx: rawTilePx, price, format }, idx) => {
                       const cols = mosaicParamsRef.current?.cols ?? 60;
                       const rows = mosaicParamsRef.current?.rows ?? 80;
+                      // Match server clamping: min 64, max 400, then MAX_DIM=16000
+                      const SERVER_MAX_DIM_D = 16000;
+                      let tilePx = Math.min(Math.max(rawTilePx, 64), 400);
+                      if (cols * tilePx > SERVER_MAX_DIM_D || rows * tilePx > SERVER_MAX_DIM_D) {
+                        tilePx = Math.min(Math.floor(SERVER_MAX_DIM_D / cols), Math.floor(SERVER_MAX_DIM_D / rows), tilePx);
+                        tilePx = Math.max(32, tilePx);
+                      }
                       const outW = cols * tilePx;
                       const outH = rows * tilePx;
                       return (
@@ -5172,10 +5360,10 @@ export default function Studio() {
                   </button>
                   {isAdminMode && (
                     <button
-                      onClick={handleDigitalDownload}
+                      onClick={handleAdminMaxDownload}
                       className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
                     >
-                      Admin: Direkt herunterladen
+                      Admin: Direkt herunterladen (max. Qualitaet)
                     </button>
                   )}
                 </div>
@@ -5263,7 +5451,13 @@ export default function Studio() {
                   const tileSizeCm = fmt.widthCm / cols;
                   const tileMm = Math.round(tileSizeCm * 10);
                   const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
-                  const printTilePx = Math.min(600, Math.max(200, naturalTilePx2));
+                  // Match actual download handler: min 64, max 400, then clamp to MAX_DIM=16000
+                  let printTilePx = Math.min(400, Math.max(64, naturalTilePx2));
+                  const SERVER_MAX_DIM2 = 16000;
+                  if (cols * printTilePx > SERVER_MAX_DIM2 || rows * printTilePx > SERVER_MAX_DIM2) {
+                    printTilePx = Math.min(Math.floor(SERVER_MAX_DIM2 / cols), Math.floor(SERVER_MAX_DIM2 / rows), printTilePx);
+                    printTilePx = Math.max(32, printTilePx);
+                  }
                   const outW = cols * printTilePx;
                   const outH = rows * printTilePx;
                   const posterW = (cols * tileSizeCm).toFixed(0);
@@ -5358,6 +5552,14 @@ export default function Studio() {
                   </div>
                 )}
 
+                {/* Printolino order success banner */}
+                {printolinoSuccess && (
+                  <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 text-green-800 text-sm font-semibold">
+                    <Check className="w-4 h-4 text-green-600 inline mr-2" />
+                    Printolino-Bestellung erstellt! Die Druckdatei wird vorbereitet und erscheint im Admin-Bereich unter "Kundenbestellungen".
+                  </div>
+                )}
+
                 {paymentError && (
                   <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
                     {paymentError}
@@ -5371,18 +5573,16 @@ export default function Studio() {
                     className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
                   >
                     {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                    Druckbereite Datei kaufen . CHF {totalPrice}
+                    Mosaik kaufen . CHF {totalPrice}
                   </button>
-                  <a
-                    href={`https://www.printolino.ch?ref=mosaicprint&format=${encodeURIComponent(PRINT_FORMATS[selectedFormat].label)}&material=${encodeURIComponent(MATERIALS[selectedMaterial].label)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all"
+                  <button
+                    onClick={handlePrintolinoOrder}
+                    disabled={printolinoLoading}
+                    className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all disabled:opacity-60"
                   >
-                    <Printer className="w-4 h-4" />
+                    {printolinoLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
                     Bei Printolino bestellen
-                    <ExternalLink className="w-4 h-4" />
-                  </a>
+                  </button>
                 </div>
                 <div className="flex items-center justify-between mt-3">
                   <button
@@ -5393,10 +5593,10 @@ export default function Studio() {
                   </button>
                   {isAdminMode && (
                     <button
-                      onClick={() => handleDownload(true)}
+                      onClick={handleAdminMaxDownload}
                       className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
                     >
-                      Admin: Direkt herunterladen
+                      Admin: Direkt herunterladen (max. Qualitaet)
                     </button>
                   )}
                 </div>
