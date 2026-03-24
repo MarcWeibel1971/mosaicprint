@@ -208,6 +208,8 @@ export default function Studio() {
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentSuccess, setPaymentSuccess] = useState(false);
   const [detectedImageType, setDetectedImageType] = useState<'portrait' | 'landscape' | 'abstract' | null>(null);
+  const detectedImageTypeRef = useRef<typeof detectedImageType>(null);
+  useEffect(() => { detectedImageTypeRef.current = detectedImageType; }, [detectedImageType]);
   const [autoPresetApplied, setAutoPresetApplied] = useState<string | null>(null);
   // Gemini AI toggle: when true (default), Gemini dynamic settings are applied directly.
   // When false, heuristic presets + admin overrides are used instead.
@@ -610,10 +612,12 @@ export default function Studio() {
       }
 
       // 2. Per-tile color correction: tint each hi-res tile toward the target color
-      // Instead of overlaying the blurry 16px snapshot (causes color cast),
-      // apply a subtle per-tile multiply tint using the target cell colors.
+      // Only apply if Color Enhance slider is active (> 0).
+      // The CSS overlay handles real-time color enhancement; baking it in caused
+      // a permanent blue/dark tint visible when zooming (double-tinting).
+      const ceValue = colorEnhanceRef.current;
       const tc = targetColorsRef.current;
-      if (tc.length >= totalCells * 3) {
+      if (ceValue > 0 && tc.length >= totalCells * 3) {
         const tintCanvas = document.createElement('canvas');
         tintCanvas.width = hrW;
         tintCanvas.height = hrH;
@@ -626,9 +630,8 @@ export default function Studio() {
           tintCtx.fillStyle = `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})`;
           tintCtx.fillRect(col * HR_TILE, row * HR_TILE, HR_TILE, HR_TILE);
         }
-        // Multiply blend: darkens tiles toward target color
-        // Base 18% + additional boost from Color Enhance slider
-        const ceAlpha = Math.min(0.85, 0.18 + (colorEnhanceRef.current / 100) * 0.45);
+        // Multiply blend: tint tiles toward target color using slider value only
+        const ceAlpha = Math.min(0.85, (ceValue / 100) * 0.55);
         hrCtx.globalCompositeOperation = 'multiply';
         hrCtx.globalAlpha = ceAlpha;
         hrCtx.drawImage(tintCanvas, 0, 0);
@@ -3524,6 +3527,24 @@ export default function Studio() {
 
     setProgress(100);
     setProgressMsg("Fertig!");
+
+    // Smart defaults: set overlay & color enhance based on image type and tile source
+    // Portrait: overlay helps recognizability, moderate color enhance for skin tones
+    // Landscape: less overlay needed, light color enhance
+    // Own tiles: higher overlay since user photos may not match colors perfectly
+    const imgType = detectedImageTypeRef.current;
+    const tileMode = tileSourceModeRef.current;
+    const hasUserTiles = tileMode === 'own' || tileMode === 'mix';
+    const defaultOverlay = imgType === 'portrait' ? (hasUserTiles ? 30 : 25)
+                         : imgType === 'landscape' ? (hasUserTiles ? 20 : 10)
+                         : (hasUserTiles ? 20 : 10);
+    const defaultColorEnhance = imgType === 'portrait' ? 20
+                              : imgType === 'landscape' ? 15
+                              : 10;
+    setUserOverlay(defaultOverlay);
+    setColorEnhance(defaultColorEnhance);
+    colorEnhanceRef.current = defaultColorEnhance;
+
     setReady(true);
     setLoading(false);
     setShowOrderPanel(true);
@@ -4735,7 +4756,7 @@ export default function Studio() {
                       height: canvasRef.current?.style.height,
                       maxWidth: "none",
                       pointerEvents: "none",
-                      imageRendering: zoom > 2 ? "pixelated" as const : "auto" as const,
+                      imageRendering: "pixelated" as const,
                     }}
                   />
                 )}
@@ -4898,7 +4919,7 @@ export default function Studio() {
                 <div className="flex items-center justify-between mb-2">
                   <div>
                     <p className="text-sm font-bold text-gray-800">Color Enhance</p>
-                    <p className="text-xs text-gray-500">Farben Richtung Originalbild verstaerken</p>
+                    <p className="text-xs text-gray-500">Farben Richtung Originalbild verstärken</p>
                   </div>
                   <span className="text-xs font-bold text-purple-600 bg-purple-50 rounded px-2 py-0.5">{colorEnhance}%</span>
                 </div>
@@ -4909,7 +4930,7 @@ export default function Studio() {
                   style={{ accentColor: '#8B5CF6' }}
                 />
                 <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>Keine Verstaerkung</span>
+                  <span>Keine Verstärkung</span>
                   <span>Maximale Farbkorrektur</span>
                 </div>
               </div>
@@ -4920,8 +4941,8 @@ export default function Studio() {
               <div className="mb-4 bg-white rounded-2xl border border-coral-100 shadow-sm p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div>
-                    <p className="text-sm font-bold text-gray-800">Mosaik-Schaerfe</p>
-                    <p className="text-xs text-gray-500">Zoom &gt;= 1.5x: Regler steuert Schaerfe der Tile-Fotos</p>
+                    <p className="text-sm font-bold text-gray-800">Mosaik-Schärfe</p>
+                    <p className="text-xs text-gray-500">Zoom &gt;= 1.5x: Regler steuert Schärfe der Tile-Fotos</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold text-coral-600 bg-coral-50 rounded px-2 py-0.5">{sharpness}%</span>
