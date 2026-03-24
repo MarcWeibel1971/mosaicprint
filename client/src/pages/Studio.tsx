@@ -525,6 +525,7 @@ export default function Studio() {
     const snapshot = snapshotRef.current;
     if (!assignment.length || !validImgs.length || !params) {
       console.warn('[ClientHiRes] Skipped: assignment=', assignment.length, 'validImgs=', validImgs.length, 'params=', !!params);
+      setHiResLoading(false);
       return;
     }
     if (hiResLoadingRef.current) return;
@@ -538,11 +539,12 @@ export default function Studio() {
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     // Mobile Safari: very conservative canvas limits (some devices crash at >8MP)
     // iOS WebKit limits are device-dependent, 8MP is safe for all iPhones
-    const maxCanvasArea = isMob ? 8_000_000 : 200_000_000;
-    const maxCanvasDim = isMob ? 3072 : 16000;
+    // Cap canvas area to avoid toBlob timeouts (encoding 100+MP JPEG can take >15s)
+    const maxCanvasArea = isMob ? 8_000_000 : 80_000_000; // desktop: 80MP max (was 200MP)
+    const maxCanvasDim = isMob ? 3072 : 12000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    const HR_TILE = Math.min(isMob ? 48 : 128, Math.max(16, Math.min(maxTileFromArea, maxTileFromDim)));
+    const HR_TILE = Math.min(isMob ? 48 : 96, Math.max(16, Math.min(maxTileFromArea, maxTileFromDim)));
     console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, target=${cols*HR_TILE}×${rows*HR_TILE} (${(cols*HR_TILE*rows*HR_TILE/1e6).toFixed(1)}MP, mobile=${isMob})`);
 
     try {
@@ -642,9 +644,9 @@ export default function Studio() {
 
       // 3. Convert to blob URL (with timeout for mobile)
       const blob = await new Promise<Blob | null>(resolve => {
-        const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 15000);
+        const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 45000);
         try {
-          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.80 : 0.92);
+          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.75 : 0.85);
         } catch (e) { clearTimeout(timeout); console.error('[ClientHiRes] toBlob error:', e); resolve(null); }
       });
 
