@@ -1652,23 +1652,30 @@ export default function Studio() {
           }
 
           // (C) Hue-Mismatch-Penalty für Hautton-Bereiche: grüne/blaue Tiles bestrafen
-          // Nur aktiv in Hautton-Bereichen (L 35-85, a 2-30 = warm)
+          // MASSIV verstärkt: Nur warme/braune Tiles dürfen in Gesichtsbereiche
           if (isTargetSkinArea) {
             // Grüne Tiles (a < -3): fast nie passend für Gesichter
-            if (a < -3) dist += Math.min(800, (-a - 3) * 40);
-            // Blaue/kühle Tiles (b < 2): Hauttöne haben typisch b > 10
-            // Verschärft von b < -5: auch leicht kühle Tiles (b 0 bis -5) erzeugen Blaustich
-            if (b < 2) dist += Math.min(600, (2 - b) * 30);
-            // Warm-Cool-Gap: Je wärmer das Ziel (hoher targetB), desto stärker die Strafe für kühle Tiles
-            if (targetB > 8 && b < 5) {
-              dist += Math.min(500, (targetB - 8) * (5 - b) * 4);
+            if (a < -3) dist += Math.min(2000, (-a - 3) * 80);
+            // Kühle/blaue Tiles (b < 5): Hauttöne haben typisch b > 10
+            // MASSIV: Jede Tile unter b=5 ist zu kühl für Gesichter
+            if (b < 5) dist += Math.min(2000, (5 - b) * 60);
+            // Warm-Cool-Gap: Je wärmer das Ziel, desto stärker Strafe für kühle Tiles
+            if (targetB > 5 && b < 8) {
+              dist += Math.min(1500, (targetB - 5) * (8 - b) * 8);
             }
+            // Cool-A penalty: Haut hat a > 3, Tiles mit a < 2 bestrafen
+            if (a < 2 && targetA > 3) {
+              dist += Math.min(1000, (2 - a) * (targetA - 3) * 12);
+            }
+            // Non-warm tile penalty: Tile ist nicht warm (a<3 OR b<5) → hard penalty
+            const tileIsWarmKnn = a > 3 && b > 5;
+            if (!tileIsWarmKnn) dist += 500;
           }
 
           // (D) isSkinFriendly (15D): Nicht-Hautton-Tiles in Gesichtsbereichen bestrafen
           if (IS_15D && savedSettings.portraitMode) {
             const isSkinFriendlyTile = labIndex[i + 14] > 0.5;
-            if (isTargetSkinArea && !isSkinFriendlyTile) dist += 150;
+            if (isTargetSkinArea && !isSkinFriendlyTile) dist += 500;
           }
            // tileComplexity (16D): calm=0.0, medium=0.5, busy=1.0
            // Smooth target areas (sky, water, skin) should use calm tiles
@@ -2768,25 +2775,25 @@ export default function Studio() {
           // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
           const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
           const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
-          if (isTargetSkin && isTileSkin) baseDist -= 40; // skin-tone bonus: strongly prefer matching skin tiles
+          if (isTargetSkin && isTileSkin) baseDist -= 200; // skin-tone bonus: MASSIV bevorzugen
           // cheek/forehead: stronger penalty for non-skin tiles in skin areas
-          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 100 : 50;
+          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 800 : (subRegion === 'nose' ? 600 : 300);
           if (isTargetSkin && !isTileSkin) baseDist += skinMismatchPenalty;
           // MIX MODE: User tile preference bonus (user photos should appear prominently)
           if (isUserTileMix) baseDist -= 25;
           // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
            // Exception: very bright target areas (L>75 = white hair/beard) – cool/neutral tiles are OK there
            if (!isVeryBright) {
-             // Green tiles (a < -3) are almost never correct in skin areas
-             if (mf.lab[1] < -3) {
-               const greenFactor = isTargetSkin ? 100 : 60;
-               baseDist += Math.min(2000, (-mf.lab[1] - (-3)) * greenFactor);
+             // Green tiles (a < 0) are almost never correct in face areas
+             if (mf.lab[1] < 0) {
+               const greenFactor = isTargetSkin ? 250 : 120;
+               baseDist += Math.min(5000, (-mf.lab[1]) * greenFactor);
              }
              // BLUE/COOL TILE PENALTY: cool tiles in face regions
-             // Verschärft: Hauttöne haben b > 10, daher auch leicht kühle Tiles (b < 2) bestrafen
-             if (mf.lab[2] < 2) {
-               const bluePenaltyFactor = isTargetSkin ? 80 : (mf.lab[0] < 65 ? 50 : 20);
-               baseDist += Math.min(2000, (2 - mf.lab[2]) * bluePenaltyFactor);
+             // MASSIV verstärkt: Hauttöne haben b > 10, ALLE kühlen Tiles (b < 5) hart bestrafen
+             if (mf.lab[2] < 5) {
+               const bluePenaltyFactor = isTargetSkin ? 200 : (mf.lab[0] < 65 ? 120 : 50);
+               baseDist += Math.min(5000, (5 - mf.lab[2]) * bluePenaltyFactor);
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
@@ -2795,21 +2802,24 @@ export default function Studio() {
              }
            }
            // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
+           // MASSIV verstärkt: Blaue/grüne Tiles haben NICHTS in Gesichtern zu suchen
            {
-             const tileIsWarm = mf.lab[1] > 2 && mf.lab[2] > 2; // a>2, b>2 = warm/skin-like
-             const tileIsNeutral = tileSatC < 22; // low saturation = neutral/gray = OK for skin
-             if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 25) {
-               baseDist += 300; // strong penalty: cool/colorful tiles don't belong on skin
+             const tileIsWarm = mf.lab[1] > 3 && mf.lab[2] > 5; // a>3, b>5 = clearly warm/skin-like (verschärft)
+             const tileIsNeutral = tileSatC < 15 && mf.lab[2] > -3; // low saturation AND not blue (verschärft)
+             if (isTargetSkin && !tileIsWarm && !tileIsNeutral) {
+               // Any non-warm, non-neutral tile in skin area: heavy penalty
+               const coolPenalty = tileSatC > 25 ? 1500 : (tileSatC > 15 ? 800 : 400);
+               baseDist += coolPenalty;
              }
            }
-           // Warm-Cool-Gap Penalty: Hauttöne sind warm (b > 8), kühle Tiles (b < 5) bestrafen
-           // Proportional zum Abstand: je wärmer das Ziel & je kühler die Tile, desto stärker
-           if (isTargetSkin && tf.lab[2] > 8 && mf.lab[2] < 5) {
-             baseDist += Math.min(600, (tf.lab[2] - 8) * (5 - mf.lab[2]) * 5);
+           // Warm-Cool-Gap Penalty: Hauttöne sind warm (b > 5), kühle Tiles (b < 8) bestrafen
+           // MASSIV verstärkt für Anti-Blaustich
+           if (isTargetSkin && tf.lab[2] > 5 && mf.lab[2] < 8) {
+             baseDist += Math.min(3000, (tf.lab[2] - 5) * (8 - mf.lab[2]) * 12);
            }
-           // Cool-A-Axis Penalty: Skin has positive a (red), penalize tiles with a < 1
-           if (isTargetSkin && tf.lab[1] > 5 && mf.lab[1] < 1) {
-             baseDist += Math.min(400, (tf.lab[1] - 5) * (1 - mf.lab[1]) * 4);
+           // Cool-A-Axis Penalty: Skin has positive a (red), penalize tiles with a < 2
+           if (isTargetSkin && tf.lab[1] > 3 && mf.lab[1] < 2) {
+             baseDist += Math.min(2000, (tf.lab[1] - 3) * (2 - mf.lab[1]) * 10);
            }
            // tileComplexity Penalty in Face (Stage-2) - VERSCHÄRFT:
            // Penalize busy/detailed tiles in smooth skin areas.
