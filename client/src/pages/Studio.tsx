@@ -2666,13 +2666,14 @@ export default function Studio() {
       const rotations = ENABLE_ROTATION ? [0, 1, 2, 3] : [0];
       // Hoist cell-level constants outside candidate + rotation loops (settings don't change per render)
       const noOverlay = (savedSettings.baseOverlay ?? 0.15) < 0.05;
-      // For small pools: override weights regardless of saved settings
-      // With ~200 photos for 10800 cells, color accuracy matters most
-      const wSsdBase = isSmallPool ? 0.50 : (noOverlay ? 0.50 : 0.38);
-      const wLabBase = isSmallPool ? 0.35 : (savedSettings.labWeight ?? 0.15);
-      const wBrightBase = isSmallPool ? 0.50 : (savedSettings.brightnessWeight ?? 0.40);
-      const wTextureBase = isSmallPool ? 0.02 : (savedSettings.textureWeight ?? 0.08);
-      const wSatBase = isSmallPool ? 0.15 : (savedSettings.saturationWeight ?? 0.25);
+      // Small pools: SSD-only scoring. The 8×8 pixel comparison already captures
+      // color, brightness, texture, and spatial distribution in one metric.
+      // Other weights are redundant and can cause worse matches by overriding SSD.
+      const wSsdBase = isSmallPool ? 1.0 : (noOverlay ? 0.50 : 0.38);
+      const wLabBase = isSmallPool ? 0 : (savedSettings.labWeight ?? 0.15);
+      const wBrightBase = isSmallPool ? 0 : (savedSettings.brightnessWeight ?? 0.40);
+      const wTextureBase = isSmallPool ? 0 : (savedSettings.textureWeight ?? 0.08);
+      const wSatBase = isSmallPool ? 0 : (savedSettings.saturationWeight ?? 0.25);
       // Cell-level features (constant across all candidates for this cell)
       const targetSatC = tf.saturation;
       const cellEdge = edgeMap[ci]; // 0-1
@@ -2710,7 +2711,7 @@ export default function Studio() {
         const textureDiff = Math.abs(tf.texture - mf.texture) / 50;
         // 5. Edge Priority Matching: adaptive weight 0.05-0.50 based on cell edge strength
         const edgeDiff = Math.abs(tf.edgeEnergy - mf.edgeEnergy);
-        const edgeWeight = 0.05 + cellEdge * 0.75; // 0.05 (flat) to 0.80 (sharp edge) — increased for crisper contours
+        const edgeWeight = isSmallPool ? 0 : (0.05 + cellEdge * 0.75); // small pools: SSD-only; otherwise 0.05-0.80
         // 6. Saturation difference
         // Prevents gray tiles in colorful areas and vice versa
         // saturation = sqrt(a^2+b^2), range 0-100
@@ -2734,8 +2735,8 @@ export default function Studio() {
           // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
           // nose: high brightness, moderate edge, strong sat penalty (skin area)
           // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
-          const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-          const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4; // increased for better face clarity
+          const wSsdFace   = isSmallPool ? 1.0 : (subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50);
+          const wLabF      = isSmallPool ? 0 : (subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4);
           // Dynamic brightness weight:
           // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
           //   so the algorithm picks light tiles, not dark/cool ones
