@@ -2650,13 +2650,25 @@ export default function Studio() {
         // Base penalties (rotation-independent)
         // neighborPenalty applied uniformly - no special reduction for bright tiles
         // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
-        const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        // Face regions with small pools: allow MUCH higher reuse for skin-matching tiles
-        // This prevents blue/green tiles from filling face areas when the pool lacks skin-toned tiles
-        const isTileWarmSkin = mf.lab[1] > 2 && mf.lab[2] > 2 && mf.lab[0] >= 30 && mf.lab[0] <= 85;
-        const faceReuseBoost = (inFace && isTileWarmSkin && poolSize < TOTAL_TILES) ? Math.max(cellMaxReuse, cellMaxReuse * 3) : cellMaxReuse;
-        const effectiveMaxReuse = inFace ? faceReuseBoost : cellMaxReuse;
+        // Face regions with small pools: dramatically boost reuse for warm/skin tiles
+        // With 203 photos for 10800 cells, each photo must be used ~53x.
+        // Warm/skin tiles should be heavily reused in face areas rather than filling with blue tiles.
+        const isTileWarmSkin = mf.lab[1] > 0 && mf.lab[2] > 0 && mf.lab[0] >= 25 && mf.lab[0] <= 90;
+        const isTileCool = mf.lab[2] < -3; // blue-ish tile
+        const isSmallPool = poolSize < TOTAL_TILES;
+        let effectiveMaxReuse = cellMaxReuse;
+        let neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
+        if (inFace && isSmallPool) {
+          if (isTileWarmSkin) {
+            // Warm tiles in face: unlimited reuse, minimal neighbor penalty
+            effectiveMaxReuse = cellMaxReuse * 5;
+            neighborPenalty = Math.round(neighborPenalty * 0.3); // reduce neighbor penalty to 30%
+          } else if (isTileCool) {
+            // Cool/blue tiles in face: extra strict reuse
+            effectiveMaxReuse = Math.max(2, Math.floor(cellMaxReuse * 0.3));
+          }
+        }
         const reusePenalty = useCount[j] >= effectiveMaxReuse ? 25 * (useCount[j] - effectiveMaxReuse + 1) : 0;
 
         // ── Rotation-independent metrics (computed once per candidate, not per rotation) ──────────
@@ -3547,9 +3559,9 @@ export default function Studio() {
     const defaultOverlay = imgType === 'portrait' ? (hasUserTiles ? 30 : 25)
                          : imgType === 'landscape' ? (hasUserTiles ? 20 : 10)
                          : (hasUserTiles ? 20 : 10);
-    const defaultColorEnhance = imgType === 'portrait' ? 20
-                              : imgType === 'landscape' ? 15
-                              : 10;
+    const defaultColorEnhance = imgType === 'portrait' ? 12
+                              : imgType === 'landscape' ? 10
+                              : 8;
     setUserOverlay(defaultOverlay);
     setColorEnhance(defaultColorEnhance);
     colorEnhanceRef.current = defaultColorEnhance;
@@ -4082,9 +4094,8 @@ export default function Studio() {
                   const ceCtx = ceCanvas.getContext('2d')!;
                   ceCtx.putImageData(offCtx.getImageData(0, 0, cols, rows), 0, 0);
                   setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
-                  // Set a reasonable default colorEnhance
-                  setColorEnhance(15);
-                  colorEnhanceRef.current = 15;
+                  // Don't auto-enable colorEnhance for loaded projects
+                  // User can adjust the slider manually if desired
                   resolve();
                 };
                 targetImg.onerror = () => resolve();
@@ -5140,21 +5151,29 @@ export default function Studio() {
                     />
                   )}
                   {/* Color Enhance overlay - target colors per tile with color blend */}
-                  {colorEnhance > 0 && ready && colorEnhanceUrl && (
-                    <img
-                      src={colorEnhanceUrl}
-                      alt=""
-                      style={{
-                        display: "block",
-                        position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
-                        pointerEvents: "none",
-                        imageRendering: "pixelated" as const,
-                        mixBlendMode: "color" as const,
-                        opacity: colorEnhance / 100,
-                      }}
-                    />
-                  )}
+                  {/* Auto-reduce at high zoom: individual tiles are visible, color overlay looks artificial */}
+                  {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
+                    // Fade out color enhance as zoom increases beyond 100%
+                    // At <=100%: full strength (mosaic looks like photo). At 200%: ~33%. At 300%+: zero.
+                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0, 1.0 - (zoom - 1.0) / 2.0);
+                    const effectiveOpacity = (colorEnhance / 100) * zoomFade;
+                    if (effectiveOpacity < 0.01) return null;
+                    return (
+                      <img
+                        src={colorEnhanceUrl}
+                        alt=""
+                        style={{
+                          display: "block",
+                          position: "absolute",
+                          top: 0, left: 0, width: "100%", height: "100%",
+                          pointerEvents: "none",
+                          imageRendering: "pixelated" as const,
+                          mixBlendMode: "color" as const,
+                          opacity: effectiveOpacity,
+                        }}
+                      />
+                    );
+                  })()}
                   {/* User overlay - original photo shown on top of everything (including hi-res) */}
                   {userPhotoImg && userOverlay > 0 && ready && (
                     <img
