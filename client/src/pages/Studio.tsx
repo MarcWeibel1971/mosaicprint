@@ -2733,15 +2733,24 @@ export default function Studio() {
         // ── Compute baseDist: all scoring except quadDist (which is rotation-dependent) ──────────
         // quadDist (weight 0.15) is added in the rotation loop below.
         let baseDist: number;
-        // Face region: per-subregion weights for sharper eye/nose/mouth/cheek/forehead
-        if (inFace) {
+        // Face region scoring
+        if (inFace && isSmallPool) {
+          // ── SMALL POOL FACE: Pure SSD + light green/blue guard ──────────────────
+          // SSD captures everything. Only keep minimal color-direction guards for
+          // face regions (prevents obviously wrong green/blue tiles on skin).
+          baseDist = ssdScore * 100;
+          // Light green/blue guard: only for clearly wrong colors (not threshold-sensitive)
+          if (mf.lab[1] < -5) baseDist += Math.min(80, (-mf.lab[1] - 5) * 8); // green guard
+          if (mf.lab[2] < -5) baseDist += Math.min(80, (-mf.lab[2] - 5) * 8); // blue guard
+          baseDist += neighborPenalty * 0.3 + reusePenalty * 0.2;
+        } else if (inFace) {
           // Per-subregion weight multipliers (MediaPipe Face Mesh)
           // eye: max edge sharpness, high SSD, moderate sat penalty (eyes have color)
           // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
           // nose: high brightness, moderate edge, strong sat penalty (skin area)
           // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
-          const wSsdFace   = isSmallPool ? 1.0 : (subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50);
-          const wLabF      = isSmallPool ? 0 : (subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4);
+          const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
+          const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4;
           // Dynamic brightness weight:
           // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
           //   so the algorithm picks light tiles, not dark/cool ones
@@ -2766,19 +2775,15 @@ export default function Studio() {
           // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
            // Exception: very bright target areas (L>75 = white hair/beard) – cool/neutral tiles are OK there
            if (!isVeryBright) {
-             // Green tiles (a < -2) are almost never correct in skin areas
-             const greenThresh = isSmallPool ? -2 : -3;
-             if (mf.lab[1] < greenThresh) {
+             // Green tiles (a < -3) are almost never correct in skin areas
+             if (mf.lab[1] < -3) {
                const greenFactor = isTargetSkin ? 100 : 60;
-               baseDist += Math.min(2000, (-mf.lab[1] - greenThresh) * greenFactor);
+               baseDist += Math.min(2000, (-mf.lab[1] - (-3)) * greenFactor);
              }
-             // BLUE TILE PENALTY: cool tiles (b < -2) in face regions
-             // Lower threshold for small pools: mixed photos (beach+sky) have avg b≈-2
-             // These still look blue when placed in warm face areas
-             const blueThresh = isSmallPool ? -2 : -5;
-             if (mf.lab[2] < blueThresh) {
+             // BLUE TILE PENALTY: cool tiles (b < -5) in face regions
+             if (mf.lab[2] < -5) {
                const bluePenaltyFactor = isTargetSkin ? 100 : (mf.lab[0] < 65 ? 70 : 25);
-               baseDist += Math.min(2000, (-mf.lab[2] - blueThresh) * bluePenaltyFactor);
+               baseDist += Math.min(2000, (-mf.lab[2] - 5) * bluePenaltyFactor);
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
@@ -2849,6 +2854,17 @@ export default function Studio() {
             baseDist += (mf.brightness - 60) * (35 - tf.brightness) * 1.5; // up to ~900 for bright tile in dark face area
           }
           baseDist += neighborPenalty + reusePenalty + repPenalty;
+        } else if (isSmallPool) {
+          // ── SMALL POOL: Pure SSD scoring with minimal penalties ──────────────────
+          // With ~200 photos for ~10800 cells, SSD is the ONLY reliable signal.
+          // All hue/saturation/edge/yellow penalties are DISABLED because they
+          // override the pixel-accurate SSD match with heuristics designed for
+          // large diverse pools. The 8×8 pixel comparison already captures
+          // color, brightness, texture, and spatial distribution.
+          baseDist = ssdScore * 100;
+          // Only keep very minimal anti-repetition to avoid identical neighbors
+          // but NOT strong enough to override good SSD matches
+          baseDist += neighborPenalty * 0.3 + reusePenalty * 0.2;
         } else {
           // Non-face: full scoring with saturation term
           // Low-sat penalty also applies outside face regions (prevents rainbow-noise in backgrounds)
@@ -2871,10 +2887,8 @@ export default function Studio() {
             baseDist += Math.min(400, (mA - 8) * (-tA + 3) * 5);
           }
           // WARM TARGET (b > 5, a > 0): penalize cool/blue tiles
-          // For small pools: stronger penalty since color accuracy matters more
           if (tB > 5 && mB < -5) {
-            const factor = isSmallPool ? 5 : 3;
-            baseDist += Math.min(isSmallPool ? 600 : 400, (tB - 5) * (-mB - 5) * factor);
+            baseDist += Math.min(400, (tB - 5) * (-mB - 5) * 3);
           }
           // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
           // Penalize tiles with strong hue in any direction
@@ -3063,9 +3077,9 @@ export default function Studio() {
         // Quadrant LAB distances (spatial color accuracy) - the only term that varies per rotation.
         // Edge-adaptive weight: edge cells get much higher quadrant weight to prefer gradient tiles
         // that match the actual color transition direction.
-        const wQuadSSD = cellEdge > 0.15
+        const wQuadSSD = isSmallPool ? 0 : (cellEdge > 0.15
           ? 0.15 + cellEdge * 0.60  // edge cells: 0.24 (weak edge) to 0.75 (strong edge)
-          : 0.15;                    // flat cells: baseline 0.15
+          : 0.15);                   // flat cells: baseline 0.15
         for (const rot of rotations) {
           const rotatedQuads = rotateQuads(mf.quads, rot);
           let quadDist = 0;
