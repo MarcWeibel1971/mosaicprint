@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 # ── Credentials ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL",
-    "postgresql://postgres:tefqgEojwfidKfEluQNlqOQeEArcQCEv@interchange.proxy.rlwy.net:24827/railway")
+    "postgresql://postgres:pyoancyKSzLOcqsCwbEybfcKVvbkRivE@nozomi.proxy.rlwy.net:57735/railway")
 
 # ── Thread-local DB connections ────────────────────────────────────────────────
 _thread_local = threading.local()

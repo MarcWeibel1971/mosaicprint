@@ -33,7 +33,7 @@ from tqdm import tqdm
 
 # ── Credentials from Railway env ──────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL",
-    "postgresql://postgres:tefqgEojwfidKfEluQNlqOQeEArcQCEv@interchange.proxy.rlwy.net:24827/railway")
+    "postgresql://postgres:pyoancyKSzLOcqsCwbEybfcKVvbkRivE@nozomi.proxy.rlwy.net:57735/railway")
 R2_ACCOUNT_ID        = os.environ.get("R2_ACCOUNT_ID",        "3c6cf2572af3074af502ba34849a7408")
 R2_ACCESS_KEY_ID     = os.environ.get("R2_ACCESS_KEY_ID",     "80d1c766ace5c7290a95af28b0b6b2d7")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY",

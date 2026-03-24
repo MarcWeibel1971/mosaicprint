@@ -7,7 +7,7 @@ import os
 import sys
 
 TIDB_URL = os.environ.get("TIDB_URL", "")
-RAILWAY_URL = "postgresql://postgres:tefqgEojwfidKfEluQNlqOQeEArcQCEv@interchange.proxy.rlwy.net:24827/railway"
+RAILWAY_URL = "postgresql://postgres:pyoancyKSzLOcqsCwbEybfcKVvbkRivE@nozomi.proxy.rlwy.net:57735/railway"
 BATCH_SIZE = 500
 
 def main():

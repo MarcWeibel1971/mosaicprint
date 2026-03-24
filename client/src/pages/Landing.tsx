@@ -13,6 +13,7 @@ import {
   CheckCircle2, Zap, Shield, Heart
 } from "lucide-react";
 import MosaicGrid from "../components/MosaicGrid";
+import MosaicWave from "../components/MosaicWave";
 
 /* ─── CDN Images ─── */
 const HERO_MOSAIC_IMG =
@@ -258,7 +259,7 @@ function GallerySection() {
               <div style={{ background: "white", borderRadius: 24, padding: 24, boxShadow: "0 2px 16px rgba(0,0,0,0.06)", border: "1px solid #E8E8E4", overflow: "hidden" }}>
                 <p style={{ fontSize: 12, fontWeight: 600, color: "#6B7280", textTransform: "uppercase", letterSpacing: "1.5px", marginBottom: 16 }}>Live-Vorschau</p>
                 <div style={{ display: "flex", justifyContent: "center", overflow: "hidden", borderRadius: 12 }}>
-                  <MosaicGrid cols={14} rows={14} tileSize={22} gap={2} showHeart={true} animated={true} />
+                  <MosaicWave cols={14} rows={14} tileSize={22} gap={2} showHeart={true} mode="wave" />
                 </div>
                 <p style={{ fontSize: 12, color: "#6B7280", marginTop: 16, textAlign: "center" }}>Jedes Tile ist ein echtes Foto</p>
               </div>

@@ -1,4 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import gsap from "gsap";
+import { useGSAP } from "@gsap/react";
+gsap.registerPlugin(useGSAP);
 import { loadStripe } from "@stripe/stripe-js";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -380,6 +383,7 @@ export default function Studio() {
   const lastMouse = useRef({ x: 0, y: 0 });
   const snapshotRef = useRef<ImageData | null>(null);
   const popOutCanvasRef = useRef<HTMLCanvasElement>(null);
+  const popOutWaveTlRef = useRef<gsap.core.Timeline | null>(null);
   const compareDragging = useRef(false);
   // Store tile assignment for hi-res re-render
   const assignmentRef = useRef<number[]>([]);
@@ -3557,10 +3561,69 @@ export default function Studio() {
     }
   }, []);
 
-  // Toggle pop-out: render/clear the overlay
+  // Toggle pop-out: render/clear the overlay + GSAP Welleneffekt
   useEffect(() => {
     if (popOutMode && ready) {
       renderPopOut();
+      // Kurze Verzögerung damit der Canvas sichtbar ist, dann Welleneffekt starten
+      setTimeout(() => {
+        const popCanvas = popOutCanvasRef.current;
+        if (!popCanvas) return;
+        const params = mosaicParamsRef.current;
+        if (!params) return;
+        const { cols, rows } = params;
+        // Erstelle ein transparentes Overlay-Grid für GSAP-Animation
+        const container = popCanvas.parentElement;
+        if (!container) return;
+        // Entferne altes Wave-Overlay falls vorhanden
+        const old = container.querySelector('.pop-wave-overlay');
+        if (old) old.remove();
+        const overlay = document.createElement('div');
+        overlay.className = 'pop-wave-overlay';
+        overlay.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;`;
+        // Erstelle Tile-Divs die über dem Canvas liegen (transparent, nur für GSAP-Transform)
+        const tileW = popCanvas.width / cols;
+        const tileH = popCanvas.height / rows;
+        const canvasRect = popCanvas.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const scaleX = canvasRect.width / popCanvas.width;
+        const scaleY = canvasRect.height / popCanvas.height;
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const div = document.createElement('div');
+            div.className = 'pop-wave-tile';
+            const left = (canvasRect.left - containerRect.left) + col * tileW * scaleX;
+            const top = (canvasRect.top - containerRect.top) + row * tileH * scaleY;
+            div.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${tileW * scaleX}px;height:${tileH * scaleY}px;transform-origin:center center;will-change:transform;`;
+            overlay.appendChild(div);
+          }
+        }
+        container.appendChild(overlay);
+        // GSAP Welleneffekt starten
+        if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); }
+        const tiles = overlay.querySelectorAll('.pop-wave-tile');
+        popOutWaveTlRef.current = gsap.timeline({ repeat: -1, repeatDelay: 1.2 })
+          .to(tiles, {
+            scale: 1.15,
+            duration: 0.6,
+            ease: 'power2.out',
+            stagger: { amount: 2.0, from: 'center', grid: [rows, cols] },
+          })
+          .to(tiles, {
+            scale: 1,
+            duration: 0.55,
+            ease: 'power2.inOut',
+            stagger: { amount: 1.6, from: 'center', grid: [rows, cols] },
+          }, '+=0.2');
+      }, 80);
+    } else {
+      // Pop-out deaktiviert: Welleneffekt stoppen und Overlay entfernen
+      if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); popOutWaveTlRef.current = null; }
+      const popCanvas = popOutCanvasRef.current;
+      if (popCanvas?.parentElement) {
+        const old = popCanvas.parentElement.querySelector('.pop-wave-overlay');
+        if (old) old.remove();
+      }
     }
   }, [popOutMode, ready, renderPopOut]);
 
