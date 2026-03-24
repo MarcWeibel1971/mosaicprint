@@ -620,33 +620,9 @@ export default function Studio() {
         if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
-      // 2. Per-tile color correction: tint each hi-res tile toward the target color
-      // Only apply if Color Enhance slider is active (> 0).
-      // The CSS overlay handles real-time color enhancement; baking it in caused
-      // a permanent blue/dark tint visible when zooming (double-tinting).
-      const ceValue = colorEnhanceRef.current;
-      const tc = targetColorsRef.current;
-      if (ceValue > 0 && tc.length >= totalCells * 3) {
-        const tintCanvas = document.createElement('canvas');
-        tintCanvas.width = hrW;
-        tintCanvas.height = hrH;
-        const tintCtx = tintCanvas.getContext('2d')!;
-        // Draw flat target color per tile
-        for (let ci = 0; ci < totalCells; ci++) {
-          const col = ci % cols;
-          const row = Math.floor(ci / cols);
-          const tci = ci * 3;
-          tintCtx.fillStyle = `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})`;
-          tintCtx.fillRect(col * HR_TILE, row * HR_TILE, HR_TILE, HR_TILE);
-        }
-        // Color blend: shift tile hue/saturation toward target without darkening
-        const ceAlpha = Math.min(0.85, (ceValue / 100) * 0.55);
-        hrCtx.globalCompositeOperation = 'color';
-        hrCtx.globalAlpha = ceAlpha;
-        hrCtx.drawImage(tintCanvas, 0, 0);
-        hrCtx.globalCompositeOperation = 'source-over';
-        hrCtx.globalAlpha = 1.0;
-      }
+      // NOTE: Color correction is NOT baked into the hi-res image.
+      // The CSS Color Enhance overlay (colorEnhanceUrl) handles it in real-time.
+      // Baking it in caused double-tinting (blue/dark tint) when zooming.
 
       // 3. Convert to blob URL
       const blob = await new Promise<Blob | null>(resolve =>
@@ -4003,19 +3979,139 @@ export default function Studio() {
     const outCtx = outCanvas.getContext("2d")!;
 
     if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
-      // PRINT MODE: server-side rendering via /api/print-render
-      // Tile size = exact DPI requirement for the chosen print format.
-      // Each tile gets exactly enough pixels for 300 DPI at its physical size.
-      // No over-rendering: a 70×70cm print needs 8268×8268px, not 40000+.
       const { cols, rows } = mosaicParamsRef.current;
       const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
-      const tileSizeCm = fmt.widthCm / cols; // actual tile width in cm at chosen format
-      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM); // px for 1:1 at 300dpi
-      // Clamp: min 64px (still >200 DPI for small tiles), max 400px (server memory)
+      const tileSizeCm = fmt.widthCm / cols;
+      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
       const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
       console.log(`[Print] Format: ${fmt.label}, cols=${cols}, rows=${rows}, naturalTilePx=${naturalTilePx}, PRINT_TILE_PX=${PRINT_TILE_PX}, output=${printOutW}x${printOutH}px`);
+
+      // CLIENT-SIDE PRINT RENDER: used when tiles are user-uploaded (negative IDs)
+      // Server can't access user photos, so we render locally using the original images.
+      if (!canDoHiRes()) {
+        try {
+          setLoading(true);
+          setProgressMsg(`Client rendert Druckqualität (${printOutW}x${printOutH}px)...`);
+          setProgress(5);
+
+          const assignment = assignmentRef.current;
+          const validImgs = validImgsRef.current;
+          const hiResImgs = validImgsHiResRef.current;
+          const snapshot = snapshotRef.current;
+          const rotations = assignmentRotRef.current;
+          const totalCells = cols * rows;
+
+          // Canvas size limits
+          const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+          const maxArea = isMob ? 16_000_000 : 200_000_000;
+          const maxDim = isMob ? 4096 : 16000;
+          // Clamp tile size for client canvas limits
+          const maxTileArea = Math.floor(Math.sqrt(maxArea / (cols * rows)));
+          const maxTileDim = Math.floor(maxDim / Math.max(cols, rows));
+          const CLIENT_TILE = Math.min(PRINT_TILE_PX, maxTileArea, maxTileDim);
+          const cW = cols * CLIENT_TILE;
+          const cH = rows * CLIENT_TILE;
+          console.log(`[ClientPrint] CLIENT_TILE=${CLIENT_TILE}px, canvas=${cW}x${cH} (${(cW*cH/1e6).toFixed(1)}MP)`);
+
+          if (cW > maxDim || cH > maxDim || cW * cH > maxArea) {
+            throw new Error(`Canvas zu gross: ${cW}x${cH}`);
+          }
+
+          // Snapshot canvas for fallback tile extraction
+          const snapshotCanvas = document.createElement('canvas');
+          const snapshotCtxH = snapshotCanvas.getContext('2d');
+          if (snapshot && snapshotCtxH) {
+            snapshotCanvas.width = snapshot.width;
+            snapshotCanvas.height = snapshot.height;
+            snapshotCtxH.putImageData(snapshot, 0, 0);
+          }
+
+          const printCanvas = document.createElement('canvas');
+          printCanvas.width = cW;
+          printCanvas.height = cH;
+          const pCtx = printCanvas.getContext('2d')!;
+
+          for (let ci = 0; ci < totalCells; ci++) {
+            const col = ci % cols;
+            const row = Math.floor(ci / cols);
+            const x = col * CLIENT_TILE;
+            const y = row * CLIENT_TILE;
+            const tileIdx = assignment[ci];
+            const hiImg = hiResImgs[tileIdx];
+            const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
+            const rot = rotations[ci] || 0;
+
+            if (img && img.complete && img.naturalWidth > 0) {
+              try {
+                if (rot === 0) {
+                  pCtx.drawImage(img, x, y, CLIENT_TILE, CLIENT_TILE);
+                } else {
+                  pCtx.save();
+                  pCtx.translate(x + CLIENT_TILE / 2, y + CLIENT_TILE / 2);
+                  pCtx.rotate(rot * Math.PI / 2);
+                  pCtx.drawImage(img, -CLIENT_TILE / 2, -CLIENT_TILE / 2, CLIENT_TILE, CLIENT_TILE);
+                  pCtx.restore();
+                }
+              } catch {
+                const { tilePx: origTilePx } = mosaicParamsRef.current!;
+                try {
+                  pCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, CLIENT_TILE, CLIENT_TILE);
+                } catch {
+                  const tc = targetColorsRef.current, tci = ci * 3;
+                  pCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
+                  pCtx.fillRect(x, y, CLIENT_TILE, CLIENT_TILE);
+                }
+              }
+            } else {
+              const { tilePx: origTilePx } = mosaicParamsRef.current!;
+              try {
+                pCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, CLIENT_TILE, CLIENT_TILE);
+              } catch {
+                const tc = targetColorsRef.current, tci = ci * 3;
+                pCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
+                pCtx.fillRect(x, y, CLIENT_TILE, CLIENT_TILE);
+              }
+            }
+
+            if (ci % 500 === 0) {
+              setProgress(5 + Math.round((ci / totalCells) * 70));
+              await new Promise(r => setTimeout(r, 0));
+            }
+          }
+
+          setProgress(80);
+          setProgressMsg('Bild wird erstellt...');
+
+          // Convert to blob and download
+          const blob = await new Promise<Blob | null>(resolve =>
+            printCanvas.toBlob(resolve, 'image/png')
+          );
+          if (!blob) throw new Error('Canvas toBlob failed');
+
+          const url = URL.createObjectURL(blob);
+          const dlLink = document.createElement('a');
+          dlLink.download = `mosaicprint-${cW}x${cH}-druckbereit.png`;
+          dlLink.href = url;
+          dlLink.style.display = 'none';
+          document.body.appendChild(dlLink);
+          dlLink.click();
+          setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
+
+          setProgress(100);
+          setProgressMsg(`✓ Download gestartet: ${cW}x${cH}px`);
+        } catch (e) {
+          console.error('[ClientPrint] Failed:', e);
+          setProgressMsg(`Fehler: ${e}`);
+        } finally {
+          setLoading(false);
+          setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+        }
+        return;
+      }
+
+      // SERVER-SIDE PRINT RENDER: for database tiles (positive IDs)
 
       try {
         setLoading(true);
