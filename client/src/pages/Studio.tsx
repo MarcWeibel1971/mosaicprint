@@ -462,6 +462,8 @@ export default function Studio() {
     } catch { /* SSE not critical */ }
 
     try {
+      // Send overlay data so server bakes in color correction (prevents color mismatch on zoom)
+      const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -472,6 +474,12 @@ export default function Studio() {
           tilePx: ZOOM_TILE_PX,
           format: 'jpg',
           jobId: zoomJobId,
+          overlayMode: algoSettings.overlayMode ?? 'softlight',
+          baseOverlay: algoSettings.baseOverlay ?? 0.15,
+          edgeBoost: algoSettings.edgeBoost ?? 0.20,
+          targetColors: targetColorsRef.current,
+          edgeMap: edgeMapRef.current,
+          faceMask: faceMaskRef.current,
         }),
       });
       if (sseSource) sseSource.close();
@@ -631,9 +639,9 @@ export default function Studio() {
           tintCtx.fillStyle = `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})`;
           tintCtx.fillRect(col * HR_TILE, row * HR_TILE, HR_TILE, HR_TILE);
         }
-        // Multiply blend: tint tiles toward target color using slider value only
+        // Color blend: shift tile hue/saturation toward target without darkening
         const ceAlpha = Math.min(0.85, (ceValue / 100) * 0.55);
-        hrCtx.globalCompositeOperation = 'multiply';
+        hrCtx.globalCompositeOperation = 'color';
         hrCtx.globalAlpha = ceAlpha;
         hrCtx.drawImage(tintCanvas, 0, 0);
         hrCtx.globalCompositeOperation = 'source-over';
@@ -4764,7 +4772,7 @@ export default function Studio() {
                     }}
                   />
                 )}
-                {/* Color Enhance overlay - target colors per tile with multiply blend */}
+                {/* Color Enhance overlay - target colors per tile with color blend */}
                 {colorEnhance > 0 && ready && colorEnhanceUrl && (
                   <img
                     src={colorEnhanceUrl}
@@ -4780,7 +4788,7 @@ export default function Studio() {
                       maxWidth: "none",
                       pointerEvents: "none",
                       imageRendering: "pixelated" as const,
-                      mixBlendMode: "multiply" as const,
+                      mixBlendMode: "color" as const,
                       opacity: colorEnhance / 100,
                     }}
                   />
