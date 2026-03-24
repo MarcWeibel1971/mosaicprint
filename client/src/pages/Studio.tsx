@@ -2656,28 +2656,11 @@ export default function Studio() {
         // Base penalties (rotation-independent)
         // neighborPenalty applied uniformly - no special reduction for bright tiles
         // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
-        const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        // Small pool strategy: with 203 photos for 10800 cells, prioritize color accuracy
-        // over variety. Allow high reuse, especially for warm tiles in face regions.
-        const isTileWarm = mf.lab[2] > 0; // positive b = warm (yellow/orange/brown)
-        const isTileCool = mf.lab[2] < -5; // negative b = cool (blue)
-        let effectiveMaxReuse = cellMaxReuse;
         let neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
-        if (isSmallPool) {
-          // Global: boost reuse for all tiles in small pools
-          effectiveMaxReuse = cellMaxReuse * 3;
-          if (inFace) {
-            if (isTileWarm) {
-              // Warm tiles in face: very high reuse, minimal neighbor penalty
-              effectiveMaxReuse = cellMaxReuse * 8;
-              neighborPenalty = Math.round(neighborPenalty * 0.15);
-            } else if (isTileCool) {
-              // Cool/blue tiles in face: heavily penalized reuse
-              effectiveMaxReuse = Math.max(1, Math.floor(cellMaxReuse * 0.2));
-            }
-          }
-        }
-        const reusePenalty = useCount[j] >= effectiveMaxReuse ? 30 * (useCount[j] - effectiveMaxReuse + 1) : 0;
+        const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
+        // Small pool: uniformly boost reuse limit (each tile used ~53x with 203 photos)
+        const effectiveMaxReuse = isSmallPool ? cellMaxReuse * 3 : cellMaxReuse;
+        const reusePenalty = useCount[j] >= effectiveMaxReuse ? 25 * (useCount[j] - effectiveMaxReuse + 1) : 0;
 
         // ── Rotation-independent metrics (computed once per candidate, not per rotation) ──────────
         // 0. Pixel-accurate SSD score (8x8 RGB comparison - most accurate signal)
@@ -2752,16 +2735,19 @@ export default function Studio() {
           // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
            // Exception: very bright target areas (L>75 = white hair/beard) – cool/neutral tiles are OK there
            if (!isVeryBright) {
-             // Green tiles (a < -3) are almost never correct in skin areas
-             if (mf.lab[1] < -3) {
-               const greenFactor = isTargetSkin ? 80 : 50;
-               baseDist += Math.min(1500, (-mf.lab[1] - 3) * greenFactor);
+             // Green tiles (a < -2) are almost never correct in skin areas
+             const greenThresh = isSmallPool ? -2 : -3;
+             if (mf.lab[1] < greenThresh) {
+               const greenFactor = isTargetSkin ? 100 : 60;
+               baseDist += Math.min(2000, (-mf.lab[1] - greenThresh) * greenFactor);
              }
-             // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
-             // Stronger penalty for skin areas: blue tiles are always wrong on skin
-             if (mf.lab[2] < -5) {
-               const bluePenaltyFactor = isTargetSkin ? 80 : (mf.lab[0] < 65 ? 60 : 20);
-               baseDist += Math.min(1500, (-mf.lab[2] - 5) * bluePenaltyFactor);
+             // BLUE TILE PENALTY: cool tiles (b < -2) in face regions
+             // Lower threshold for small pools: mixed photos (beach+sky) have avg b≈-2
+             // These still look blue when placed in warm face areas
+             const blueThresh = isSmallPool ? -2 : -5;
+             if (mf.lab[2] < blueThresh) {
+               const bluePenaltyFactor = isTargetSkin ? 100 : (mf.lab[0] < 65 ? 70 : 25);
+               baseDist += Math.min(2000, (-mf.lab[2] - blueThresh) * bluePenaltyFactor);
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
@@ -2844,25 +2830,20 @@ export default function Studio() {
           // This is the KEY FIX for landscapes: cool/gray areas must not get warm tiles
           const tA = tf.lab[1], tB = tf.lab[2];
           const mA = mf.lab[1], mB = mf.lab[2];
-          // COOL TARGET (b < 0): penalize warm tiles (b > 5)
+          // COOL TARGET (b < 0, slightly blue/neutral): penalize warm tiles (b > 8)
           // This prevents beige/orange/yellow tiles in sky, water, fog, mist
-          if (tB < 0 && mB > 5) {
-            const coolWarmFactor = isSmallPool ? 8 : 4;
-            const coolWarmMax = isSmallPool ? 1000 : 600;
-            baseDist += Math.min(coolWarmMax, (-tB + 1) * (mB - 5) * coolWarmFactor);
+          if (tB < 0 && mB > 8) {
+            baseDist += Math.min(600, (-tB + 1) * (mB - 8) * 4);
           }
-          // COOL TARGET: also penalize tiles with strong warm red (a > 5) in cool areas
-          if (tA < 2 && mA > 5) {
-            const coolRedFactor = isSmallPool ? 10 : 5;
-            baseDist += Math.min(isSmallPool ? 600 : 400, (mA - 5) * (-tA + 3) * coolRedFactor);
+          // COOL TARGET: also penalize tiles with strong warm red (a > 8) in cool areas
+          if (tA < 2 && mA > 8) {
+            baseDist += Math.min(400, (mA - 8) * (-tA + 3) * 5);
           }
-          // WARM TARGET (b > 5): penalize cool/blue tiles
-          // This prevents blue tiles in sunset/warm/skin-toned areas
-          // For small pools: stronger penalty to force color accuracy
-          if (tB > 5 && mB < -3) {
-            const warmCoolFactor = isSmallPool ? 8 : 3;
-            const warmCoolMax = isSmallPool ? 800 : 400;
-            baseDist += Math.min(warmCoolMax, (tB - 5) * (-mB - 3) * warmCoolFactor);
+          // WARM TARGET (b > 5, a > 0): penalize cool/blue tiles
+          // For small pools: stronger penalty since color accuracy matters more
+          if (tB > 5 && mB < -5) {
+            const factor = isSmallPool ? 5 : 3;
+            baseDist += Math.min(isSmallPool ? 600 : 400, (tB - 5) * (-mB - 5) * factor);
           }
           // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
           // Penalize tiles with strong hue in any direction
@@ -5166,9 +5147,10 @@ export default function Studio() {
                   {/* Color Enhance overlay - target colors per tile with color blend */}
                   {/* Auto-reduce at high zoom: individual tiles are visible, color overlay looks artificial */}
                   {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
-                    // Color enhance is always active at the user's chosen strength
-                    // No zoom fade - the user controls it via the slider
-                    const effectiveOpacity = colorEnhance / 100;
+                    // Gentle zoom fade: full strength at <=100%, fades to 40% minimum at high zoom
+                    // This keeps the portrait recognizable while still showing individual tiles
+                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0.4, 1.0 - (zoom - 1.0) / 4.0);
+                    const effectiveOpacity = (colorEnhance / 100) * zoomFade;
                     if (effectiveOpacity < 0.01) return null;
                     return (
                       <img
