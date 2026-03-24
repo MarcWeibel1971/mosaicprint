@@ -2647,7 +2647,12 @@ export default function Studio() {
         // (previously reduced for bright neutral tiles, but this caused white spots in dark areas)
         const neighborPenalty = neighborIds.has(j) ? NEIGHBOR_PENALTY : 0;
         const cellMaxReuse = getMaxReuseForCell(cellLab[ci][0]);
-        const reusePenalty = useCount[j] >= cellMaxReuse ? 25 * (useCount[j] - cellMaxReuse + 1) : 0;
+        // Face regions with small pools: allow MUCH higher reuse for skin-matching tiles
+        // This prevents blue/green tiles from filling face areas when the pool lacks skin-toned tiles
+        const isTileWarmSkin = mf.lab[1] > 2 && mf.lab[2] > 2 && mf.lab[0] >= 30 && mf.lab[0] <= 85;
+        const faceReuseBoost = (inFace && isTileWarmSkin && poolSize < TOTAL_TILES) ? Math.max(cellMaxReuse, cellMaxReuse * 3) : cellMaxReuse;
+        const effectiveMaxReuse = inFace ? faceReuseBoost : cellMaxReuse;
+        const reusePenalty = useCount[j] >= effectiveMaxReuse ? 25 * (useCount[j] - effectiveMaxReuse + 1) : 0;
 
         // ── Rotation-independent metrics (computed once per candidate, not per rotation) ──────────
         // 0. Pixel-accurate SSD score (8x8 RGB comparison - most accurate signal)
@@ -2713,9 +2718,9 @@ export default function Studio() {
           // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
           const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
           const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
-          if (isTargetSkin && isTileSkin) baseDist -= 15; // skin-tone bonus: prefer matching skin tiles
+          if (isTargetSkin && isTileSkin) baseDist -= 40; // skin-tone bonus: strongly prefer matching skin tiles
           // cheek/forehead: stronger penalty for non-skin tiles in skin areas
-          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 50 : 25;
+          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 100 : 50;
           if (isTargetSkin && !isTileSkin) baseDist += skinMismatchPenalty;
           // MIX MODE: User tile preference bonus (user photos should appear prominently)
           if (isUserTileMix) baseDist -= 25;
@@ -2724,13 +2729,14 @@ export default function Studio() {
            if (!isVeryBright) {
              // Green tiles (a < -3) are almost never correct in skin areas
              if (mf.lab[1] < -3) {
-               baseDist += Math.min(1000, (-mf.lab[1] - 3) * 50); // up to +1000 for very green tiles
+               const greenFactor = isTargetSkin ? 80 : 50;
+               baseDist += Math.min(1500, (-mf.lab[1] - 3) * greenFactor);
              }
              // BLUE TILE PENALTY: blue tiles (b < -5) in face regions
-             // Only penalize dark blue tiles (tileL < 65) in bright areas – light cool tiles are fine for hair
+             // Stronger penalty for skin areas: blue tiles are always wrong on skin
              if (mf.lab[2] < -5) {
-               const bluePenaltyFactor = mf.lab[0] < 65 ? 50 : 15; // dark blue: strong penalty; light blue: mild
-               baseDist += Math.min(800, (-mf.lab[2] - 5) * bluePenaltyFactor);
+               const bluePenaltyFactor = isTargetSkin ? 80 : (mf.lab[0] < 65 ? 60 : 20);
+               baseDist += Math.min(1500, (-mf.lab[2] - 5) * bluePenaltyFactor);
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
@@ -2742,8 +2748,8 @@ export default function Studio() {
            {
              const tileIsWarm = mf.lab[1] > 2 && mf.lab[2] > 2; // a>2, b>2 = warm/skin-like
              const tileIsNeutral = tileSatC < 22; // low saturation = neutral/gray = OK for skin
-             if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 35) {
-               baseDist += 150; // stronger: push non-skin-subject tiles down in face ranking
+             if (isTargetSkin && !tileIsWarm && !tileIsNeutral && tileSatC > 25) {
+               baseDist += 300; // strong penalty: cool/colorful tiles don't belong on skin
              }
            }
            // tileComplexity Penalty in Face (Stage-2) - VERSCHÄRFT:
@@ -3981,6 +3987,50 @@ export default function Studio() {
               img.src = data.mosaicImage;
             });
           }
+          // Restore color enhance overlay from target colors
+          // Rebuild the colorEnhanceUrl from the saved mosaicImage target pixels
+          if (data.mosaicParams && data.userPhoto) {
+            try {
+              const { cols, rows } = data.mosaicParams;
+              // Extract target colors from the user photo at mosaic resolution
+              const targetImg = new Image();
+              await new Promise<void>((resolve) => {
+                targetImg.onload = () => {
+                  const offCanvas = document.createElement('canvas');
+                  offCanvas.width = cols;
+                  offCanvas.height = rows;
+                  const offCtx = offCanvas.getContext('2d')!;
+                  offCtx.drawImage(targetImg, 0, 0, cols, rows);
+                  const targetData = offCtx.getImageData(0, 0, cols, rows).data;
+                  // Store targetColors for server-side overlay
+                  const targetColorsFlat: number[] = new Array(cols * rows * 3);
+                  for (let ci = 0; ci < cols * rows; ci++) {
+                    const i = ci * 4;
+                    targetColorsFlat[ci * 3] = targetData[i];
+                    targetColorsFlat[ci * 3 + 1] = targetData[i + 1];
+                    targetColorsFlat[ci * 3 + 2] = targetData[i + 2];
+                  }
+                  targetColorsRef.current = targetColorsFlat;
+                  // Build colorEnhance overlay image
+                  const ceCanvas = document.createElement('canvas');
+                  ceCanvas.width = cols;
+                  ceCanvas.height = rows;
+                  const ceCtx = ceCanvas.getContext('2d')!;
+                  ceCtx.putImageData(offCtx.getImageData(0, 0, cols, rows), 0, 0);
+                  setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
+                  // Set a reasonable default colorEnhance
+                  setColorEnhance(15);
+                  colorEnhanceRef.current = 15;
+                  resolve();
+                };
+                targetImg.onerror = () => resolve();
+                targetImg.src = data.userPhoto;
+              });
+            } catch (e) {
+              console.warn('[ProjectLoad] Failed to restore color enhance:', e);
+            }
+          }
+
           // Restore user photo (skip auto-render: project already has rendered image)
           if (data.userPhoto) {
             skipAutoRenderRef.current = true;
