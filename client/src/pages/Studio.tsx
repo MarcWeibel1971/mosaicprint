@@ -3542,9 +3542,9 @@ export default function Studio() {
     const defaultOverlay = imgType === 'portrait' ? (hasUserTiles ? 30 : 25)
                          : imgType === 'landscape' ? (hasUserTiles ? 20 : 10)
                          : (hasUserTiles ? 20 : 10);
-    const defaultColorEnhance = imgType === 'portrait' ? 20
-                              : imgType === 'landscape' ? 15
-                              : 10;
+    const defaultColorEnhance = imgType === 'portrait' ? 12
+                              : imgType === 'landscape' ? 10
+                              : 8;
     setUserOverlay(defaultOverlay);
     setColorEnhance(defaultColorEnhance);
     colorEnhanceRef.current = defaultColorEnhance;
@@ -4018,9 +4018,8 @@ export default function Studio() {
                   const ceCtx = ceCanvas.getContext('2d')!;
                   ceCtx.putImageData(offCtx.getImageData(0, 0, cols, rows), 0, 0);
                   setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
-                  // Set a reasonable default colorEnhance
-                  setColorEnhance(15);
-                  colorEnhanceRef.current = 15;
+                  // Don't auto-enable colorEnhance for loaded projects
+                  // User can adjust the slider manually if desired
                   resolve();
                 };
                 targetImg.onerror = () => resolve();
@@ -5097,21 +5096,29 @@ export default function Studio() {
                     />
                   )}
                   {/* Color Enhance overlay - target colors per tile with color blend */}
-                  {colorEnhance > 0 && ready && colorEnhanceUrl && (
-                    <img
-                      src={colorEnhanceUrl}
-                      alt=""
-                      style={{
-                        display: "block",
-                        position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
-                        pointerEvents: "none",
-                        imageRendering: "pixelated" as const,
-                        mixBlendMode: "color" as const,
-                        opacity: colorEnhance / 100,
-                      }}
-                    />
-                  )}
+                  {/* Auto-reduce at high zoom: individual tiles are visible, color overlay looks artificial */}
+                  {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
+                    // Fade out color enhance as zoom increases beyond 100%
+                    // At <=100%: full strength (mosaic looks like photo). At 200%: ~33%. At 300%+: zero.
+                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0, 1.0 - (zoom - 1.0) / 2.0);
+                    const effectiveOpacity = (colorEnhance / 100) * zoomFade;
+                    if (effectiveOpacity < 0.01) return null;
+                    return (
+                      <img
+                        src={colorEnhanceUrl}
+                        alt=""
+                        style={{
+                          display: "block",
+                          position: "absolute",
+                          top: 0, left: 0, width: "100%", height: "100%",
+                          pointerEvents: "none",
+                          imageRendering: "pixelated" as const,
+                          mixBlendMode: "color" as const,
+                          opacity: effectiveOpacity,
+                        }}
+                      />
+                    );
+                  })()}
                   {/* User overlay - original photo shown on top of everything (including hi-res) */}
                   {userPhotoImg && userOverlay > 0 && ready && (
                     <img
