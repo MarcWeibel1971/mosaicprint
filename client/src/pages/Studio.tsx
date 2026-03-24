@@ -3947,16 +3947,20 @@ export default function Studio() {
   const [projectLoadMsg, setProjectLoadMsg] = useState('');
   useEffect(() => {
     const projectId = searchParams.get('project');
+    console.log(`[ProjectLoad] Effect fired: projectId=${projectId}, user=${user?.email ?? 'null'}`);
     if (!projectId || !user) return;
     (async () => {
       try {
         setProjectLoading(true);
         setProjectLoadMsg('Projektdaten laden...');
+        console.log(`[ProjectLoad] Fetching project ${projectId}...`);
 
         const res = await fetch(`/api/projects/${projectId}`, { headers: authHeaders() });
         const result = await res.json();
+        console.log(`[ProjectLoad] Response: ok=${result.ok}, hasData=${!!result.project?.data}, status=${res.status}`);
         if (result.ok && result.project?.data) {
           const data = typeof result.project.data === 'string' ? JSON.parse(result.project.data) : result.project.data;
+          console.log(`[ProjectLoad] Data keys: ${Object.keys(data).join(', ')}, hasMosaicImage=${!!data.mosaicImage}, hasUserPhoto=${!!data.userPhoto}, tiles=${result.project.user_tiles?.length ?? 0}`);
           if (data.userPhoto) setUserPhoto(data.userPhoto);
           if (data.selectedFormat !== undefined) setSelectedFormat(data.selectedFormat);
           if (data.selectedMaterial !== undefined) setSelectedMaterial(data.selectedMaterial);
@@ -4006,12 +4010,14 @@ export default function Studio() {
 
           setProjectLoadMsg('Mosaik wird angezeigt...');
 
+          console.log(`[ProjectLoad] mosaicImage=${data.mosaicImage ? data.mosaicImage.substring(0, 50) + '...' : 'null'}, mosaicParams=${JSON.stringify(data.mosaicParams)}`);
           if (data.mosaicImage && data.mosaicParams) {
             await new Promise<void>((resolve) => {
               const img = new Image();
               img.onload = () => {
+                console.log(`[ProjectLoad] Mosaic image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
                 const canvas = canvasRef.current;
-                if (!canvas) { resolve(); return; }
+                if (!canvas) { console.warn('[ProjectLoad] Canvas ref is null!'); resolve(); return; }
                 const { canvasW, canvasH } = data.mosaicParams;
                 canvas.width = canvasW;
                 canvas.height = canvasH;
@@ -4035,7 +4041,7 @@ export default function Studio() {
                 setPan({ x: 0, y: 0 });
                 resolve();
               };
-              img.onerror = () => resolve();
+              img.onerror = (e) => { console.error('[ProjectLoad] Mosaic image FAILED to load:', e); resolve(); };
               img.src = data.mosaicImage;
             });
           }
@@ -4820,7 +4826,7 @@ export default function Studio() {
         )}
 
         {/* Restore saved project banner */}
-        {showRestoreBanner && !userPhoto && !loading && (
+        {showRestoreBanner && !userPhoto && !loading && !projectLoading && (
           <div className="max-w-xl mx-auto mb-6 bg-green-50 border border-green-200 rounded-2xl p-4 flex items-center gap-3">
             <FolderOpen className="w-6 h-6 text-green-600 flex-shrink-0" />
             <div className="flex-1 min-w-0">
