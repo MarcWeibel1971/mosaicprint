@@ -123,6 +123,36 @@ function getPhotoUrls(count: number, tileSize: number): string[] {
 
 // loadImage is replaced by loadImageCached from image-cache.ts
 
+// Poll server for render job completion (robust fallback — works through any proxy)
+async function pollForResult(
+  jobId: string,
+  onProgress?: (p: number) => void,
+  onMessage?: (m: string) => void,
+): Promise<{ token: string; filename: string; size: number }> {
+  const deadline = Date.now() + 15 * 60 * 1000; // 15 min max
+  let lastProgress = 0;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`/api/print-job/${jobId}`);
+      if (r.ok) {
+        const data = await r.json();
+        if (data.progress && data.progress >= lastProgress) {
+          lastProgress = data.progress;
+          onProgress?.(data.progress);
+        }
+        if (data.message) onMessage?.(data.message);
+        if (data.error) throw new Error(data.message || 'Server-Fehler');
+        if (data.done && data.result) return data.result;
+      }
+    } catch (e: any) {
+      if (e?.message?.includes('Server-Fehler')) throw e;
+      // Network error — retry
+    }
+    await new Promise(r => setTimeout(r, 1500)); // poll every 1.5s
+  }
+  throw new Error('Zeitüberschreitung (15 Min) – bitte erneut versuchen');
+}
+
 // LAB -> (RGB) (inverse of rgbToLab)
 function labToRgb(L: number, a: number, b: number): [number, number, number] {
   const fy = (L + 16) / 116;
@@ -4543,22 +4573,8 @@ export default function Studio() {
         });
         if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-        // 2. Wait for completion via SSE (avoids proxy timeout)
-        const printResult = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
-          const timeout = setTimeout(() => { reject(new Error('Zeitüberschreitung (15 Min)')); }, 15 * 60 * 1000);
-          let lastProg = 0;
-          const sse = new EventSource(`/api/print-progress/${printJobId}`);
-          sse.onmessage = (ev) => {
-            try {
-              const data = JSON.parse(ev.data);
-              if (data.progress && data.progress >= lastProg) { lastProg = data.progress; setDlProgress(data.progress); }
-              if (data.message) setDlProgressMsg(data.message);
-              if (data.error) { clearTimeout(timeout); sse.close(); reject(new Error(data.message || 'Server-Fehler')); }
-              if (data.done && data.result) { clearTimeout(timeout); sse.close(); resolve(data.result as any); }
-            } catch { /* ignore */ }
-          };
-          sse.onerror = () => { if (lastProg < 5) { clearTimeout(timeout); sse.close(); reject(new Error('Verbindung verloren')); } };
-        });
+        // 2. Poll for completion (robust — works through any proxy)
+        const printResult = await pollForResult(printJobId, setDlProgress, setDlProgressMsg);
 
         // 3. Trigger download
         const { token, filename, size } = printResult;
@@ -4684,43 +4700,8 @@ export default function Studio() {
         throw new Error(`Server error: ${resp.status}`);
       }
 
-      // 2. Wait for completion via SSE (no proxy timeout issues)
-      const result = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Zeitüberschreitung (15 Min) – bitte erneut versuchen'));
-        }, 15 * 60 * 1000);
-
-        let lastProgress = 0;
-        const sse = new EventSource(`/api/print-progress/${digJobId}`);
-        sse.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            if (data.progress && data.progress >= lastProgress) {
-              lastProgress = data.progress;
-              setDlProgress(data.progress);
-            }
-            if (data.message) setDlProgressMsg(data.message);
-            if (data.error) {
-              clearTimeout(timeout);
-              sse.close();
-              reject(new Error(data.message || 'Server-Fehler'));
-            }
-            if (data.done && data.result) {
-              clearTimeout(timeout);
-              sse.close();
-              resolve(data.result as { token: string; filename: string; size: number });
-            }
-          } catch { /* ignore */ }
-        };
-        sse.onerror = () => {
-          // SSE reconnects automatically; only reject if we haven't received any progress
-          if (lastProgress < 5) {
-            clearTimeout(timeout);
-            sse.close();
-            reject(new Error('Verbindung zum Server verloren'));
-          }
-        };
-      });
+      // 2. Poll for completion (robust — works through any proxy, no SSE needed)
+      const result = await pollForResult(digJobId, setDlProgress, setDlProgressMsg);
 
       // 3. Trigger download
       const { token, filename, size } = result;
@@ -4789,22 +4770,8 @@ export default function Studio() {
       });
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-      // 2. Wait for completion via SSE
-      const adminResult = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
-        const timeout = setTimeout(() => { reject(new Error('Zeitüberschreitung (15 Min)')); }, 15 * 60 * 1000);
-        let lastProg = 0;
-        const sse = new EventSource(`/api/print-progress/${jobId}`);
-        sse.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            if (data.progress && data.progress >= lastProg) { lastProg = data.progress; setDlProgress(data.progress); }
-            if (data.message) setDlProgressMsg(data.message);
-            if (data.error) { clearTimeout(timeout); sse.close(); reject(new Error(data.message || 'Server-Fehler')); }
-            if (data.done && data.result) { clearTimeout(timeout); sse.close(); resolve(data.result as any); }
-          } catch { /* ignore */ }
-        };
-        sse.onerror = () => { if (lastProg < 5) { clearTimeout(timeout); sse.close(); reject(new Error('Verbindung verloren')); } };
-      });
+      // 2. Poll for completion (robust — works through any proxy)
+      const adminResult = await pollForResult(jobId, setDlProgress, setDlProgressMsg);
 
       // 3. Trigger download
       const { token: adminToken, filename, size } = adminResult;
@@ -4877,18 +4844,6 @@ export default function Studio() {
       setProgressMsg(`Rendere Druckdatei fuer Printolino (${fmt.label})...`);
       setProgress(10);
       const jobId = `prt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      let sseSource: EventSource | null = null;
-      try {
-        sseSource = new EventSource(`/api/print-progress/${jobId}`);
-        sseSource.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            if (data.progress) setProgress(data.progress);
-            if (data.message) setProgressMsg(data.message);
-          } catch { /* ignore */ }
-        };
-      } catch { /* SSE not critical */ }
-
       const renderResp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4907,9 +4862,10 @@ export default function Studio() {
           faceMask: faceMaskRef.current,
         }),
       });
-      if (sseSource) sseSource.close();
       if (!renderResp.ok) throw new Error('Render failed');
-      const { token } = await renderResp.json();
+      // Poll for completion
+      const prtResult = await pollForResult(jobId, setProgress, setProgressMsg);
+      const { token } = prtResult;
 
       // 4. Update order with download token
       await fetch(`/api/admin/orders/${orderData.orderId}/status`, {

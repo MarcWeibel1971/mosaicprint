@@ -1342,9 +1342,13 @@ app.get('/api/print-progress/:jobId', (req, res) => {
   const { jobId } = req.params;
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // Disable nginx/Railway proxy buffering
   });
+  // Send initial message immediately (don't wait for first interval)
+  const initialJob = printJobs.get(jobId);
+  res.write(`data: ${JSON.stringify(initialJob || { progress: 0, message: 'Warte...' })}\n\n`);
 
   const interval = setInterval(() => {
     const job = printJobs.get(jobId);
@@ -1352,13 +1356,25 @@ app.get('/api/print-progress/:jobId', (req, res) => {
     res.write(`data: ${JSON.stringify(job)}\n\n`);
     if (job.done || job.error) {
       clearInterval(interval);
-      setTimeout(() => res.end(), 500);
-      // Clean up job after 60s
-      setTimeout(() => printJobs.delete(jobId), 60000);
+      // Send result one more time to ensure delivery, then close
+      setTimeout(() => {
+        try { res.write(`data: ${JSON.stringify(job)}\n\n`); } catch { /* ignore */ }
+        setTimeout(() => { try { res.end(); } catch { /* ignore */ } }, 500);
+      }, 300);
+      setTimeout(() => printJobs.delete(jobId), 120000); // keep 2 min for polling fallback
     }
   }, 500);
 
   req.on('close', () => clearInterval(interval));
+});
+
+// Polling fallback: GET /api/print-job/:jobId — returns job status as JSON
+// Used when SSE doesn't work (proxy buffering, connection issues)
+app.get('/api/print-job/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  const job = printJobs.get(jobId);
+  if (!job) return res.json({ progress: 0, message: 'Warte...', done: false });
+  res.json(job);
 });
 
 // Helper: Apply overlay blending to a raw RGB pixel buffer (matches client-side Step 6)
