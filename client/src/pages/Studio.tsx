@@ -3749,14 +3749,14 @@ export default function Studio() {
   }, [popOutMode, ready, renderPopOut]);
 
   // Auto-start Hi-Res rendering in background once mosaic is ready
+  // Always use client-side render (images already loaded, no download failures)
   useEffect(() => {
     if (!ready) return;
     if (hiResReadyRef.current || hiResLoadingRef.current) return;
     // Short delay so UI renders first
     const timer = setTimeout(() => {
       if (hiResReadyRef.current || hiResLoadingRef.current) return;
-      if (canDoHiRes()) triggerHiResRender();
-      else triggerClientHiResRender();
+      triggerClientHiResRender();
     }, 1500);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3768,14 +3768,14 @@ export default function Studio() {
     const currentZ = zoomRef.current;
     const newZ = Math.min(8, Math.max(0.2, currentZ * factor));
 
-    // Always allow zoom – trigger hi-res render in background if not ready
+    // Always use client-side hi-res render for zoom preview (fast, no downloads needed).
+    // Server render is reserved for actual print downloads to avoid gray tiles from failed URL fetches.
     if (newZ > 1.05 && !hiResReadyRef.current && !hiResLoadingRef.current) {
-      if (canDoHiRes()) triggerHiResRender();
-      else triggerClientHiResRender();
+      triggerClientHiResRender();
     }
 
     setZoom(newZ);
-  }, [triggerHiResRender, triggerClientHiResRender, canDoHiRes]);
+  }, [triggerClientHiResRender]);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     isDragging.current = true; lastMouse.current = { x: e.clientX, y: e.clientY };
     clickStartRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
@@ -5125,7 +5125,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) { if (canDoHiRes()) triggerHiResRender(); else triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
