@@ -538,10 +538,21 @@ export default function Studio() {
         }),
       });
       clearTimeout(timeoutId);
-      if (sseSource) sseSource.close();
+      if (!resp.ok) { if (sseSource) sseSource.close(); throw new Error(`Server error: ${resp.status}`); }
+      // Server returns {accepted:true, jobId} immediately – poll for result
+      const acceptedData = await resp.json();
+      if (!acceptedData.accepted) { if (sseSource) sseSource.close(); throw new Error('Server did not accept job'); }
+      setProgress(10);
+      setProgressMsg('Zoom wird gerendert...');
 
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const { token } = await resp.json();
+      // Poll for completion (server processes async)
+      const pollResult = await pollForResult(
+        zoomJobId,
+        (p) => setProgress(Math.max(10, Math.min(85, p))),
+        (m) => setProgressMsg(m),
+      );
+      if (sseSource) sseSource.close();
+      const { token } = pollResult;
       setProgress(90);
       setProgressMsg('Lade Zoomansicht...');
 
