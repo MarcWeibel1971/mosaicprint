@@ -161,11 +161,13 @@ const MATERIALS = [
 ];
 
 // Digital download options (no physical print)
+// Tile sizes chosen so each tier produces visibly different output dimensions
+// even for large grids (120+ cols). Server MAX_DIM raised to 32000.
 const DIGITAL_FORMATS = [
-  { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 128, price: 9, format: 'jpg' as const },
-  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 256, price: 19, format: 'jpg' as const },
-  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 400, price: 29, format: 'jpg' as const },
-  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 400, price: 39, format: 'png' as const },
+  { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
+  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 128, price: 19, format: 'jpg' as const },
+  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 200, price: 29, format: 'jpg' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 256, price: 39, format: 'png' as const },
 ];
 
 export default function Studio() {
@@ -176,6 +178,10 @@ export default function Studio() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
+  // Separate download progress (shown inline in order panel, not at top)
+  const [dlProgress, setDlProgress] = useState(0);
+  const [dlProgressMsg, setDlProgressMsg] = useState("");
+  const [dlLoading, setDlLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -4417,22 +4423,27 @@ export default function Studio() {
       // SERVER-SIDE PRINT RENDER: for database tiles (positive IDs)
 
       try {
-        setLoading(true);
-        setProgressMsg(`Server rendert Druckqualitaet (${printOutW}x${printOutH}px)...`);
-        setProgress(5);
+        setDlLoading(true);
+        setDlProgressMsg(`Server rendert Druckqualitaet (${printOutW}x${printOutH}px)...`);
+        setDlProgress(5);
 
         // Generate a unique job ID for SSE progress tracking
         const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
         // Start SSE listener for real-time progress
         let sseSource: EventSource | null = null;
+        let lastPrintProgress = 0;
         try {
           sseSource = new EventSource(`/api/print-progress/${printJobId}`);
           sseSource.onmessage = (ev) => {
             try {
               const data = JSON.parse(ev.data);
-              if (data.progress) setProgress(data.progress);
-              if (data.message) setProgressMsg(data.message);
+              // Only accept progress that moves forward (prevents jumping)
+              if (data.progress && data.progress >= lastPrintProgress) {
+                lastPrintProgress = data.progress;
+                setDlProgress(data.progress);
+              }
+              if (data.message) setDlProgressMsg(data.message);
             } catch { /* ignore parse errors */ }
           };
         } catch { /* SSE not critical */ }
@@ -4476,7 +4487,7 @@ export default function Studio() {
         const { token, filename, size } = await resp.json();
         console.log(`[Print] Token received: ${token}, file: ${filename}, size: ${(size/1024/1024).toFixed(1)} MB`);
 
-        setProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
+        setDlProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
 
         // MOST RELIABLE DOWNLOAD METHOD: hidden <a> with direct server URL
         // The server sets Content-Disposition: attachment + Content-Type: image/jpeg
@@ -4485,7 +4496,7 @@ export default function Studio() {
         // window.location.href would navigate away from the page.
         // Hidden <a> click with direct URL: browser respects Content-Disposition: attachment.
         const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
-        setProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
+        setDlProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
         const dlLink = document.createElement('a');
         dlLink.href = downloadUrl;
         dlLink.download = filename;
@@ -4493,10 +4504,11 @@ export default function Studio() {
         document.body.appendChild(dlLink);
         dlLink.click();
         setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-        setProgressMsg(`✓ Download gestartet: ${filename}`);
+        setDlProgressMsg(`✓ Download gestartet: ${filename}`);
+        setDlProgress(100);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
-        setProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
+        setDlProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
         // Fallback: scale existing canvas (lower quality but works offline)
         const fallbackCanvas = document.createElement('canvas');
         fallbackCanvas.width = outW; fallbackCanvas.height = outH;
@@ -4515,8 +4527,8 @@ export default function Studio() {
         document.body.removeChild(link2);
         setTimeout(() => (URL).revokeObjectURL(url2), 10000);
       } finally {
-        setLoading(false);
-        setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+        setDlLoading(false);
+        setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
       }
       return; // early return for print mode
     }
@@ -4561,9 +4573,9 @@ export default function Studio() {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const digFmt = DIGITAL_FORMATS[selectedDigitalFormat];
     const { cols, rows } = mosaicParamsRef.current;
-    // Replicate server-side clamping (MAX_DIM=16000, tilePx 64-400) so progress shows real dimensions
-    const SERVER_MAX_DIM = 16000;
-    let TILE_PX = Math.min(Math.max(digFmt.tilePx, 64), 400);
+    // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256) so progress shows real dimensions
+    const SERVER_MAX_DIM = 32000;
+    let TILE_PX = Math.min(Math.max(digFmt.tilePx, 32), 256);
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
       TILE_PX = Math.max(32, TILE_PX);
@@ -4572,19 +4584,24 @@ export default function Studio() {
     const outH = rows * TILE_PX;
 
     try {
-      setLoading(true);
-      setProgressMsg(`Rendere ${digFmt.label} (${outW.toLocaleString()}x${outH.toLocaleString()}px)...`);
-      setProgress(5);
+      setDlLoading(true);
+      setDlProgressMsg(`Rendere ${digFmt.label} (${outW.toLocaleString()}x${outH.toLocaleString()}px)...`);
+      setDlProgress(5);
 
       const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       let sseSource: EventSource | null = null;
+      let lastSseProgress = 0;
       try {
         sseSource = new EventSource(`/api/print-progress/${digJobId}`);
         sseSource.onmessage = (ev) => {
           try {
             const data = JSON.parse(ev.data);
-            if (data.progress) setProgress(data.progress);
-            if (data.message) setProgressMsg(data.message);
+            // Only accept progress that moves forward (prevents jumping)
+            if (data.progress && data.progress >= lastSseProgress) {
+              lastSseProgress = data.progress;
+              setDlProgress(data.progress);
+            }
+            if (data.message) setDlProgressMsg(data.message);
           } catch { /* ignore */ }
         };
       } catch { /* SSE not critical */ }
@@ -4628,7 +4645,7 @@ export default function Studio() {
       }
 
       const { token, filename, size } = await resp.json();
-      setProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
 
       const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
       const dlLink = document.createElement('a');
@@ -4638,13 +4655,14 @@ export default function Studio() {
       document.body.appendChild(dlLink);
       dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgress(100);
     } catch (e) {
       console.error('[Digital Download] Failed:', e);
-      setProgressMsg(`Fehler: ${e}`);
+      setDlProgressMsg(`Fehler: ${e}`);
     } finally {
-      setLoading(false);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+      setDlLoading(false);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
     }
   }, [selectedDigitalFormat]);
 
@@ -4652,8 +4670,8 @@ export default function Studio() {
   const handleAdminMaxDownload = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const { cols, rows } = mosaicParamsRef.current;
-    const SERVER_MAX_DIM = 16000;
-    let TILE_PX = 400;
+    const SERVER_MAX_DIM = 32000;
+    let TILE_PX = 256; // Max tile size supported by server
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
       TILE_PX = Math.max(32, TILE_PX);
@@ -4662,19 +4680,23 @@ export default function Studio() {
     const outH = rows * TILE_PX;
 
     try {
-      setLoading(true);
-      setProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px PNG)...`);
-      setProgress(5);
+      setDlLoading(true);
+      setDlProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px PNG)...`);
+      setDlProgress(5);
 
       const jobId = `admin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       let sseSource: EventSource | null = null;
+      let lastAdminProgress = 0;
       try {
         sseSource = new EventSource(`/api/print-progress/${jobId}`);
         sseSource.onmessage = (ev) => {
           try {
             const data = JSON.parse(ev.data);
-            if (data.progress) setProgress(data.progress);
-            if (data.message) setProgressMsg(data.message);
+            if (data.progress && data.progress >= lastAdminProgress) {
+              lastAdminProgress = data.progress;
+              setDlProgress(data.progress);
+            }
+            if (data.message) setDlProgressMsg(data.message);
           } catch { /* ignore */ }
         };
       } catch { /* SSE not critical */ }
@@ -4706,7 +4728,7 @@ export default function Studio() {
 
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
       const { token, filename, size } = await resp.json();
-      setProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
 
       const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
       const dlLink = document.createElement('a');
@@ -4716,13 +4738,14 @@ export default function Studio() {
       document.body.appendChild(dlLink);
       dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
-      setProgressMsg(`Fehler: ${e}`);
+      setDlProgressMsg(`Fehler: ${e}`);
     } finally {
-      setLoading(false);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+      setDlLoading(false);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
     }
   }, []);
 
@@ -5652,15 +5675,15 @@ export default function Studio() {
                     {DIGITAL_FORMATS.map(({ label, desc, tilePx: rawTilePx, price, format }, idx) => {
                       const cols = mosaicParamsRef.current?.cols ?? 60;
                       const rows = mosaicParamsRef.current?.rows ?? 80;
-                      // Match server clamping: min 64, max 400, then MAX_DIM=16000
-                      const SERVER_MAX_DIM_D = 16000;
-                      let tilePx = Math.min(Math.max(rawTilePx, 64), 400);
-                      if (cols * tilePx > SERVER_MAX_DIM_D || rows * tilePx > SERVER_MAX_DIM_D) {
-                        tilePx = Math.min(Math.floor(SERVER_MAX_DIM_D / cols), Math.floor(SERVER_MAX_DIM_D / rows), tilePx);
-                        tilePx = Math.max(32, tilePx);
+                      // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256)
+                      const SERVER_MAX_DIM = 32000;
+                      let clampedTilePx = Math.min(Math.max(rawTilePx, 32), 256);
+                      if (cols * clampedTilePx > SERVER_MAX_DIM || rows * clampedTilePx > SERVER_MAX_DIM) {
+                        clampedTilePx = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), clampedTilePx);
+                        clampedTilePx = Math.max(32, clampedTilePx);
                       }
-                      const outW = cols * tilePx;
-                      const outH = rows * tilePx;
+                      const outW = cols * clampedTilePx;
+                      const outH = rows * clampedTilePx;
                       return (
                         <button
                           key={label}
@@ -5734,12 +5757,32 @@ export default function Studio() {
                   {isAdminMode && (
                     <button
                       onClick={handleAdminMaxDownload}
-                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
+                      disabled={dlLoading}
+                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium disabled:opacity-50"
                     >
-                      Admin: Direkt herunterladen (max. Qualitaet)
+                      {dlLoading ? 'Rendere...' : 'Admin: Direkt herunterladen (max. Qualitaet)'}
                     </button>
                   )}
                 </div>
+
+                {/* Inline Download Progress */}
+                {(dlLoading || dlProgressMsg) && (
+                  <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-medium text-blue-800 truncate pr-2">{dlProgressMsg || 'Verarbeite...'}</p>
+                      <span className="text-lg font-bold text-blue-600 whitespace-nowrap">{dlProgress}%</span>
+                    </div>
+                    <div className="w-full bg-blue-100 rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className="h-2.5 rounded-full transition-all duration-500 ease-out"
+                        style={{
+                          width: `${Math.max(dlProgress, 2)}%`,
+                          background: 'linear-gradient(90deg, #3B82F6 0%, #2563EB 100%)',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
@@ -5967,12 +6010,32 @@ export default function Studio() {
                   {isAdminMode && (
                     <button
                       onClick={handleAdminMaxDownload}
-                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium"
+                      disabled={dlLoading}
+                      className="text-xs text-amber-600 hover:text-amber-800 underline font-medium disabled:opacity-50"
                     >
-                      Admin: Direkt herunterladen (max. Qualitaet)
+                      {dlLoading ? 'Rendere...' : 'Admin: Direkt herunterladen (max. Qualitaet)'}
                     </button>
                   )}
                 </div>
+
+                {/* Inline Download Progress (Print) */}
+                {(dlLoading || dlProgressMsg) && (
+                  <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-medium text-blue-800 truncate pr-2">{dlProgressMsg || 'Verarbeite...'}</p>
+                      <span className="text-lg font-bold text-blue-600 whitespace-nowrap">{dlProgress}%</span>
+                    </div>
+                    <div className="w-full bg-blue-100 rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className="h-2.5 rounded-full transition-all duration-500 ease-out"
+                        style={{
+                          width: `${Math.max(dlProgress, 2)}%`,
+                          background: 'linear-gradient(90deg, #3B82F6 0%, #2563EB 100%)',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>
