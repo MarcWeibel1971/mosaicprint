@@ -1794,11 +1794,15 @@ export default function Studio() {
           const edge = labIndex[i + 12];
           const brightness = labIndex[i + 13];
           dist += (W_EDGE)*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
-          // Extra brightness penalty: very dark tile (brightness<0.15) in bright area (targetBrightness>0.65)
-          // Moderate penalty to avoid over-correction (white patches)
-          if (targetBrightness > 0.65 && brightness < 0.15) {
-            const darkPenalty = (0.15 - brightness) * (targetBrightness - 0.65) * 300;
-            dist += darkPenalty; // up to +45 for very dark tile in very bright area
+          // Extra brightness penalty: dark tile in bright area
+          // MASSIV verstärkt: dark tiles in bright backgrounds are very visible
+          if (targetBrightness > 0.55 && brightness < 0.30) {
+            const darkPenalty = (0.30 - brightness) * (targetBrightness - 0.55) * 1500;
+            dist += darkPenalty; // up to +200 for very dark tile in very bright area
+          }
+          // Moderate mismatch: tile noticeably darker than target
+          if (targetBrightness > 0.50 && brightness < targetBrightness - 0.30) {
+            dist += (targetBrightness - brightness - 0.30) * 400; // gradual penalty
           }
           // CRITICAL FIX: Bright tile in dark area penalty (prevents white spots in dark clothing/hair)
           // A bright tile (brightness>0.55) in a dark area (targetBrightness<0.35) is almost never correct
@@ -2930,26 +2934,30 @@ export default function Studio() {
           // mouth: high edge + SSD, strong sat penalty (lips have color but must match)
           // nose: high brightness, moderate edge, strong sat penalty (skin area)
           // cheek/forehead: max skin-tone matching, low edge, very strong sat penalty
-          const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.55 : 0.50;
-          const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 1.6 : wLabBase * 1.4;
+          const wSsdFace   = subRegion === 'eye' ? 0.65 : subRegion === 'mouth' ? 0.60 : subRegion === 'nose' ? 0.50 : 0.45;
+          const wLabF      = subRegion === 'eye' ? wLabBase * 2.0 : subRegion === 'mouth' ? wLabBase * 1.8 : subRegion === 'nose' ? wLabBase * 2.0 : wLabBase * 2.2;
           // Dynamic brightness weight:
-          // - Very bright areas (L>75, white hair/beard): INCREASE brightness weight strongly
-          //   so the algorithm picks light tiles, not dark/cool ones
-          // - Moderately bright areas (L>65): slight reduction to prevent over-darkening warm faces
-          const isVeryBright = tf.brightness > 75; // white hair, beard, bright highlights
+          // MASSIV erhöht für Hautbereiche: Helligkeitsunterschiede sind im Gesicht sehr auffällig
+          const isVeryBright = tf.brightness > 75;
           const faceBrightBoost = isVeryBright ? 1.6 : (tf.brightness > 65 ? 0.85 : 1.0);
-          const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 1.5 : wBrightBase * 1.3) * faceBrightBoost;
+          const wBrightF   = (subRegion === 'cheek' || subRegion === 'forehead' ? wBrightBase * 2.5 : subRegion === 'nose' ? wBrightBase * 2.2 : wBrightBase * 1.8) * faceBrightBoost;
           const faceEdgeWeight = subRegion === 'eye' ? edgeWeight * 3.0 : subRegion === 'mouth' ? edgeWeight * 2.5 : subRegion === 'nose' ? edgeWeight * 2.0 : edgeWeight * 1.5;
-          const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : wTextureBase * 1.5;
-          // Saturation weight: reduced to allow warmer tiles in face (was ×2.5/×2.0/×1.5 → too aggressive)
-          const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.5 : subRegion === 'nose' ? wSatBase * 1.3 : wSatBase * 1.1;
+          // Texture weight: STARK erhöht für Hautbereiche - ruhige Tiles bevorzugen
+          const faceTextureWeight = subRegion === 'eye' ? wTextureBase * 2.5 : subRegion === 'mouth' ? wTextureBase * 2.0 : subRegion === 'nose' ? wTextureBase * 3.0 : wTextureBase * 3.5;
+          // Saturation weight: moderate for face
+          const faceSatWeight = subRegion === 'cheek' || subRegion === 'forehead' ? wSatBase * 1.8 : subRegion === 'nose' ? wSatBase * 1.5 : wSatBase * 1.2;
           baseDist = wSsdFace * ssdScore * 100 + wLabF * labDist + wBrightF * brightDiff + faceTextureWeight * textureDiff * 50 + faceEdgeWeight * edgeDiff * 100 + faceSatWeight * satDiff * 100;
-          // Skin-tone detection: warm L:40-85, a:3-30, b:5-40 (broader range to catch shadows/neck)
-          const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
-          const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 30 && mf.lab[2] >= 5 && mf.lab[2] <= 40;
-          if (isTargetSkin && isTileSkin) baseDist -= 200; // skin-tone bonus: MASSIV bevorzugen
+          // BRIGHTNESS CONSISTENCY: penalize tiles with significantly different brightness in face
+          // This is the key fix for "Kontrastvariation" in skin areas
+          if (Math.abs(tf.brightness - mf.brightness) > 15) {
+            baseDist += (Math.abs(tf.brightness - mf.brightness) - 15) * 4; // gradual penalty
+          }
+          // Skin-tone detection: warm L:40-85, a:3-25, b:8-35 (tighter range for better consistency)
+          const isTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 25 && tf.lab[2] >= 8 && tf.lab[2] <= 35;
+          const isTileSkin = mf.lab[0] >= 35 && mf.lab[0] <= 85 && mf.lab[1] >= 3 && mf.lab[1] <= 25 && mf.lab[2] >= 8 && mf.lab[2] <= 35;
+          if (isTargetSkin && isTileSkin) baseDist -= 400; // skin-tone bonus: MASSIV bevorzugen (was -200)
           // cheek/forehead: stronger penalty for non-skin tiles in skin areas
-          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 800 : (subRegion === 'nose' ? 600 : 300);
+          const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 1200 : (subRegion === 'nose' ? 900 : 500);
           if (isTargetSkin && !isTileSkin) baseDist += skinMismatchPenalty;
           // EXTRA: Any tile with cool hue (b < 3) in warm skin area gets penalty
           if (isTargetSkin && mf.lab[2] < 3 && tf.lab[2] > 8) {
@@ -3174,12 +3182,17 @@ export default function Studio() {
             const penaltyFactor = isVeryBright ? 22 : 10;
             baseDist += yellowOvershoot * penaltyFactor * brightStrength;
           }
-          // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
-          // Moderate penalty only - avoid over-correction (white patches)
+          // DARK TILE IN BRIGHT AREA PENALTY: prevents dark spots in bright backgrounds
+          // MASSIV verstärkt: dark tiles in bright areas are the #1 visual defect
           const targetBr = tf.brightness; // 0-100
           const tileBr = mf.brightness;   // 0-100
-          if (targetBr > 70 && tileBr < 15) {
-            baseDist += (15 - tileBr) / 15 * (targetBr - 70) / 30 * 2 * 100; // up to +200 for near-black tile in very bright area
+          // Tier 1: Very dark tile in very bright area (e.g. black tile in white wall)
+          if (targetBr > 65 && tileBr < 25) {
+            baseDist += (25 - tileBr) * (targetBr - 65) * 0.8; // up to +700
+          }
+          // Tier 2: Moderate brightness mismatch (e.g. gray tile in bright area)
+          if (targetBr > 55 && tileBr < targetBr - 35) {
+            baseDist += (targetBr - tileBr - 35) * 3; // gradual penalty for any significant mismatch
           }
 
           // FIX 2: SMOOTH-REGION → CALM-TILES RULE (VERSCHÄRFT)
