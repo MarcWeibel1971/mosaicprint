@@ -197,7 +197,7 @@ const DIGITAL_FORMATS = [
   { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
   { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 128, price: 19, format: 'jpg' as const },
   { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 200, price: 29, format: 'jpg' as const },
-  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 256, price: 39, format: 'png' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 200, price: 39, format: 'png' as const },
 ];
 
 export default function Studio() {

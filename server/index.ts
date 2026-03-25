@@ -1677,7 +1677,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         const encoded = sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 }, limitInputPixels: false });
         outputBuf = useJpeg
           ? await encoded.jpeg({ quality: 95 }).toBuffer()
-          : await encoded.png({ compressionLevel: 4 }).toBuffer();
+          : await encoded.png({ compressionLevel: 6 }).toBuffer();
       } else {
         // No overlay: direct encode
         const pipeline = sharp({
@@ -1686,7 +1686,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         }).composite(compositeInputs);
         outputBuf = useJpeg
           ? await pipeline.jpeg({ quality: 95 }).toBuffer()
-          : await pipeline.png({ compressionLevel: 4 }).toBuffer();
+          : await pipeline.png({ compressionLevel: 6 }).toBuffer();
       }
       updateProgress(90, `Speichere ${(outputBuf.length / 1024 / 1024).toFixed(1)} MB...`);
 
@@ -1772,7 +1772,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     if (useJpeg) {
       await finalPipeline.jpeg({ quality: 95 }).toFile(tmpFile);
     } else {
-      await finalPipeline.png({ compressionLevel: 4 }).toFile(tmpFile);
+      await finalPipeline.png({ compressionLevel: 6 }).toFile(tmpFile);
     }
 
     // Clean up strip files
