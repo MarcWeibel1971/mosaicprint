@@ -1473,10 +1473,10 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
       console.log(`[print-render] [${progress}%] ${message}${etaStr}`);
     };
 
-    // Clamp tile size: min 64px, max 400px
-    // Safety cap: max 16000px per output dimension
-    let TILE_PX = Math.min(Math.max(tilePx, 64), 400);
-    const MAX_DIM = 16000;
+    // Clamp tile size: min 32px, max 256px
+    // Safety cap: max 32000px per output dimension (supports Ultra HD / PNG Lossless)
+    let TILE_PX = Math.min(Math.max(tilePx, 32), 256);
+    const MAX_DIM = 32000;
     if (cols * TILE_PX > MAX_DIM || rows * TILE_PX > MAX_DIM) {
       TILE_PX = Math.min(Math.floor(MAX_DIM / cols), Math.floor(MAX_DIM / rows), TILE_PX);
       TILE_PX = Math.max(32, TILE_PX);
@@ -1489,31 +1489,35 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     // Fetch unique tile IDs needed
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
+      `SELECT id, tile128_url, tile256_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
       [uniqueIds]
     );
+    // Build URL map: prefer R2 CDN (fast, reliable), then tile256, then source_url, then tile128
     const urlMap: Record<number, { hiRes: string; fallback: string }> = {};
+    let skippedCount = 0;
     for (const row of result.rows) {
-      if (row.r2_url) {
-        urlMap[row.id] = { hiRes: row.r2_url, fallback: row.r2_url };
-      } else if (row.source_provider === 'pixabay') {
-        // Pixabay: only skip if URLs are hotlink-protected (pixabay.com/get/ or /download/)
-        // CDN URLs (cdn.pixabay.com/photo/...) are publicly accessible
-        const hiRes = row.source_url || '';
-        const fallback = row.tile128_url || row.source_url || '';
+      // URL priority: r2 > tile256 > source_url > tile128
+      const r2 = row.r2_url || '';
+      const t256 = row.tile256_url || '';
+      const t128 = row.tile128_url || '';
+      const src = row.source_url || '';
+      
+      // For Pixabay: check hotlink protection
+      if (row.source_provider === 'pixabay') {
         const isHotlink = (u: string) => u.includes('pixabay.com/get/') || u.includes('pixabay.com/download/');
-        if (isHotlink(hiRes) && isHotlink(fallback)) continue; // both hotlink-protected, skip
-        urlMap[row.id] = {
-          hiRes: isHotlink(hiRes) ? fallback : hiRes,
-          fallback: isHotlink(fallback) ? hiRes : fallback,
-        };
+        const safeSrc = isHotlink(src) ? '' : src;
+        const safeFallback = r2 || t256 || t128 || safeSrc;
+        if (!safeFallback) { skippedCount++; continue; }
+        urlMap[row.id] = { hiRes: safeFallback, fallback: safeFallback };
       } else {
-        urlMap[row.id] = {
-          hiRes: row.source_url || '',
-          fallback: row.tile128_url || row.source_url || ''
-        };
+        // Priority: r2 > tile256 > source_url > tile128
+        const best = r2 || t256 || src || t128;
+        const fallback = r2 || t256 || t128 || src;
+        if (!best) { skippedCount++; continue; }
+        urlMap[row.id] = { hiRes: best, fallback };
       }
     }
+    if (skippedCount > 0) console.log(`[print-render] Skipped ${skippedCount} tiles without usable URLs`);
     updateProgress(10, `DB: ${uniqueIds.length} unique tiles, ${result.rows.length} URLs gefunden`);
 
     // Load tile images in parallel batches with memory cache, disk cache, then URL fallback
@@ -1588,7 +1592,9 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
               }
               break;
             }
-          } catch { /* try next url */ }
+          } catch (dlErr) {
+            console.log(`[print-render] Tile ${id} URL failed: ${url.substring(0, 60)}... (${dlErr})`);
+          }
         }
       }));
       const dlPct = Math.round(10 + (downloadedCount / uniqueIds.length) * 40);
@@ -1596,8 +1602,17 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     }
     console.log(`[print-render] Tiles loaded: ${downloadedCount}/${uniqueIds.length} (${memCacheHits} from memory cache)`);
 
+    const missingTiles = uniqueIds.filter(id => !tileBuffers[id]);
+    if (missingTiles.length > 0) {
+      console.log(`[print-render] WARNING: ${missingTiles.length}/${uniqueIds.length} tiles missing (no buffer). First 10: ${missingTiles.slice(0, 10).join(',')}`);
+    }
+    console.log(`[print-render] Tiles loaded: ${downloadedCount}/${uniqueIds.length} (${missingTiles.length} missing)`);
+
     // Strip-based compositing to control memory
-    const STRIP_ROWS = Math.max(1, Math.floor(6000 / TILE_PX));
+    // Target: keep strip RAM under ~250 MB (width * stripHeight * 4 bytes RGBA)
+    const MAX_STRIP_BYTES = 250 * 1024 * 1024; // 250 MB
+    const maxStripHeight = Math.floor(MAX_STRIP_BYTES / (outW * 4));
+    const STRIP_ROWS = Math.max(1, Math.min(Math.floor(maxStripHeight / TILE_PX), Math.floor(3000 / TILE_PX)));
     const totalStrips = Math.ceil(rows / STRIP_ROWS);
     updateProgress(55, `Compositing: ${totalStrips} Strips @ ${outW}px breit`);
 
