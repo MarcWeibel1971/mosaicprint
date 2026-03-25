@@ -3920,7 +3920,7 @@ export default function Studio() {
 
     // Always use client-side hi-res render for zoom preview (fast, no downloads needed).
     // Server render is reserved for actual print downloads to avoid gray tiles from failed URL fetches.
-    if (newZ > 1.05 && !hiResReadyRef.current && !hiResLoadingRef.current) {
+    if (newZ > 1.8 && !hiResReadyRef.current && !hiResLoadingRef.current) {
       triggerClientHiResRender();
     }
 
@@ -5280,7 +5280,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.05 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.8 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -5355,7 +5355,7 @@ export default function Studio() {
                     ref={canvasRef}
                     style={{
                       display: (ready || loading || projectLoading) && !popOutMode ? "block" : "none",
-                      imageRendering: zoom > 1 && !distancePreview && !hiResReady ? "pixelated" : "auto",
+                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 2.0) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
@@ -5371,8 +5371,8 @@ export default function Studio() {
                       maxWidth: "none",
                     }}
                   />
-                  {/* Hi-Res image overlay - sharp zoom (rendered BEFORE user overlay so overlay shows on top) */}
-                  {hiResImgUrl && hiResReady && zoom > 1.05 && (
+                  {/* Hi-Res image overlay - sharp zoom (only at high zoom where CSS scaling is noticeably blurry) */}
+                  {hiResImgUrl && hiResReady && zoom > 2.0 && (
                     <img
                       src={hiResImgUrl}
                       alt=""
