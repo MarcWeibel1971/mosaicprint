@@ -423,6 +423,7 @@ export default function Studio() {
   // Refs for use in stable callbacks (handleWheel)
   const hiResReadyRef = useRef(false);
   const hiResLoadingRef = useRef(false);
+  const triggerClientHiResRef = useRef<(() => Promise<void>) | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   hiResReadyRef.current = hiResReady;
@@ -448,7 +449,12 @@ export default function Studio() {
     setProgress(5);
 
     const { cols, rows } = mosaicParamsRef.current;
-    const ZOOM_TILE_PX = Math.min(256, Math.floor(12000 / Math.max(cols, rows))); // increased from 128 for sharper zoom
+    // Mobile: limit output to ~16 MP (4096px max dimension) to prevent iOS Safari OOM crash
+    // Desktop: allow up to 12000px for sharp zoom
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const maxDim = isMob ? 4096 : 12000;
+    const ZOOM_TILE_PX = Math.min(256, Math.floor(maxDim / Math.max(cols, rows)));
+    console.log(`[HiRes] Server render: ${cols}x${rows} @ ${ZOOM_TILE_PX}px = ${cols*ZOOM_TILE_PX}x${rows*ZOOM_TILE_PX} (mobile=${isMob})`);
     const zoomJobId = `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     // SSE progress for zoom render
@@ -470,9 +476,14 @@ export default function Studio() {
     try {
       // Send overlay data so server bakes in color correction (prevents color mismatch on zoom)
       const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+      // Timeout: 30s mobile, 90s desktop (server needs time to download tiles + composite)
+      const fetchTimeout = isMob ? 30000 : 90000;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), fetchTimeout);
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           tileIds: tileIdsRef.current,
           assignment: assignmentRef.current,
@@ -488,6 +499,7 @@ export default function Studio() {
           faceMask: faceMaskRef.current,
         }),
       });
+      clearTimeout(timeoutId);
       if (sseSource) sseSource.close();
 
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
@@ -495,10 +507,20 @@ export default function Studio() {
       setProgress(90);
       setProgressMsg('Lade Zoomansicht...');
 
-      // Fetch the PNG as blob
-      const imgResp = await fetch(`/api/print-download/${token}`);
+      // Fetch the rendered image as blob (with timeout)
+      const dlController = new AbortController();
+      const dlTimeout = setTimeout(() => dlController.abort(), isMob ? 20000 : 60000);
+      const imgResp = await fetch(`/api/print-download/${token}`, { signal: dlController.signal });
+      clearTimeout(dlTimeout);
       if (!imgResp.ok) throw new Error('Download failed');
       const blob = await imgResp.blob();
+      // Safety: check blob size – if too large for mobile, skip (will fall back to client render)
+      const MAX_BLOB_MB = isMob ? 15 : 100;
+      if (blob.size > MAX_BLOB_MB * 1024 * 1024) {
+        console.warn(`[HiRes] Blob too large for mobile: ${(blob.size/1024/1024).toFixed(1)}MB > ${MAX_BLOB_MB}MB`);
+        throw new Error(`Image too large: ${(blob.size/1024/1024).toFixed(1)}MB`);
+      }
+      console.log(`[HiRes] Downloaded: ${(blob.size/1024).toFixed(0)}KB, ${cols*ZOOM_TILE_PX}x${rows*ZOOM_TILE_PX}`);
 
       // Revoke previous URL if any
       if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
@@ -510,9 +532,20 @@ export default function Studio() {
       setProgressMsg('Zoomansicht bereit!');
       setTimeout(() => { setProgressMsg(''); setProgress(0); }, 2000);
     } catch (e) {
-      console.error('[HiRes] Server render failed:', e);
-      setProgressMsg(`Zoom-Fehler: ${e}`);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+      console.error('[HiRes] Server render failed, falling back to client render:', e);
+      setProgressMsg('Server-Zoom fehlgeschlagen, nutze Client-Rendering...');
+      // CRITICAL FIX: Fall back to client-side hi-res render instead of giving up
+      // This ensures zoom always works, even if server is slow/down/OOM
+      setHiResLoading(false); // reset so client render can start
+      hiResLoadingRef.current = false; // sync ref immediately so triggerClientHiRes doesn't skip
+      try {
+        if (triggerClientHiResRef.current) await triggerClientHiResRef.current();
+      } catch (e2) {
+        console.error('[HiRes] Client fallback also failed:', e2);
+        setProgressMsg('');
+        setProgress(0);
+      }
+      return; // skip the finally block's setHiResLoading since client render handles it
     } finally {
       setHiResLoading(false);
     }
@@ -683,6 +716,8 @@ export default function Studio() {
       setHiResLoading(false);
     }
   }, []);
+  // Keep ref in sync so triggerHiResRender can call it as fallback
+  triggerClientHiResRef.current = triggerClientHiResRender;
 
   // Reset hi-res when new mosaic is rendered
   const resetHiRes = () => {
