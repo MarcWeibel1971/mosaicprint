@@ -1487,13 +1487,15 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     // Fetch unique tile IDs needed
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
     const result = await pool.query(
-      `SELECT id, tile128_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
+      `SELECT id, tile128_url, tile256_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
       [uniqueIds]
     );
     const urlMap: Record<number, { hiRes: string; fallback: string }> = {};
     for (const row of result.rows) {
+      // Prefer tile256_url (256px R2 thumbnail) for sharp zoom rendering
+      const tile256 = row.tile256_url || '';
       if (row.r2_url) {
-        urlMap[row.id] = { hiRes: row.r2_url, fallback: row.r2_url };
+        urlMap[row.id] = { hiRes: tile256 || row.r2_url, fallback: row.tile128_url || row.r2_url };
       } else if (row.source_provider === 'pixabay') {
         // Pixabay: only skip if URLs are hotlink-protected (pixabay.com/get/ or /download/)
         // CDN URLs (cdn.pixabay.com/photo/...) are publicly accessible
@@ -1507,7 +1509,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         };
       } else {
         urlMap[row.id] = {
-          hiRes: row.source_url || '',
+          hiRes: tile256 || row.source_url || '',
           fallback: row.tile128_url || row.source_url || ''
         };
       }

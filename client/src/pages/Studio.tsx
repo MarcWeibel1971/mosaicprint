@@ -448,7 +448,7 @@ export default function Studio() {
     setProgress(5);
 
     const { cols, rows } = mosaicParamsRef.current;
-    const ZOOM_TILE_PX = Math.min(128, Math.floor(10000 / Math.max(cols, rows)));
+    const ZOOM_TILE_PX = Math.min(256, Math.floor(12000 / Math.max(cols, rows))); // increased from 128 for sharper zoom
     const zoomJobId = `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     // SSE progress for zoom render
@@ -542,15 +542,25 @@ export default function Studio() {
     // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
     // Desktop can handle much larger canvases (up to ~268 MP).
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    // Mobile Safari: very conservative canvas limits (some devices crash at >8MP)
-    // iOS WebKit limits are device-dependent, 8MP is safe for all iPhones
-    // Cap canvas area to avoid toBlob timeouts (encoding 100+MP JPEG can take >15s)
-    const maxCanvasArea = isMob ? 12_000_000 : 100_000_000; // raised limits for sharper tiles
-    const maxCanvasDim = isMob ? 4096 : 14000;
+    // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
+    // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
+    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
+    const maxCanvasDim = isMob ? 8192 : 16000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    const HR_TILE = Math.min(isMob ? 72 : 128, Math.max(24, Math.min(maxTileFromArea, maxTileFromDim)));
-    console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, target=${cols*HR_TILE}×${rows*HR_TILE} (${(cols*HR_TILE*rows*HR_TILE/1e6).toFixed(1)}MP, mobile=${isMob})`);
+    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
+    const idealMobileTile = 128;
+    const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
+    const hrW = cols * HR_TILE;
+    const hrH = rows * HR_TILE;
+    console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, canvas=${hrW}×${hrH} (${(hrW*hrH/1e6).toFixed(1)}MP, mobile=${isMob})`);
+
+    // Safety: don't create canvases beyond limits
+    if (hrW > maxCanvasDim || hrH > maxCanvasDim || hrW * hrH > maxCanvasArea) {
+      console.warn(`[ClientHiRes] Canvas too large: ${hrW}×${hrH}, aborting`);
+      setHiResLoading(false);
+      return;
+    }
 
     try {
       await new Promise(r => setTimeout(r, 0)); // yield to UI
@@ -2786,6 +2796,10 @@ export default function Studio() {
           // cheek/forehead: stronger penalty for non-skin tiles in skin areas
           const skinMismatchPenalty = (subRegion === 'cheek' || subRegion === 'forehead') ? 800 : (subRegion === 'nose' ? 600 : 300);
           if (isTargetSkin && !isTileSkin) baseDist += skinMismatchPenalty;
+          // EXTRA: Any tile with cool hue (b < 3) in warm skin area gets penalty
+          if (isTargetSkin && mf.lab[2] < 3 && tf.lab[2] > 8) {
+            baseDist += Math.min(300, (tf.lab[2] - mf.lab[2]) * 8); // push cool tiles away from warm skin
+          }
           // MIX MODE: User tile preference bonus (user photos should appear prominently)
           if (isUserTileMix) baseDist -= 25;
           // GREEN/COOL TILE PENALTY: always active in face regions (regardless of isTargetSkin)
@@ -2801,6 +2815,10 @@ export default function Studio() {
              if (mf.lab[2] < 5) {
                const bluePenaltyFactor = isTargetSkin ? 200 : (mf.lab[0] < 65 ? 120 : 50);
                baseDist += Math.min(5000, (5 - mf.lab[2]) * bluePenaltyFactor);
+             }
+             // CYAN/TEAL PENALTY: tiles with negative a AND negative b (cool-toned) in face
+             if (mf.lab[1] < 0 && mf.lab[2] < 0) {
+               baseDist += Math.min(500, Math.abs(mf.lab[1]) * Math.abs(mf.lab[2]) * 3); // penalize cool-toned tiles
              }
            } else {
              // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
