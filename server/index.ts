@@ -1494,9 +1494,10 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     };
 
     // Clamp tile size: min 32px, max 256px
-    // Safety cap: max 32000px per output dimension (supports Ultra HD / PNG Lossless)
+    // Safety cap: max 16000px per output dimension (practical limit for downloads)
+    // 16000px at 300 DPI = 135cm — sufficient for any print size
     let TILE_PX = Math.min(Math.max(tilePx, 32), 256);
-    const MAX_DIM = 32000;
+    const MAX_DIM = 16000;
     if (cols * TILE_PX > MAX_DIM || rows * TILE_PX > MAX_DIM) {
       TILE_PX = Math.min(Math.floor(MAX_DIM / cols), Math.floor(MAX_DIM / rows), TILE_PX);
       TILE_PX = Math.max(32, TILE_PX);
