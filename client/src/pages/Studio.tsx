@@ -545,11 +545,11 @@ export default function Studio() {
     // Mobile Safari: very conservative canvas limits (some devices crash at >8MP)
     // iOS WebKit limits are device-dependent, 8MP is safe for all iPhones
     // Cap canvas area to avoid toBlob timeouts (encoding 100+MP JPEG can take >15s)
-    const maxCanvasArea = isMob ? 8_000_000 : 80_000_000; // desktop: 80MP max (was 200MP)
-    const maxCanvasDim = isMob ? 3072 : 12000;
+    const maxCanvasArea = isMob ? 12_000_000 : 100_000_000; // raised limits for sharper tiles
+    const maxCanvasDim = isMob ? 4096 : 14000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    const HR_TILE = Math.min(isMob ? 48 : 96, Math.max(16, Math.min(maxTileFromArea, maxTileFromDim)));
+    const HR_TILE = Math.min(isMob ? 72 : 128, Math.max(24, Math.min(maxTileFromArea, maxTileFromDim)));
     console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, target=${cols*HR_TILE}×${rows*HR_TILE} (${(cols*HR_TILE*rows*HR_TILE/1e6).toFixed(1)}MP, mobile=${isMob})`);
 
     try {
@@ -566,6 +566,8 @@ export default function Studio() {
         c.height = rows * tryTile;
         const ctx = c.getContext('2d');
         if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
           hrCanvas = c;
           hrCtx = ctx;
           actualTile = tryTile;
@@ -651,7 +653,7 @@ export default function Studio() {
       const blob = await new Promise<Blob | null>(resolve => {
         const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 45000);
         try {
-          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.75 : 0.85);
+          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.88 : 0.92);
         } catch (e) { clearTimeout(timeout); console.error('[ClientHiRes] toBlob error:', e); resolve(null); }
       });
 
@@ -3375,10 +3377,12 @@ export default function Studio() {
         // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
         // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-        // AB_BLEND: minimum 0.20 always active (ensures color correction even without histogramBlend)
-        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.20+0.20*0.7=0.34
-        const AB_BLEND = 0.20 + 0.20 * blendFactor;  // 0.20 minimum, up to 0.40 at full blend
+        // AB_BLEND: minimum 0.12 (reduced from 0.20 to prevent blue tint accumulation)
+        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.12+0.20*0.7=0.26
+        const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
         const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
+        // Asymmetric blue clamp: limit blue shifts more aggressively (human eye is sensitive to blue tint)
+        const MAX_BLUE_SHIFT = 10;             // tighter clamp for negative b direction (toward blue)
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
         // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
@@ -3434,7 +3438,10 @@ export default function Studio() {
           const rawDeltaA = (tA - pa) * AB_BLEND;
           const rawDeltaB = (tB - pb) * AB_BLEND;
           const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
-          const clampedDeltaB = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaB));
+          // Asymmetric b clamp: tighter limit for blue direction (rawDeltaB < 0 = toward blue)
+          const clampedDeltaB = rawDeltaB < 0
+            ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)   // blue direction: max -10
+            : Math.min(MAX_COLOR_SHIFT, rawDeltaB);   // warm direction: max +18
           const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
           const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
           // Apply contrast boost manually (replaces ctx.filter which breaks on iOS Safari)
@@ -3443,7 +3450,9 @@ export default function Studio() {
           // Saturation boost: scale a/b chroma by cBoost
           const satBoost = 0.90 + cBoost * 0.15; // matches old saturate() CSS filter
           const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
-          const boostedB = Math.max(-128, Math.min(127, newB * satBoost));
+          // Reduce saturation boost for blue (negative b) to prevent blue tint amplification
+          const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+          const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
           const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
           outData[pi]   = nr;
           outData[pi+1] = ng;
@@ -5217,7 +5226,7 @@ export default function Studio() {
                         position: "absolute",
                         top: 0, left: 0, width: "100%", height: "100%",
                         pointerEvents: "none",
-                        imageRendering: "pixelated" as const,
+                        imageRendering: zoom > 4 ? "pixelated" as const : "auto" as const,
                       }}
                     />
                   )}
