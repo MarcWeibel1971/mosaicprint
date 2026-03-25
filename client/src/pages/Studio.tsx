@@ -4521,73 +4521,49 @@ export default function Studio() {
         // Generate a unique job ID for SSE progress tracking
         const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-        // Start SSE listener for real-time progress
-        let sseSource: EventSource | null = null;
-        let lastPrintProgress = 0;
-        try {
-          sseSource = new EventSource(`/api/print-progress/${printJobId}`);
-          sseSource.onmessage = (ev) => {
-            try {
-              const data = JSON.parse(ev.data);
-              // Only accept progress that moves forward (prevents jumping)
-              if (data.progress && data.progress >= lastPrintProgress) {
-                lastPrintProgress = data.progress;
-                setDlProgress(data.progress);
-              }
-              if (data.message) setDlProgressMsg(data.message);
-            } catch { /* ignore parse errors */ }
-          };
-        } catch { /* SSE not critical */ }
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
-
+        // 1. Fire-and-forget: start server render (responds immediately)
+        const printSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
         const resp = await fetch('/api/print-render', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             tileIds: tileIdsRef.current,
             assignment: assignmentRef.current,
-            cols,
-            rows,
+            cols, rows,
             tilePx: PRINT_TILE_PX,
             format: 'jpg',
             jobId: printJobId,
-            // Overlay data for server-side blending (matches client-side Step 6)
-            overlayMode: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').overlayMode ?? 'softlight'; } catch { return 'softlight'; } })(),
-            baseOverlay: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').baseOverlay ?? 0.15; } catch { return 0.15; } })(),
-            edgeBoost: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}').edgeBoost ?? 0.20; } catch { return 0.20; } })(),
+            overlayMode: printSettings.overlayMode ?? 'softlight',
+            baseOverlay: printSettings.baseOverlay ?? 0.15,
+            edgeBoost: printSettings.edgeBoost ?? 0.20,
             targetColors: targetColorsRef.current,
             edgeMap: edgeMapRef.current,
             faceMask: faceMaskRef.current,
           }),
-          signal: controller.signal,
         });
-        clearTimeout(timeoutId);
-        if (sseSource) sseSource.close();
+        if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-        if (!resp.ok) {
-          const errText = await resp.text().catch(() => '');
-          throw new Error(`Server error: ${resp.status} - ${errText}`);
-        }
+        // 2. Wait for completion via SSE (avoids proxy timeout)
+        const printResult = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
+          const timeout = setTimeout(() => { reject(new Error('Zeitüberschreitung (15 Min)')); }, 15 * 60 * 1000);
+          let lastProg = 0;
+          const sse = new EventSource(`/api/print-progress/${printJobId}`);
+          sse.onmessage = (ev) => {
+            try {
+              const data = JSON.parse(ev.data);
+              if (data.progress && data.progress >= lastProg) { lastProg = data.progress; setDlProgress(data.progress); }
+              if (data.message) setDlProgressMsg(data.message);
+              if (data.error) { clearTimeout(timeout); sse.close(); reject(new Error(data.message || 'Server-Fehler')); }
+              if (data.done && data.result) { clearTimeout(timeout); sse.close(); resolve(data.result as any); }
+            } catch { /* ignore */ }
+          };
+          sse.onerror = () => { if (lastProg < 5) { clearTimeout(timeout); sse.close(); reject(new Error('Verbindung verloren')); } };
+        });
 
-        // Server returns a JSON token instead of raw bytes.
-        // Client opens /api/print-download/:token directly - this forces Edge/Chrome
-        // to treat it as a real HTTP file download, bypassing Adobe Acrobat's
-        // file association that intercepts Blob/Data-URL downloads.
-        const { token, filename, size } = await resp.json();
-        console.log(`[Print] Token received: ${token}, file: ${filename}, size: ${(size/1024/1024).toFixed(1)} MB`);
-
-        setDlProgressMsg(`OK Download wird gestartet (${(size/1024/1024).toFixed(1)} MB)...`);
-
-        // MOST RELIABLE DOWNLOAD METHOD: hidden <a> with direct server URL
-        // The server sets Content-Disposition: attachment + Content-Type: image/jpeg
-        // Using a hidden <a> with download attribute is the most reliable cross-browser approach.
-        // fetch+blob can be intercepted by PDF plugins (Acrobat, Edge PDF viewer).
-        // window.location.href would navigate away from the page.
-        // Hidden <a> click with direct URL: browser respects Content-Disposition: attachment.
-        const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+        // 3. Trigger download
+        const { token, filename, size } = printResult;
         setDlProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
+        const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
         const dlLink = document.createElement('a');
         dlLink.href = downloadUrl;
         dlLink.download = filename;
@@ -4680,63 +4656,74 @@ export default function Studio() {
       setDlProgress(5);
 
       const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      let sseSource: EventSource | null = null;
-      let lastSseProgress = 0;
-      try {
-        sseSource = new EventSource(`/api/print-progress/${digJobId}`);
-        sseSource.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            // Only accept progress that moves forward (prevents jumping)
-            if (data.progress && data.progress >= lastSseProgress) {
-              lastSseProgress = data.progress;
-              setDlProgress(data.progress);
-            }
-            if (data.message) setDlProgressMsg(data.message);
-          } catch { /* ignore */ }
-        };
-      } catch { /* SSE not critical */ }
-
-      const controller = new AbortController();
-      // Ultra HD / PNG Lossless can take 10+ minutes for large mosaics — generous timeout
-      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
-      // Read current overlay settings from localStorage
       const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
       const overlayMode = dlSettings.overlayMode ?? 'softlight';
       const baseOverlay = dlSettings.baseOverlay ?? 0.15;
       const edgeBoost = dlSettings.edgeBoost ?? 0.20;
+
+      // 1. Fire-and-forget: start server render (responds immediately with {accepted: true})
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tileIds: tileIdsRef.current,
           assignment: assignmentRef.current,
-          cols,
-          rows,
+          cols, rows,
           tilePx: TILE_PX,
           format: useFormat,
           jobId: digJobId,
-          // Overlay data for server-side blending (matches client-side Step 6)
-          overlayMode,
-          baseOverlay,
-          edgeBoost,
+          overlayMode, baseOverlay, edgeBoost,
           targetColors: targetColorsRef.current,
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
         }),
-        signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-      if (sseSource) sseSource.close();
-
       if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        throw new Error(`Server error: ${resp.status} - ${errText}`);
+        throw new Error(`Server error: ${resp.status}`);
       }
 
-      const { token, filename, size } = await resp.json();
+      // 2. Wait for completion via SSE (no proxy timeout issues)
+      const result = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Zeitüberschreitung (15 Min) – bitte erneut versuchen'));
+        }, 15 * 60 * 1000);
+
+        let lastProgress = 0;
+        const sse = new EventSource(`/api/print-progress/${digJobId}`);
+        sse.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.progress && data.progress >= lastProgress) {
+              lastProgress = data.progress;
+              setDlProgress(data.progress);
+            }
+            if (data.message) setDlProgressMsg(data.message);
+            if (data.error) {
+              clearTimeout(timeout);
+              sse.close();
+              reject(new Error(data.message || 'Server-Fehler'));
+            }
+            if (data.done && data.result) {
+              clearTimeout(timeout);
+              sse.close();
+              resolve(data.result as { token: string; filename: string; size: number });
+            }
+          } catch { /* ignore */ }
+        };
+        sse.onerror = () => {
+          // SSE reconnects automatically; only reject if we haven't received any progress
+          if (lastProgress < 5) {
+            clearTimeout(timeout);
+            sse.close();
+            reject(new Error('Verbindung zum Server verloren'));
+          }
+        };
+      });
+
+      // 3. Trigger download
+      const { token, filename, size } = result;
       setDlProgress(98);
       setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
 
@@ -4748,17 +4735,12 @@ export default function Studio() {
       document.body.appendChild(dlLink);
       dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setDlProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgressMsg(`✓ Download gestartet: ${filename}`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
-      if (e?.name === 'AbortError') {
-        setDlProgressMsg('Zeitüberschreitung – bitte erneut versuchen (Rendere... klicken)');
-      } else {
-        setDlProgressMsg(`Fehler: ${e}`);
-      }
+      setDlProgressMsg(`Fehler: ${e?.message || e}`);
     } finally {
-      if (sseSource) { try { sseSource.close(); } catch {} }
       setDlLoading(false);
       setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 5000);
     }
@@ -4785,23 +4767,8 @@ export default function Studio() {
       const jobId = `admin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       let sseSource: EventSource | null = null;
       let lastAdminProgress = 0;
-      try {
-        sseSource = new EventSource(`/api/print-progress/${jobId}`);
-        sseSource.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            if (data.progress && data.progress >= lastAdminProgress) {
-              lastAdminProgress = data.progress;
-              setDlProgress(data.progress);
-            }
-            if (data.message) setDlProgressMsg(data.message);
-          } catch { /* ignore */ }
-        };
-      } catch { /* SSE not critical */ }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
       const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+      // 1. Fire-and-forget: start server render
       const resp = await fetch('/api/print-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4819,16 +4786,30 @@ export default function Studio() {
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
         }),
-        signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-      if (sseSource) sseSource.close();
-
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const { token, filename, size } = await resp.json();
-      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
 
-      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      // 2. Wait for completion via SSE
+      const adminResult = await new Promise<{ token: string; filename: string; size: number }>((resolve, reject) => {
+        const timeout = setTimeout(() => { reject(new Error('Zeitüberschreitung (15 Min)')); }, 15 * 60 * 1000);
+        let lastProg = 0;
+        const sse = new EventSource(`/api/print-progress/${jobId}`);
+        sse.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.progress && data.progress >= lastProg) { lastProg = data.progress; setDlProgress(data.progress); }
+            if (data.message) setDlProgressMsg(data.message);
+            if (data.error) { clearTimeout(timeout); sse.close(); reject(new Error(data.message || 'Server-Fehler')); }
+            if (data.done && data.result) { clearTimeout(timeout); sse.close(); resolve(data.result as any); }
+          } catch { /* ignore */ }
+        };
+        sse.onerror = () => { if (lastProg < 5) { clearTimeout(timeout); sse.close(); reject(new Error('Verbindung verloren')); } };
+      });
+
+      // 3. Trigger download
+      const { token: adminToken, filename, size } = adminResult;
+      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+      const downloadUrl = `/api/print-download/${adminToken}?filename=${encodeURIComponent(filename)}`;
       const dlLink = document.createElement('a');
       dlLink.href = downloadUrl;
       dlLink.download = filename;
@@ -4836,7 +4817,7 @@ export default function Studio() {
       document.body.appendChild(dlLink);
       dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setDlProgressMsg(`Download gestartet: ${filename}`);
+      setDlProgressMsg(`✓ Download gestartet: ${filename}`);
       setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
