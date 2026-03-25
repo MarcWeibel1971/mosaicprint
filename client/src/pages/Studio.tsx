@@ -3050,6 +3050,26 @@ export default function Studio() {
           if (tB > 5 && mB < 2) {
             baseDist += Math.min(500, (tB - 5) * (2 - mB) * 3);
           }
+
+          // SKIN-TONE ENFORCEMENT (non-face regions like ears, neck, arms)
+          // Face mask doesn't always cover all skin — catch skin-like LAB values outside face regions
+          const isNonFaceSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 3 && tf.lab[1] <= 30 && tf.lab[2] >= 5 && tf.lab[2] <= 40;
+          if (isNonFaceSkin) {
+            // Blue/cool tiles (b < 5) in skin areas: strong penalty
+            if (mB < 5) {
+              baseDist += Math.min(1500, (5 - mB) * 80);
+            }
+            // Green tiles (a < 0) in skin areas
+            if (mA < 0) {
+              baseDist += Math.min(1000, (-mA) * 60);
+            }
+            // Non-warm tile general penalty
+            const tileIsWarmNf = mA > 3 && mB > 5;
+            const tileIsNeutralNf = tileSatC < 15 && mB > -3;
+            if (!tileIsWarmNf && !tileIsNeutralNf && tileSatC > 15) {
+              baseDist += 500; // hard penalty for clearly cool/colored tiles in skin
+            }
+          }
           // NEUTRAL/GRAY TARGET (low saturation, near-neutral LAB):
           // Penalize tiles with strong hue in any direction
           if (targetSatC < 15 && tileSatC > 30) {
