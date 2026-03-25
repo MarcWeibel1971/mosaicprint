@@ -727,10 +727,11 @@ export default function Studio() {
             const tr = tc.length > ti + 2 ? tc[ti] : 128;
             const tg = tc.length > ti + 2 ? tc[ti + 1] : 128;
             const tb = tc.length > ti + 2 ? tc[ti + 2] : 128;
-            // Overlay strength
+            // Overlay strength — reduced for hi-res since tiles aren't LAB-corrected.
+            // Face boost reduced to prevent brownish patches on skin tones.
             const edge = em.length > ci ? em[ci] : 0;
-            const faceBoost = fm.length > ci && fm[ci] ? 0.25 : 0;
-            const strength = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge * EDGE_B + faceBoost) : 0;
+            const faceBoost = fm.length > ci && fm[ci] ? 0.10 : 0;
+            const strength = olMode !== 'none' ? Math.min(0.55, BASE_OL * 0.7 + edge * EDGE_B * 0.7 + faceBoost) : 0;
 
             // Process all pixels in this cell
             const yStart = row * actualTile;
@@ -4519,7 +4520,7 @@ export default function Studio() {
         } catch { /* SSE not critical */ }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+        const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
         const resp = await fetch('/api/print-render', {
           method: 'POST',
@@ -4677,7 +4678,8 @@ export default function Studio() {
       } catch { /* SSE not critical */ }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+      // Ultra HD / PNG Lossless can take 10+ minutes for large mosaics — generous timeout
+      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
       // Read current overlay settings from localStorage
@@ -4715,6 +4717,7 @@ export default function Studio() {
       }
 
       const { token, filename, size } = await resp.json();
+      setDlProgress(98);
       setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
 
       const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
@@ -4727,12 +4730,17 @@ export default function Studio() {
       setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
       setDlProgressMsg(`Download gestartet: ${filename}`);
       setDlProgress(100);
-    } catch (e) {
+    } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
-      setDlProgressMsg(`Fehler: ${e}`);
+      if (e?.name === 'AbortError') {
+        setDlProgressMsg('Zeitüberschreitung – bitte erneut versuchen (Rendere... klicken)');
+      } else {
+        setDlProgressMsg(`Fehler: ${e}`);
+      }
     } finally {
+      if (sseSource) { try { sseSource.close(); } catch {} }
       setDlLoading(false);
-      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 5000);
     }
   }, [selectedDigitalFormat]);
 
@@ -4772,7 +4780,7 @@ export default function Studio() {
       } catch { /* SSE not critical */ }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
       const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
       const resp = await fetch('/api/print-render', {
         method: 'POST',
