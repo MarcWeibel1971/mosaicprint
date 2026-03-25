@@ -1494,9 +1494,10 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     };
 
     // Clamp tile size: min 32px, max 256px
-    // Safety cap: max 32000px per output dimension (supports Ultra HD / PNG Lossless)
+    // Safety cap: max 16000px per output dimension (practical limit for downloads)
+    // 16000px at 300 DPI = 135cm — sufficient for any print size
     let TILE_PX = Math.min(Math.max(tilePx, 32), 256);
-    const MAX_DIM = 32000;
+    const MAX_DIM = 16000;
     if (cols * TILE_PX > MAX_DIM || rows * TILE_PX > MAX_DIM) {
       TILE_PX = Math.min(Math.floor(MAX_DIM / cols), Math.floor(MAX_DIM / rows), TILE_PX);
       TILE_PX = Math.max(32, TILE_PX);
@@ -1677,7 +1678,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         const encoded = sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 }, limitInputPixels: false });
         outputBuf = useJpeg
           ? await encoded.jpeg({ quality: 95 }).toBuffer()
-          : await encoded.png({ compressionLevel: 4 }).toBuffer();
+          : await encoded.png({ compressionLevel: 6 }).toBuffer();
       } else {
         // No overlay: direct encode
         const pipeline = sharp({
@@ -1686,7 +1687,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         }).composite(compositeInputs);
         outputBuf = useJpeg
           ? await pipeline.jpeg({ quality: 95 }).toBuffer()
-          : await pipeline.png({ compressionLevel: 4 }).toBuffer();
+          : await pipeline.png({ compressionLevel: 6 }).toBuffer();
       }
       updateProgress(90, `Speichere ${(outputBuf.length / 1024 / 1024).toFixed(1)} MB...`);
 
@@ -1772,7 +1773,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     if (useJpeg) {
       await finalPipeline.jpeg({ quality: 95 }).toFile(tmpFile);
     } else {
-      await finalPipeline.png({ compressionLevel: 4 }).toFile(tmpFile);
+      await finalPipeline.png({ compressionLevel: 6 }).toFile(tmpFile);
     }
 
     // Clean up strip files

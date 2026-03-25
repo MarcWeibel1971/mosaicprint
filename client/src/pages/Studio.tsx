@@ -193,11 +193,13 @@ const MATERIALS = [
 // Digital download options (no physical print)
 // Tile sizes chosen so each tier produces visibly different output dimensions
 // even for large grids (120+ cols). Server MAX_DIM raised to 32000.
+// Max output per dimension: 16000px (server MAX_DIM). Tile sizes auto-capped for large grids.
+// For a typical 100x120 grid: 64px→6400x7680, 100px→10000x12000, 128px→12800x15360(capped~133px)
 const DIGITAL_FORMATS = [
   { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
-  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 128, price: 19, format: 'jpg' as const },
-  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 200, price: 29, format: 'jpg' as const },
-  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 256, price: 39, format: 'png' as const },
+  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 100, price: 19, format: 'jpg' as const },
+  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 160, price: 29, format: 'jpg' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 128, price: 39, format: 'png' as const },
 ];
 
 export default function Studio() {
@@ -4657,7 +4659,7 @@ export default function Studio() {
     const digFmt = DIGITAL_FORMATS[selectedDigitalFormat];
     const { cols, rows } = mosaicParamsRef.current;
     // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256) so progress shows real dimensions
-    const SERVER_MAX_DIM = 32000;
+    const SERVER_MAX_DIM = 16000;
     let TILE_PX = Math.min(Math.max(digFmt.tilePx, 32), 256);
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
@@ -4731,7 +4733,7 @@ export default function Studio() {
   const handleAdminMaxDownload = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const { cols, rows } = mosaicParamsRef.current;
-    const SERVER_MAX_DIM = 32000;
+    const SERVER_MAX_DIM = 16000;
     let TILE_PX = 256; // Max tile size supported by server
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
@@ -5711,7 +5713,7 @@ export default function Studio() {
                       const cols = mosaicParamsRef.current?.cols ?? 60;
                       const rows = mosaicParamsRef.current?.rows ?? 80;
                       // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256)
-                      const SERVER_MAX_DIM = 32000;
+                      const SERVER_MAX_DIM = 16000;
                       let clampedTilePx = Math.min(Math.max(rawTilePx, 32), 256);
                       if (cols * clampedTilePx > SERVER_MAX_DIM || rows * clampedTilePx > SERVER_MAX_DIM) {
                         clampedTilePx = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), clampedTilePx);
