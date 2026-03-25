@@ -1431,6 +1431,8 @@ function applyOverlay(
 }
 
 app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) => {
+  // Allow long-running renders (Ultra HD can take 10+ minutes)
+  req.setTimeout(15 * 60 * 1000);
   try {
     const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
       overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
@@ -3404,7 +3406,11 @@ app.get("*", (_req, res) => {
 });
 
 // Start server immediately (Railway healthcheck needs the port open quickly)
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
+  // Allow long-running print renders (Ultra HD can take 10+ minutes)
+  server.timeout = 15 * 60 * 1000;        // 15 min socket timeout
+  server.keepAliveTimeout = 15 * 60 * 1000; // 15 min keep-alive
+  server.headersTimeout = 15 * 60 * 1000 + 1000;
   console.log(`[MosaicPrint] Server running on port ${PORT}`);
   console.log(`[MosaicPrint] Static files from: ${distPath}`);
   console.log(`[MosaicPrint] isRailway: ${isRailway}`);
