@@ -1783,11 +1783,15 @@ export default function Studio() {
           const edge = labIndex[i + 12];
           const brightness = labIndex[i + 13];
           dist += (W_EDGE)*(targetEdge-edge)*(targetEdge-edge) + W_BRIGHT*(targetBrightness-brightness)*(targetBrightness-brightness);
-          // Extra brightness penalty: very dark tile (brightness<0.15) in bright area (targetBrightness>0.65)
-          // Moderate penalty to avoid over-correction (white patches)
-          if (targetBrightness > 0.65 && brightness < 0.15) {
-            const darkPenalty = (0.15 - brightness) * (targetBrightness - 0.65) * 300;
-            dist += darkPenalty; // up to +45 for very dark tile in very bright area
+          // Extra brightness penalty: dark tile in bright area
+          // MASSIV verstärkt: dark tiles in bright backgrounds are very visible
+          if (targetBrightness > 0.55 && brightness < 0.30) {
+            const darkPenalty = (0.30 - brightness) * (targetBrightness - 0.55) * 1500;
+            dist += darkPenalty; // up to +200 for very dark tile in very bright area
+          }
+          // Moderate mismatch: tile noticeably darker than target
+          if (targetBrightness > 0.50 && brightness < targetBrightness - 0.30) {
+            dist += (targetBrightness - brightness - 0.30) * 400; // gradual penalty
           }
           // CRITICAL FIX: Bright tile in dark area penalty (prevents white spots in dark clothing/hair)
           // A bright tile (brightness>0.55) in a dark area (targetBrightness<0.35) is almost never correct
@@ -3163,12 +3167,17 @@ export default function Studio() {
             const penaltyFactor = isVeryBright ? 22 : 10;
             baseDist += yellowOvershoot * penaltyFactor * brightStrength;
           }
-          // DARK TILE PENALTY: very dark tile (brightness<15) in very bright area (targetBrightness>70)
-          // Moderate penalty only - avoid over-correction (white patches)
+          // DARK TILE IN BRIGHT AREA PENALTY: prevents dark spots in bright backgrounds
+          // MASSIV verstärkt: dark tiles in bright areas are the #1 visual defect
           const targetBr = tf.brightness; // 0-100
           const tileBr = mf.brightness;   // 0-100
-          if (targetBr > 70 && tileBr < 15) {
-            baseDist += (15 - tileBr) / 15 * (targetBr - 70) / 30 * 2 * 100; // up to +200 for near-black tile in very bright area
+          // Tier 1: Very dark tile in very bright area (e.g. black tile in white wall)
+          if (targetBr > 65 && tileBr < 25) {
+            baseDist += (25 - tileBr) * (targetBr - 65) * 0.8; // up to +700
+          }
+          // Tier 2: Moderate brightness mismatch (e.g. gray tile in bright area)
+          if (targetBr > 55 && tileBr < targetBr - 35) {
+            baseDist += (targetBr - tileBr - 35) * 3; // gradual penalty for any significant mismatch
           }
 
           // FIX 2: SMOOTH-REGION → CALM-TILES RULE (VERSCHÄRFT)
