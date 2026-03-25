@@ -727,8 +727,9 @@ export default function Studio() {
       }
 
       // 2. Apply contrast boost + soft-light overlay to match main canvas appearance
-      // Without this, the hi-res image looks gray/washed out compared to the color-corrected main canvas.
-      {
+      // Skip on mobile: the per-pixel processing is too expensive (getImageData on large canvas
+      // can crash mobile Safari). The CSS Color Enhance overlay handles color correction instead.
+      if (!isMob) {
         const hrW = hrCanvas!.width;
         const hrH = hrCanvas!.height;
         const hrImageData = hrCtx!.getImageData(0, 0, hrW, hrH);
