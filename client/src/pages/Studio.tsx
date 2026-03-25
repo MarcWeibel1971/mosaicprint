@@ -645,9 +645,79 @@ export default function Studio() {
         if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
-      // NOTE: Color correction is NOT baked into the hi-res image.
-      // The CSS Color Enhance overlay (colorEnhanceUrl) handles it in real-time.
-      // Baking it in caused double-tinting (blue/dark tint) when zooming.
+      // 2. Apply contrast boost + soft-light overlay to match main canvas appearance
+      // Without this, the hi-res image looks gray/washed out compared to the color-corrected main canvas.
+      {
+        const hrW = hrCanvas!.width;
+        const hrH = hrCanvas!.height;
+        const hrImageData = hrCtx!.getImageData(0, 0, hrW, hrH);
+        const hd = hrImageData.data;
+        const tc = targetColorsRef.current;
+        const em = edgeMapRef.current;
+        const fm = faceMaskRef.current;
+        const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+        const cBoost = algoSettings.contrastBoost ?? 1.30;
+        const BASE_OL = algoSettings.baseOverlay ?? 0.15;
+        const EDGE_B = algoSettings.edgeBoost ?? 0.20;
+        const olMode = algoSettings.overlayMode ?? 'softlight';
+
+        // Soft-light blend function (Photoshop formula)
+        const softLight = (base: number, blend: number) => {
+          const b = blend / 255, s = base / 255;
+          const result = b < 0.5
+            ? s - (1 - 2 * b) * s * (1 - s)
+            : s + (2 * b - 1) * (Math.sqrt(s) - s);
+          return Math.round(result * 255);
+        };
+
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const ci = row * cols + col;
+            const ti = ci * 3;
+            // Target color for this cell
+            const tr = tc.length > ti + 2 ? tc[ti] : 128;
+            const tg = tc.length > ti + 2 ? tc[ti + 1] : 128;
+            const tb = tc.length > ti + 2 ? tc[ti + 2] : 128;
+            // Overlay strength
+            const edge = em.length > ci ? em[ci] : 0;
+            const faceBoost = fm.length > ci && fm[ci] ? 0.25 : 0;
+            const strength = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge * EDGE_B + faceBoost) : 0;
+
+            // Process all pixels in this cell
+            const yStart = row * actualTile;
+            const yEnd = Math.min(yStart + actualTile, hrH);
+            const xStart = col * actualTile;
+            const xEnd = Math.min(xStart + actualTile, hrW);
+            for (let py = yStart; py < yEnd; py++) {
+              for (let px = xStart; px < xEnd; px++) {
+                const pi = (py * hrW + px) * 4;
+                // Apply contrast boost (scale around midpoint 128)
+                let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi] - 128) * cBoost)));
+                let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 1] - 128) * cBoost)));
+                let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 2] - 128) * cBoost)));
+                // Apply soft-light overlay
+                if (strength > 0.01) {
+                  if (olMode === 'softlight') {
+                    r = Math.round(r * (1 - strength) + softLight(r, tr) * strength);
+                    g = Math.round(g * (1 - strength) + softLight(g, tg) * strength);
+                    b = Math.round(b * (1 - strength) + softLight(b, tb) * strength);
+                  } else {
+                    r = Math.round(r * (1 - strength) + tr * strength);
+                    g = Math.round(g * (1 - strength) + tg * strength);
+                    b = Math.round(b * (1 - strength) + tb * strength);
+                  }
+                }
+                hd[pi] = r;
+                hd[pi + 1] = g;
+                hd[pi + 2] = b;
+              }
+            }
+          }
+          // Yield to UI every few rows
+          if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
+        }
+        hrCtx!.putImageData(hrImageData, 0, 0);
+      }
 
       // 3. Convert to blob URL (with timeout for mobile)
       const blob = await new Promise<Blob | null>(resolve => {
