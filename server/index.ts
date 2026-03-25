@@ -28,6 +28,8 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
+// Allow very large images for Ultra HD / PNG Lossless print renders (up to 600 MP)
+sharp.limitInputPixels(600_000_000);
 import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
