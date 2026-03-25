@@ -28,8 +28,6 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
-// Allow very large images for Ultra HD / PNG Lossless print renders (up to 600 MP)
-sharp.limitInputPixels(600_000_000);
 import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
@@ -1667,7 +1665,8 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
       if (hasOverlay) {
         // Get raw pixels so we can apply per-pixel overlay blending
         const rawBuf = await sharp({
-          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
+          limitInputPixels: false,
         }).composite(compositeInputs).raw().toBuffer();
         updateProgress(80, 'Overlay anwenden...');
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
@@ -1675,14 +1674,15 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
           targetColors!, clientEdgeMap ?? [], clientFaceMask ?? []);
         // Encode from raw pixels
-        const encoded = sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 } });
+        const encoded = sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 }, limitInputPixels: false });
         outputBuf = useJpeg
           ? await encoded.jpeg({ quality: 95 }).toBuffer()
           : await encoded.png({ compressionLevel: 4 }).toBuffer();
       } else {
         // No overlay: direct encode
         const pipeline = sharp({
-          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+          create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
+          limitInputPixels: false,
         }).composite(compositeInputs);
         outputBuf = useJpeg
           ? await pipeline.jpeg({ quality: 95 }).toBuffer()
@@ -1725,17 +1725,19 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
       if (hasStripOverlay) {
         // Get raw pixels for overlay processing
         const rawStrip = await sharp({
-          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } },
+          limitInputPixels: false,
         }).composite(compositeInputs).raw().toBuffer();
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
           targetColors!, clientEdgeMap ?? [], clientFaceMask ?? []);
-        await sharp(rawStrip, { raw: { width: outW, height: stripH, channels: 3 } })
+        await sharp(rawStrip, { raw: { width: outW, height: stripH, channels: 3 }, limitInputPixels: false })
           .png({ compressionLevel: 2 }).toFile(stripFile);
       } else {
         await sharp({
-          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+          create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } },
+          limitInputPixels: false,
         })
           .composite(compositeInputs)
           .png({ compressionLevel: 2 })
@@ -1763,7 +1765,8 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     const tmpFile = path.join(tmpDir, `${token}.${ext}`);
 
     const finalPipeline = sharp({
-      create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } }
+      create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
+      limitInputPixels: false,
     }).composite(compositeStrips);
 
     if (useJpeg) {
