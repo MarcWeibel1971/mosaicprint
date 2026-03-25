@@ -1431,31 +1431,37 @@ function applyOverlay(
 }
 
 app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) => {
-  // Allow long-running renders (Ultra HD can take 10+ minutes)
-  req.setTimeout(15 * 60 * 1000);
-  try {
-    const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
-      overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
-    } = req.body as {
-      tileIds: number[];
-      assignment: number[];
-      cols: number;
-      rows: number;
-      tilePx?: number;
-      format?: 'jpg' | 'png';
-      jobId?: string;
-      // Overlay parameters (optional - if present, overlay is applied after compositing)
-      overlayMode?: 'softlight' | 'alphablend' | 'none';
-      baseOverlay?: number;
-      edgeBoost?: number;
-      targetColors?: number[];  // flat [r,g,b,...] per cell (cols×rows cells)
-      edgeMap?: number[];       // edge strength 0-1 per cell
-      faceMask?: boolean[];     // face region flag per cell
-    };
+  const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
+    overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
+  } = req.body as {
+    tileIds: number[];
+    assignment: number[];
+    cols: number;
+    rows: number;
+    tilePx?: number;
+    format?: 'jpg' | 'png';
+    jobId?: string;
+    overlayMode?: 'softlight' | 'alphablend' | 'none';
+    baseOverlay?: number;
+    edgeBoost?: number;
+    targetColors?: number[];
+    edgeMap?: number[];
+    faceMask?: boolean[];
+  };
 
-    if (!tileIds?.length || !assignment?.length || !cols || !rows) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+  if (!tileIds?.length || !assignment?.length || !cols || !rows) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Respond immediately — render runs in background.
+  // Client gets result via SSE /api/print-progress/:jobId (result field when done=true).
+  const effectiveJobId = jobId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  printJobs.set(effectiveJobId, { progress: 1, message: 'Render gestartet...', done: false });
+  res.json({ accepted: true, jobId: effectiveJobId });
+
+  // Background render (not awaited by the request handler)
+  (async () => {
+  try {
 
     // Helper to update progress with ETA (SSE + console)
     const startTime = Date.now();
@@ -1466,9 +1472,7 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
         const remaining = (elapsed / progress) * (100 - progress);
         eta = Math.round(remaining);
       }
-      if (jobId) {
-        printJobs.set(jobId, { progress, message, done: false, eta });
-      }
+      printJobs.set(effectiveJobId, { progress, message, done: false, eta });
       const etaStr = eta !== undefined ? ` (~${eta}s remaining)` : '';
       console.log(`[print-render] [${progress}%] ${message}${etaStr}`);
     };
@@ -1676,8 +1680,9 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
 
       const filename = `mosaicprint-${outW}x${outH}-druckbereit.${ext}`;
       const resultData = { token, filename, size: outputBuf.length, width: outW, height: outH };
-      if (jobId) printJobs.set(jobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
-      return res.json(resultData);
+      printJobs.set(effectiveJobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
+      console.log(`[print-render] Done (small): ${outW}x${outH}px, ${(outputBuf.length / 1024 / 1024).toFixed(1)} MB (${ext})`);
+      return; // response already sent above
     }
 
     // Large image: strip-based compositing
@@ -1758,14 +1763,13 @@ app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) =
     const filename = `mosaicprint-${outW}x${outH}-druckbereit.${ext}`;
     updateProgress(95, `Fertig: ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
     const resultData = { token, filename, size: stat.size, width: outW, height: outH };
-    if (jobId) printJobs.set(jobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
+    printJobs.set(effectiveJobId, { progress: 100, message: 'Fertig!', done: true, result: resultData });
     console.log(`[print-render] Done: ${outW}x${outH}px, ${(stat.size / 1024 / 1024).toFixed(1)} MB (${ext})`);
-    res.json(resultData);
   } catch (e) {
     console.error('[print-render] Error:', e);
-    if (req.body?.jobId) printJobs.set(req.body.jobId, { progress: 0, message: String(e), done: false, error: String(e) });
-    res.status(500).json({ error: String(e) });
+    printJobs.set(effectiveJobId, { progress: 0, message: String(e), done: false, error: String(e) });
   }
+  })(); // end background async IIFE
 });
 
 // GET /api/print-download/:token – serve the pre-rendered PNG file
