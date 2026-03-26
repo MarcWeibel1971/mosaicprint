@@ -153,6 +153,116 @@ async function pollForResult(
   throw new Error('Zeitüberschreitung (15 Min) – bitte erneut versuchen');
 }
 
+/**
+ * Client-side mosaic print rendering.
+ * Renders the mosaic at high resolution using already-loaded tile images,
+ * applies contrast + soft-light overlay, and returns a downloadable Blob.
+ * Completely bypasses the server — no tile downloads needed.
+ */
+async function renderMosaicClientSide(opts: {
+  cols: number; rows: number; tilePx: number; format: 'jpg' | 'png';
+  assignment: number[]; rotations: number[];
+  validImgs: HTMLImageElement[]; hiResImgs: (HTMLImageElement | null)[];
+  snapshot: ImageData | null; origTilePx: number;
+  targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
+  onProgress?: (pct: number, msg: string) => void;
+}): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
+  const { cols, rows, tilePx, format, assignment, rotations, validImgs, hiResImgs,
+    snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm, onProgress } = opts;
+  const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+
+  onProgress?.(5, 'Canvas erstellen...');
+
+  // Create canvas with progressive fallback
+  let canvas: HTMLCanvasElement | null = null;
+  let ctx: CanvasRenderingContext2D | null = null;
+  let actualTile = tilePx;
+  for (const tryTile of [tilePx, Math.floor(tilePx * 0.75), Math.floor(tilePx * 0.5), 64]) {
+    const c = document.createElement('canvas');
+    c.width = cols * tryTile; c.height = rows * tryTile;
+    const cx = c.getContext('2d');
+    if (cx) { cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high'; canvas = c; ctx = cx; actualTile = tryTile; break; }
+  }
+  if (!canvas || !ctx) throw new Error('Canvas creation failed');
+  const W = canvas.width, H = canvas.height;
+
+  // Snapshot fallback for GC'd images
+  const snapCanvas = document.createElement('canvas');
+  const snapCtx = snapCanvas.getContext('2d');
+  if (snapshot && snapCtx) { snapCanvas.width = snapshot.width; snapCanvas.height = snapshot.height; snapCtx.putImageData(snapshot, 0, 0); }
+
+  // Draw tiles
+  const total = cols * rows;
+  for (let ci = 0; ci < total; ci++) {
+    const col = ci % cols, row = Math.floor(ci / cols);
+    const x = col * actualTile, y = row * actualTile;
+    const idx = assignment[ci];
+    const hiImg = hiResImgs[idx];
+    const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
+    const rot = rotations[ci] || 0;
+    let drawn = false;
+    if (img && img.complete && img.naturalWidth > 0) {
+      try {
+        if (rot === 0) { ctx.drawImage(img, x, y, actualTile, actualTile); }
+        else { ctx.save(); ctx.translate(x + actualTile/2, y + actualTile/2); ctx.rotate(rot * Math.PI/2); ctx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); ctx.restore(); }
+        drawn = true;
+      } catch { /* fallback below */ }
+    }
+    if (!drawn) {
+      try { ctx.drawImage(snapCanvas, col*origTilePx, row*origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile); }
+      catch { const ti = ci*3; ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc'; ctx.fillRect(x, y, actualTile, actualTile); }
+    }
+    if (ci % 500 === 0) { onProgress?.(5 + Math.round((ci/total)*50), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+  }
+
+  // Apply contrast + soft-light overlay
+  onProgress?.(58, 'Farbkorrektur...');
+  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  const BASE_OL = algoSettings.baseOverlay ?? 0.15;
+  const EDGE_B = algoSettings.edgeBoost ?? 0.20;
+  const olMode = algoSettings.overlayMode ?? 'softlight';
+  const sl = (base: number, blend: number) => {
+    const b2 = blend/255, s = base/255;
+    return Math.round((b2 < 0.5 ? s - (1-2*b2)*s*(1-s) : s + (2*b2-1)*(Math.sqrt(s)-s)) * 255);
+  };
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const hd = imgData.data;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const ci2 = row*cols + col, ti = ci2*3;
+      const tr = tc.length > ti+2 ? tc[ti] : 128, tg = tc.length > ti+2 ? tc[ti+1] : 128, tb2 = tc.length > ti+2 ? tc[ti+2] : 128;
+      const edge = em.length > ci2 ? em[ci2] : 0;
+      const fb = fm.length > ci2 && fm[ci2] ? 0.25 : 0;
+      const str = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge*EDGE_B + fb) : 0;
+      const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
+      for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
+        const pi = (py*W + px)*4;
+        let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi]-128)*cBoost)));
+        let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+1]-128)*cBoost)));
+        let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+2]-128)*cBoost)));
+        if (str > 0.01) {
+          if (olMode === 'softlight') { r = Math.round(r*(1-str)+sl(r,tr)*str); g = Math.round(g*(1-str)+sl(g,tg)*str); b = Math.round(b*(1-str)+sl(b,tb2)*str); }
+          else { r = Math.round(r*(1-str)+tr*str); g = Math.round(g*(1-str)+tg*str); b = Math.round(b*(1-str)+tb2*str); }
+        }
+        hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
+      }
+    }
+    if (row % 5 === 0) { onProgress?.(58 + Math.round((row/rows)*32), 'Farbkorrektur...'); await new Promise(r => setTimeout(r, 0)); }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  onProgress?.(92, 'Erstelle Datei...');
+
+  const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
+  const blob = await new Promise<Blob | null>(resolve => {
+    const t = setTimeout(() => resolve(null), 90000);
+    canvas!.toBlob(b => { clearTimeout(t); resolve(b); }, mimeType, format === 'png' ? undefined : 0.95);
+  });
+  if (!blob) throw new Error('Datei-Erstellung fehlgeschlagen');
+  const filename = `mosaicprint-${W}x${H}-druckbereit.${format === 'png' ? 'png' : 'jpg'}`;
+  onProgress?.(100, `✓ Fertig: ${filename}`);
+  return { blob, width: W, height: H, filename };
+}
+
 // LAB -> (RGB) (inverse of rgbToLab)
 function labToRgb(L: number, a: number, b: number): [number, number, number] {
   const fy = (L + 16) / 116;
@@ -4571,53 +4681,27 @@ export default function Studio() {
         return;
       }
 
-      // SERVER-SIDE PRINT RENDER: for database tiles (positive IDs)
-
+      // CLIENT-SIDE PRINT RENDER: renders locally using loaded tile images (no server needed)
       try {
         setDlLoading(true);
-        setDlProgressMsg(`Server rendert Druckqualitaet (${printOutW}x${printOutH}px)...`);
+        setDlProgressMsg(`Rendere Druckqualitaet lokal...`);
         setDlProgress(5);
 
-        // Generate a unique job ID for SSE progress tracking
-        const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-        // 1. Fire-and-forget: start server render (responds immediately)
-        const printSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-        const resp = await fetch('/api/print-render', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tileIds: tileIdsRef.current,
-            assignment: assignmentRef.current,
-            cols, rows,
-            tilePx: PRINT_TILE_PX,
-            format: 'jpg',
-            jobId: printJobId,
-            overlayMode: printSettings.overlayMode ?? 'softlight',
-            baseOverlay: printSettings.baseOverlay ?? 0.15,
-            edgeBoost: printSettings.edgeBoost ?? 0.20,
-            targetColors: targetColorsRef.current,
-            edgeMap: edgeMapRef.current,
-            faceMask: faceMaskRef.current,
-          }),
+        const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
+          cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
+          assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+          validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+          snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+          targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+          onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
-        if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-        // 2. Poll for completion (robust — works through any proxy)
-        const printResult = await pollForResult(printJobId, setDlProgress, setDlProgressMsg);
-
-        // 3. Trigger download
-        const { token, filename, size } = printResult;
-        setDlProgressMsg(`Starte Download (${(size/1024/1024).toFixed(1)} MB)...`);
-        const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+        const printUrl = URL.createObjectURL(printBlob);
         const dlLink = document.createElement('a');
-        dlLink.href = downloadUrl;
-        dlLink.download = filename;
-        dlLink.style.display = 'none';
-        document.body.appendChild(dlLink);
-        dlLink.click();
-        setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-        setDlProgressMsg(`✓ Download gestartet: ${filename}`);
+        dlLink.href = printUrl; dlLink.download = printFilename; dlLink.style.display = 'none';
+        document.body.appendChild(dlLink); dlLink.click();
+        setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
+        setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
         setDlProgress(100);
       } catch (e) {
         console.error('[Print] Server render failed:', e);
@@ -4704,183 +4788,22 @@ export default function Studio() {
       const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
 
-      // CLIENT-SIDE RENDERING: Render print file locally using already-loaded tile images.
-      // This avoids the server tile download problem (gray images from failed URL fetches).
-      setDlProgressMsg(`Rendere ${digFmt.label} lokal...`);
-      setDlProgress(10);
-
-      const assignment = assignmentRef.current;
-      const validImgs = validImgsRef.current;
-      const hiResImgs = validImgsHiResRef.current;
-      const rotations = assignmentRotRef.current;
-      const snapshot = snapshotRef.current;
-      const tc = targetColorsRef.current;
-      const em = edgeMapRef.current;
-      const fm = faceMaskRef.current;
-      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-
-      // Create canvas — with progressive fallback for canvas size limits
-      let printCanvas: HTMLCanvasElement | null = null;
-      let printCtx: CanvasRenderingContext2D | null = null;
-      let actualTile = TILE_PX;
-      for (const tryTile of [TILE_PX, Math.floor(TILE_PX * 0.75), Math.floor(TILE_PX * 0.5), 64]) {
-        const c = document.createElement('canvas');
-        c.width = cols * tryTile;
-        c.height = rows * tryTile;
-        const ctx = c.getContext('2d');
-        if (ctx) {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          printCanvas = c;
-          printCtx = ctx;
-          actualTile = tryTile;
-          break;
-        }
-      }
-      if (!printCanvas || !printCtx) throw new Error('Canvas creation failed');
-
-      const printW = printCanvas.width;
-      const printH = printCanvas.height;
-      console.log(`[DigitalDL] Rendering ${printW}x${printH} @ ${actualTile}px/tile`);
-
-      // Build snapshot canvas as fallback source for missing/GC'd tile images
-      const snapshotCanvas = document.createElement('canvas');
-      const snapshotCtx2 = snapshotCanvas.getContext('2d');
-      if (snapshot && snapshotCtx2) {
-        snapshotCanvas.width = snapshot.width;
-        snapshotCanvas.height = snapshot.height;
-        snapshotCtx2.putImageData(snapshot, 0, 0);
-      }
-
-      // Draw all tiles
-      const totalCells = cols * rows;
-      for (let ci = 0; ci < totalCells; ci++) {
-        const col = ci % cols;
-        const row = Math.floor(ci / cols);
-        const x = col * actualTile;
-        const y = row * actualTile;
-        const tileIdx = assignment[ci];
-        const hiImg = hiResImgs[tileIdx];
-        const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
-        const rot = rotations[ci] || 0;
-
-        if (img && img.complete && img.naturalWidth > 0) {
-          try {
-            if (rot === 0) {
-              printCtx.drawImage(img, x, y, actualTile, actualTile);
-            } else {
-              printCtx.save();
-              printCtx.translate(x + actualTile / 2, y + actualTile / 2);
-              printCtx.rotate(rot * Math.PI / 2);
-              printCtx.drawImage(img, -actualTile / 2, -actualTile / 2, actualTile, actualTile);
-              printCtx.restore();
-            }
-          } catch {
-            // Fallback: copy from rendered snapshot
-            const origTilePx = mosaicParamsRef.current?.tilePx || 8;
-            try {
-              printCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile);
-            } catch {
-              const ti = ci * 3;
-              printCtx.fillStyle = tc.length > ti + 2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc';
-              printCtx.fillRect(x, y, actualTile, actualTile);
-            }
-          }
-        } else {
-          // Image GC'd — copy from snapshot
-          const origTilePx = mosaicParamsRef.current?.tilePx || 8;
-          try {
-            printCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile);
-          } catch {
-            const ti = ci * 3;
-            printCtx.fillStyle = tc.length > ti + 2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc';
-            printCtx.fillRect(x, y, actualTile, actualTile);
-          }
-        }
-        if (ci % 500 === 0) {
-          setDlProgress(10 + Math.round((ci / totalCells) * 50));
-          await new Promise(r => setTimeout(r, 0));
-        }
-      }
-      setDlProgress(65);
-      setDlProgressMsg('Farbkorrektur...');
-
-      // Apply contrast boost + soft-light overlay (same as main canvas Step 6)
-      const cBoost = dlSettings.contrastBoost ?? 1.30;
-      const BASE_OL = dlSettings.baseOverlay ?? 0.15;
-      const EDGE_B = dlSettings.edgeBoost ?? 0.20;
-      const olMode = dlSettings.overlayMode ?? 'softlight';
-      const softLight = (base: number, blend: number) => {
-        const b2 = blend / 255, s = base / 255;
-        return Math.round((b2 < 0.5 ? s - (1 - 2*b2) * s * (1 - s) : s + (2*b2 - 1) * (Math.sqrt(s) - s)) * 255);
-      };
-
-      const imgData = printCtx.getImageData(0, 0, printW, printH);
-      const hd = imgData.data;
-      for (let row = 0; row < rows; row++) {
-        for (let col = 0; col < cols; col++) {
-          const ci2 = row * cols + col;
-          const ti = ci2 * 3;
-          const tr = tc.length > ti + 2 ? tc[ti] : 128;
-          const tg = tc.length > ti + 2 ? tc[ti + 1] : 128;
-          const tb = tc.length > ti + 2 ? tc[ti + 2] : 128;
-          const edge = em.length > ci2 ? em[ci2] : 0;
-          const faceBoost = fm.length > ci2 && fm[ci2] ? 0.25 : 0;
-          const strength = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge * EDGE_B + faceBoost) : 0;
-
-          const yStart = row * actualTile;
-          const yEnd = Math.min(yStart + actualTile, printH);
-          const xStart = col * actualTile;
-          const xEnd = Math.min(xStart + actualTile, printW);
-          for (let py = yStart; py < yEnd; py++) {
-            for (let px = xStart; px < xEnd; px++) {
-              const pi = (py * printW + px) * 4;
-              let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi] - 128) * cBoost)));
-              let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 1] - 128) * cBoost)));
-              let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 2] - 128) * cBoost)));
-              if (strength > 0.01) {
-                if (olMode === 'softlight') {
-                  r = Math.round(r * (1 - strength) + softLight(r, tr) * strength);
-                  g = Math.round(g * (1 - strength) + softLight(g, tg) * strength);
-                  b = Math.round(b * (1 - strength) + softLight(b, tb) * strength);
-                } else {
-                  r = Math.round(r * (1 - strength) + tr * strength);
-                  g = Math.round(g * (1 - strength) + tg * strength);
-                  b = Math.round(b * (1 - strength) + tb * strength);
-                }
-              }
-              hd[pi] = r; hd[pi + 1] = g; hd[pi + 2] = b;
-            }
-          }
-        }
-        if (row % 5 === 0) {
-          setDlProgress(65 + Math.round((row / rows) * 25));
-          await new Promise(r => setTimeout(r, 0));
-        }
-      }
-      printCtx.putImageData(imgData, 0, 0);
-      setDlProgress(92);
-      setDlProgressMsg('Erstelle Datei...');
-
-      // Convert to blob and download
-      const mimeType = useFormat === 'png' ? 'image/png' : 'image/jpeg';
-      const quality = useFormat === 'png' ? undefined : 0.95;
-      const blob = await new Promise<Blob | null>(resolve => {
-        const timeout2 = setTimeout(() => resolve(null), 60000);
-        printCanvas!.toBlob(b => { clearTimeout(timeout2); resolve(b); }, mimeType, quality);
+      // CLIENT-SIDE RENDERING using shared renderMosaicClientSide()
+      const { blob, filename } = await renderMosaicClientSide({
+        cols, rows, tilePx: TILE_PX, format: useFormat as 'jpg' | 'png',
+        assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+        validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+        snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+        targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
-      if (!blob) throw new Error('Datei-Erstellung fehlgeschlagen');
 
-      const filename = `mosaicprint-${printW}x${printH}-druckbereit.${useFormat === 'png' ? 'png' : 'jpg'}`;
       const url = URL.createObjectURL(blob);
       const dlLink = document.createElement('a');
-      dlLink.href = url;
-      dlLink.download = filename;
-      dlLink.style.display = 'none';
-      document.body.appendChild(dlLink);
-      dlLink.click();
+      dlLink.href = url; dlLink.download = filename; dlLink.style.display = 'none';
+      document.body.appendChild(dlLink); dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
-      setDlProgressMsg(`✓ Download gestartet: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
@@ -4909,46 +4832,22 @@ export default function Studio() {
       setDlProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px PNG)...`);
       setDlProgress(5);
 
-      const jobId = `admin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      let sseSource: EventSource | null = null;
-      let lastAdminProgress = 0;
-      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-      // 1. Fire-and-forget: start server render
-      const resp = await fetch('/api/print-render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tileIds: tileIdsRef.current,
-          assignment: assignmentRef.current,
-          cols, rows,
-          tilePx: TILE_PX,
-          format: 'png',
-          jobId,
-          overlayMode: dlSettings.overlayMode ?? 'softlight',
-          baseOverlay: dlSettings.baseOverlay ?? 0.15,
-          edgeBoost: dlSettings.edgeBoost ?? 0.20,
-          targetColors: targetColorsRef.current,
-          edgeMap: edgeMapRef.current,
-          faceMask: faceMaskRef.current,
-        }),
+      // CLIENT-SIDE RENDERING (admin max quality)
+      const { blob: adminBlob, filename: adminFilename } = await renderMosaicClientSide({
+        cols, rows, tilePx: TILE_PX, format: 'png',
+        assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+        validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+        snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+        targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-      // 2. Poll for completion (robust — works through any proxy)
-      const adminResult = await pollForResult(jobId, setDlProgress, setDlProgressMsg);
-
-      // 3. Trigger download
-      const { token: adminToken, filename, size } = adminResult;
-      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
-      const downloadUrl = `/api/print-download/${adminToken}?filename=${encodeURIComponent(filename)}`;
+      const adminUrl = URL.createObjectURL(adminBlob);
       const dlLink = document.createElement('a');
-      dlLink.href = downloadUrl;
-      dlLink.download = filename;
-      dlLink.style.display = 'none';
-      document.body.appendChild(dlLink);
-      dlLink.click();
-      setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setDlProgressMsg(`✓ Download gestartet: ${filename}`);
+      dlLink.href = adminUrl; dlLink.download = adminFilename; dlLink.style.display = 'none';
+      document.body.appendChild(dlLink); dlLink.click();
+      setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(adminUrl); }, 10000);
+      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
