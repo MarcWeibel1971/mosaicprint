@@ -161,17 +161,66 @@ async function pollForResult(
  */
 async function renderMosaicClientSide(opts: {
   cols: number; rows: number; tilePx: number; format: 'jpg' | 'png';
-  assignment: number[]; rotations: number[];
+  assignment: number[]; rotations: number[]; tileIds: number[];
   validImgs: HTMLImageElement[]; hiResImgs: (HTMLImageElement | null)[];
   snapshot: ImageData | null; origTilePx: number;
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
-  const { cols, rows, tilePx, format, assignment, rotations, validImgs, hiResImgs,
+  const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
     snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
-  onProgress?.(5, 'Canvas erstellen...');
+  onProgress?.(2, 'Tiles prüfen...');
+
+  // Pre-check: count how many tile images are still available
+  const uniqueIdxs = [...new Set(assignment)];
+  let missingCount = 0;
+  const missingIdxs = new Set<number>();
+  for (const idx of uniqueIdxs) {
+    const hiImg = hiResImgs[idx];
+    const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
+    if (!img || !img.complete || img.naturalWidth === 0) {
+      missingCount++;
+      missingIdxs.add(idx);
+    }
+  }
+  console.log(`[PrintRender] ${uniqueIdxs.length} unique tiles, ${missingCount} missing (GC'd)`);
+
+  // Re-load missing tiles from server (/api/tile/:id)
+  if (missingCount > 0) {
+    onProgress?.(3, `${missingCount} Tiles werden nachgeladen...`);
+    const reloadedImgs: Record<number, HTMLImageElement> = {};
+    const BATCH = 20;
+    const missingArr = [...missingIdxs];
+    let loaded = 0;
+    for (let i = 0; i < missingArr.length; i += BATCH) {
+      const batch = missingArr.slice(i, i + BATCH);
+      await Promise.all(batch.map(async (idx) => {
+        const dbId = tileIds[idx];
+        if (!dbId || dbId <= 0) return; // user-uploaded tiles can't be reloaded
+        try {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('load failed'));
+            img.src = `/api/tile/${dbId}?size=${Math.min(256, tilePx)}`;
+          });
+          reloadedImgs[idx] = img;
+          loaded++;
+        } catch { /* tile stays missing */ }
+      }));
+      onProgress?.(3 + Math.round((loaded / missingCount) * 10), `Tiles nachladen: ${loaded}/${missingCount}`);
+    }
+    console.log(`[PrintRender] Reloaded ${loaded}/${missingCount} missing tiles from server`);
+    // Patch into validImgs array (mutates the ref — these tiles are now available)
+    for (const [idx, img] of Object.entries(reloadedImgs)) {
+      validImgs[Number(idx)] = img;
+    }
+  }
+
+  onProgress?.(15, 'Canvas erstellen...');
 
   // Create canvas with progressive fallback
   let canvas: HTMLCanvasElement | null = null;
@@ -212,7 +261,7 @@ async function renderMosaicClientSide(opts: {
       try { ctx.drawImage(snapCanvas, col*origTilePx, row*origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile); }
       catch { const ti = ci*3; ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc'; ctx.fillRect(x, y, actualTile, actualTile); }
     }
-    if (ci % 500 === 0) { onProgress?.(5 + Math.round((ci/total)*50), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+    if (ci % 500 === 0) { onProgress?.(15 + Math.round((ci/total)*40), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
   }
 
   // Apply contrast + soft-light overlay
@@ -4675,7 +4724,7 @@ export default function Studio() {
 
         const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
           cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
-          assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+          assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
           validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
@@ -4777,7 +4826,7 @@ export default function Studio() {
       // CLIENT-SIDE RENDERING using shared renderMosaicClientSide()
       const { blob, filename } = await renderMosaicClientSide({
         cols, rows, tilePx: TILE_PX, format: useFormat as 'jpg' | 'png',
-        assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+        assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
@@ -4821,7 +4870,7 @@ export default function Studio() {
       // CLIENT-SIDE RENDERING (admin max quality)
       const { blob: adminBlob, filename: adminFilename } = await renderMosaicClientSide({
         cols, rows, tilePx: TILE_PX, format: 'png',
-        assignment: assignmentRef.current, rotations: assignmentRotRef.current,
+        assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
