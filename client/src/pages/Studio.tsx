@@ -471,8 +471,11 @@ export default function Studio() {
   const canDoHiRes = useCallback(() => {
     const ids = tileIdsRef.current;
     if (!ids.length) return false;
-    // User-uploaded tiles have negative IDs – server can't render those
-    return ids.some(id => id > 0);
+    // User-uploaded tiles have negative IDs – server can't render those.
+    // In mix mode, tileIds contains both negative (user) and positive (DB) IDs.
+    // If ANY tile has a negative ID, server-render would produce gray tiles for those positions.
+    // Therefore, require ALL tiles to have positive IDs before using server-render.
+    return ids.every(id => id > 0);
   }, []);
 
   // Trigger server-side hi-res render for zoom
