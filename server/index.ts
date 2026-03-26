@@ -57,6 +57,99 @@ function evictTileCache() {
   // Evict oldest 500 entries
   const entries = [...tileCacheMap.entries()].sort((a, b) => a[1].ts - b[1].ts);
   for (let i = 0; i < 500; i++) tileCacheMap.delete(entries[i][0]);
+}
+
+/**
+ * Shared tile loading: used by /api/tile/:id AND print render.
+ * Loads a tile image at the requested size, with 3-tier caching:
+ *   1. In-memory tileCacheMap (exact size, then resize from nearby sizes)
+ *   2. URL resolution from tileUrlCache or DB
+ *   3. Upstream fetch (R2 CDN, source_url)
+ * Returns a JPEG buffer resized to exactly `size x size`, or null on failure.
+ */
+async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> {
+  const cacheKey = `${id}-${size}`;
+
+  // 1. Check exact cache hit
+  const cached = tileCacheMap.get(cacheKey);
+  if (cached) return cached.buf;
+
+  // 1b. Check nearby sizes and resize
+  for (const trySize of [128, 64, 256]) {
+    if (trySize === size) continue;
+    const nearby = tileCacheMap.get(`${id}-${trySize}`);
+    if (nearby) {
+      try {
+        const resized = await sharp(nearby.buf)
+          .resize(size, size, { fit: 'cover', position: 'centre' })
+          .jpeg({ quality: 92 })
+          .toBuffer();
+        if (resized) {
+          tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+          return resized;
+        }
+      } catch { /* fall through */ }
+    }
+  }
+
+  // 2. Resolve URL from cache or DB
+  let tileUrls = tileUrlCache.get(id);
+  if (!tileUrls || (Date.now() - tileUrls.ts) > TILE_URL_CACHE_TTL_MS) {
+    try {
+      const pool = db.getPool();
+      const result = await pool.query(
+        "SELECT source_url, tile128_url, r2_url FROM mosaic_images WHERE id = $1",
+        [id]
+      );
+      if (!result.rows[0]) return null;
+      const row = result.rows[0];
+      const effectiveTile128 = row.r2_url || row.tile128_url || '';
+      const effectiveSource = row.source_url || row.r2_url || '';
+      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
+      tileUrlCache.set(id, tileUrls);
+    } catch { return null; }
+  }
+
+  // Prefer source_url for larger sizes (better quality), R2 for small
+  // For print: R2 128px upscaled is far better than gray/missing
+  const url = size <= 128 && tileUrls.tile128Url
+    ? tileUrls.tile128Url
+    : (tileUrls.sourceUrl || tileUrls.tile128Url);
+  if (!url) return null;
+
+  // 3. Handle data URLs
+  if (url.startsWith('data:')) {
+    try {
+      const rawBuf = Buffer.from(url.split(',')[1], 'base64');
+      const resized = await sharp(rawBuf)
+        .resize(size, size, { fit: 'cover', position: 'centre' })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+      evictTileCache();
+      return resized;
+    } catch { return null; }
+  }
+
+  // 4. Fetch from upstream (R2 CDN, Unsplash, Pexels, etc.)
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'MosaicPrint/1.0' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) return null;
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const resized = await sharp(buf)
+      .resize(size, size, { fit: 'cover', position: 'centre' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+    tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    evictTileCache();
+    return resized;
+  } catch {
+    return null;
+  }
+}
   console.log(`[cache] Evicted 500 tile cache entries, size now: ${tileCacheMap.size}`);
 }
 
@@ -261,66 +354,11 @@ app.get("/api/tile/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     const size = Number(req.query.size ?? 128);
-    const cacheKey = `${id}-${size}`;
-
-    // Check in-memory tile cache first
-    const cached = tileCacheMap.get(cacheKey);
-    if (cached) {
-      res.set("Content-Type", cached.contentType);
-      res.set("Cache-Control", "public, max-age=86400");
-      res.set("Access-Control-Allow-Origin", "*");
-      res.set("X-Cache", "HIT");
-      return res.send(cached.buf);
-    }
-
-    // Check tile URL cache (avoids DB query)
-    let tileUrls = tileUrlCache.get(id);
-    if (!tileUrls || (Date.now() - tileUrls.ts) > TILE_URL_CACHE_TTL_MS) {
-      const pool = db.getPool();
-      const result = await pool.query(
-        "SELECT source_url, tile128_url, r2_url FROM mosaic_images WHERE id = $1",
-        [id]
-      );
-      if (!result.rows[0]) return res.status(404).json({ error: "Not found" });
-      const row = result.rows[0];
-      // For tile128 (≤128px): prefer R2 URL (permanent, fast CDN)
-      const effectiveTile128 = row.r2_url || row.tile128_url || '';
-      // For hi-res (>128px): prefer original source_url (full resolution from Pexels/Unsplash)
-      // R2 only stores 128px thumbnails, so source_url gives much better quality at zoom
-      const effectiveSource = row.source_url || row.r2_url || '';
-      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
-      tileUrlCache.set(id, tileUrls);
-      // Evict if too large
-      if (tileUrlCache.size > TILE_URL_CACHE_MAX) {
-        const oldest = [...tileUrlCache.entries()].sort((a,b) => a[1].ts - b[1].ts)[0];
-        tileUrlCache.delete(oldest[0]);
-      }
-    }
-
-    const url = size <= 128 && tileUrls.tile128Url ? tileUrls.tile128Url : tileUrls.sourceUrl;
-    if (!url) return res.status(404).json({ error: "No URL" });
-
-    // If it's a data URL (uploaded tile), serve it directly
-    if (url.startsWith("data:")) {
-      const [header, b64] = url.split(",");
-      const mimeType = header.split(":")[1].split(";")[0];
-      const buf = Buffer.from(b64, "base64");
-      res.set("Content-Type", mimeType);
-      res.set("Cache-Control", "public, max-age=86400");
-      return res.send(buf);
-    }
-    // Proxy the image directly to avoid CORS issues (Pixabay, Pexels, Unsplash)
+    const buf = await loadTileBuffer(id, size);
+    if (!buf) return res.status(404).json({ error: "Not found" });
+    res.set("Content-Type", "image/jpeg");
     res.set("Cache-Control", "public, max-age=86400");
     res.set("Access-Control-Allow-Origin", "*");
-    const upstream = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' } });
-    if (!upstream.ok) return res.status(upstream.status).json({ error: "Upstream error" });
-    const contentType = upstream.headers.get("content-type") || "image/jpeg";
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    // Store in tile cache
-    tileCacheMap.set(cacheKey, { buf, contentType, ts: Date.now() });
-    evictTileCache();
-    res.set("Content-Type", contentType);
-    res.set("X-Cache", "MISS");
     return res.send(buf);
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -1511,125 +1549,31 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
 
     // Fetch unique tile IDs needed
     const uniqueIds = [...new Set(assignment.map(idx => tileIds[idx]).filter(Boolean))];
-    const result = await pool.query(
-      `SELECT id, tile128_url, tile256_url, source_url, r2_url, source_provider FROM mosaic_images WHERE id = ANY($1)`,
-      [uniqueIds]
-    );
-    // Build URL map: prefer R2 CDN (fast, reliable), then tile256, then source_url, then tile128
-    const urlMap: Record<number, { hiRes: string; fallback: string }> = {};
-    let skippedCount = 0;
-    for (const row of result.rows) {
-      // URL priority: r2 > tile256 > source_url > tile128
-      const r2 = row.r2_url || '';
-      const t256 = row.tile256_url || '';
-      const t128 = row.tile128_url || '';
-      const src = row.source_url || '';
-      
-      // For Pixabay: check hotlink protection
-      if (row.source_provider === 'pixabay') {
-        const isHotlink = (u: string) => u.includes('pixabay.com/get/') || u.includes('pixabay.com/download/');
-        const safeSrc = isHotlink(src) ? '' : src;
-        const safeFallback = r2 || t256 || t128 || safeSrc;
-        if (!safeFallback) { skippedCount++; continue; }
-        urlMap[row.id] = { hiRes: safeFallback, fallback: safeFallback };
-      } else {
-        // Priority: r2 > tile256 > source_url > tile128
-        const best = r2 || t256 || src || t128;
-        const fallback = r2 || t256 || t128 || src;
-        if (!best) { skippedCount++; continue; }
-        urlMap[row.id] = { hiRes: best, fallback };
-      }
-    }
-    if (skippedCount > 0) console.log(`[print-render] Skipped ${skippedCount} tiles without usable URLs`);
-    updateProgress(10, `DB: ${uniqueIds.length} unique tiles, ${result.rows.length} URLs gefunden`);
+    updateProgress(10, `${uniqueIds.length} unique Tiles werden geladen...`);
 
-    // Load tile images in parallel batches with memory cache, disk cache, then URL fallback
+    // Load tiles using shared loadTileBuffer() — same logic as /api/tile/:id
+    // Benefits: shared cache (tileCacheMap), robust URL resolution, R2 CDN fallback
     const tileBuffers: Record<number, Buffer> = {};
     const CONCURRENCY = 25;
-    let downloadedCount = 0;
-    let memCacheHits = 0;
+    let loadedCount = 0;
     for (let i = 0; i < uniqueIds.length; i += CONCURRENCY) {
       const batch = uniqueIds.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (id) => {
-        const urls = urlMap[id];
-        if (!urls) return;
-
-        // 1. Check in-memory tileCacheMap (populated by atlas builder) - any cached size works
-        // Try exact size first, then common sizes (64, 128) as resize source
-        for (const trySize of [TILE_PX, 128, 64]) {
-          const memCached = tileCacheMap.get(`${id}-${trySize}`);
-          if (memCached) {
-            try {
-              const resized = trySize === TILE_PX ? memCached.buf
-                : await sharp(memCached.buf)
-                    .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-                    .jpeg({ quality: 92 })
-                    .toBuffer();
-              if (resized) {
-                tileBuffers[id] = resized;
-                downloadedCount++;
-                memCacheHits++;
-                return;
-              }
-            } catch { /* fall through to disk/url */ }
-          }
-        }
-
-        // 2. Check disk cache
-        const cacheFile = path.join(HIRES_CACHE_DIR, `${id}-${TILE_PX}.jpg`);
-        if (fs.existsSync(cacheFile)) {
-          try { tileBuffers[id] = fs.readFileSync(cacheFile); downloadedCount++; return; } catch { /* fall through */ }
-        }
-
-        // 3. Download from URLs (hiRes, fallback)
-        const urlsToTry = [urls.hiRes, urls.fallback].filter(Boolean);
-        for (const url of urlsToTry) {
-          try {
-            if (url.startsWith('data:')) {
-              const rawBuf = Buffer.from(url.split(',')[1], 'base64');
-              const resized = await sharp(rawBuf)
-                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-                .jpeg({ quality: 92 })
-                .toBuffer()
-                .catch(() => rawBuf);
-              tileBuffers[id] = resized;
-              downloadedCount++;
-              break;
-            }
-            const resp = await fetch(url, {
-              headers: { 'User-Agent': 'MosaicPrint/1.0' },
-              signal: AbortSignal.timeout(15000)
-            });
-            if (resp.ok) {
-              const buf = Buffer.from(await resp.arrayBuffer());
-              // Resize to TILE_PX — use JPEG for cache (smaller, faster)
-              const resized = await sharp(buf)
-                .resize(TILE_PX, TILE_PX, { fit: 'cover', position: 'centre' })
-                .jpeg({ quality: 92 })
-                .toBuffer()
-                .catch(() => null);
-              if (resized) {
-                tileBuffers[id] = resized;
-                fs.writeFile(cacheFile, resized, () => {});
-                downloadedCount++;
-              }
-              break;
-            }
-          } catch (dlErr) {
-            console.log(`[print-render] Tile ${id} URL failed: ${url.substring(0, 60)}... (${dlErr})`);
-          }
+        const buf = await loadTileBuffer(id, TILE_PX);
+        if (buf) {
+          tileBuffers[id] = buf;
+          loadedCount++;
         }
       }));
-      const dlPct = Math.round(10 + (downloadedCount / uniqueIds.length) * 40);
-      updateProgress(dlPct, `Tiles laden: ${downloadedCount}/${uniqueIds.length} (${memCacheHits} aus Cache)`);
+      const pct = Math.round(10 + (loadedCount / uniqueIds.length) * 40);
+      updateProgress(pct, `Tiles laden: ${loadedCount}/${uniqueIds.length}`);
     }
-    console.log(`[print-render] Tiles loaded: ${downloadedCount}/${uniqueIds.length} (${memCacheHits} from memory cache)`);
+    console.log(`[print-render] Tiles loaded: ${loadedCount}/${uniqueIds.length}`);
 
     const missingTiles = uniqueIds.filter(id => !tileBuffers[id]);
     if (missingTiles.length > 0) {
-      console.log(`[print-render] WARNING: ${missingTiles.length}/${uniqueIds.length} tiles missing (no buffer). First 10: ${missingTiles.slice(0, 10).join(',')}`);
+      console.log(`[print-render] WARNING: ${missingTiles.length}/${uniqueIds.length} tiles missing. First 10: ${missingTiles.slice(0, 10).join(',')}`);
     }
-    console.log(`[print-render] Tiles loaded: ${downloadedCount}/${uniqueIds.length} (${missingTiles.length} missing)`);
 
     // Strip-based compositing to control memory
     // Target: keep strip RAM under ~250 MB (width * stripHeight * 4 bytes RGBA)
