@@ -1400,11 +1400,13 @@ function applyOverlay(
     return Math.round(Math.max(0, Math.min(255, result * 255)));
   };
 
-  // Scale overlay strength by tile size: at 8px (base canvas), full strength.
-  // At larger sizes (128-400px), the overlay must be much subtler to avoid
-  // washing out the actual tile photos with flat target colors.
-  const REFERENCE_TILE_PX = 8;
-  const strengthScale = tilePx <= REFERENCE_TILE_PX ? 1.0 : Math.min(1.0, Math.sqrt(REFERENCE_TILE_PX / tilePx));
+  // Scale overlay strength by tile size.
+  // At small tile sizes (8px preview), the overlay is applied at full strength.
+  // At larger print sizes (128-256px), we keep the overlay strong enough to
+  // make the mosaic motif clearly visible — do NOT reduce too much.
+  // Formula: at 8px → 1.0, at 64px → 1.0, at 128px → 0.85, at 256px → 0.70
+  const REFERENCE_TILE_PX = 64;
+  const strengthScale = tilePx <= REFERENCE_TILE_PX ? 1.0 : Math.min(1.0, Math.pow(REFERENCE_TILE_PX / tilePx, 0.25));
 
   const stripRows = Math.ceil(height / tilePx);
   for (let lr = 0; lr < stripRows; lr++) {
@@ -1446,7 +1448,7 @@ function applyOverlay(
   }
 }
 
-app.post('/api/print-render', express.json({ limit: '5mb' }), async (req, res) => {
+app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) => {
   const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
     overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
   } = req.body as {
@@ -1815,6 +1817,146 @@ app.get('/api/print-download/:token', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const stream = fs.createReadStream(tmpFile);
   stream.pipe(res);
+});
+
+// ── Debug Endpoint ──────────────────────────────────────────────────────────
+
+// POST /api/debug/print-render-test – render a tiny 2x2 mosaic and return debug info
+// This endpoint renders 4 real tiles from the DB at the given tilePx and returns
+// a JPEG + JSON with all parameters so we can diagnose the gray-image bug.
+app.post('/api/debug/print-render-test', express.json({ limit: '5mb' }), async (req, res) => {
+  try {
+    const {
+      tilePx = 128,
+      overlayMode = 'softlight',
+      baseOverlay = 0.15,
+      edgeBoost = 0.20,
+      targetColors,
+    } = req.body as {
+      tilePx?: number;
+      overlayMode?: string;
+      baseOverlay?: number;
+      edgeBoost?: number;
+      targetColors?: number[];
+    };
+
+    const pool = db.getPool();
+    // Get 4 random colorful tiles from DB
+    const result = await pool.query(
+      `SELECT id, tile128_url, tile256_url, r2_url, source_url FROM mosaic_images 
+       WHERE r2_url IS NOT NULL AND r2_url != '' 
+       ORDER BY RANDOM() LIMIT 4`
+    );
+    const tiles = result.rows;
+    if (tiles.length < 4) {
+      return res.status(500).json({ error: 'Not enough tiles in DB', count: tiles.length });
+    }
+
+    const debugInfo: Record<string, unknown> = {
+      tilePx,
+      overlayMode,
+      baseOverlay,
+      edgeBoost,
+      targetColorsLength: targetColors?.length ?? 0,
+      targetColorsProvided: !!(targetColors?.length),
+      tiles: tiles.map(t => ({ id: t.id, r2_url: t.r2_url?.substring(0, 60), tile256_url: t.tile256_url?.substring(0, 60) })),
+    };
+
+    // Load tile images
+    const tileBuffers: Buffer[] = [];
+    for (const tile of tiles) {
+      const url = tile.r2_url || tile.tile256_url || tile.tile128_url || tile.source_url;
+      const resp = await fetch(url, { headers: { 'User-Agent': 'MosaicPrint/1.0' }, signal: AbortSignal.timeout(10000) });
+      if (!resp.ok) throw new Error(`Failed to load tile ${tile.id}: ${resp.status}`);
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const resized = await sharp(buf).resize(tilePx, tilePx, { fit: 'cover' }).jpeg({ quality: 90 }).toBuffer();
+      tileBuffers.push(resized);
+    }
+    debugInfo.tilesLoaded = tileBuffers.length;
+
+    // Composite 2x2
+    const outW = tilePx * 2;
+    const outH = tilePx * 2;
+    const compositeInputs = [
+      { input: tileBuffers[0], top: 0, left: 0 },
+      { input: tileBuffers[1], top: 0, left: tilePx },
+      { input: tileBuffers[2], top: tilePx, left: 0 },
+      { input: tileBuffers[3], top: tilePx, left: tilePx },
+    ];
+
+    // Use target colors if provided, otherwise use bright test colors
+    const testTargetColors = targetColors?.length === 12
+      ? targetColors
+      : [255, 0, 0,  0, 255, 0,  0, 0, 255,  255, 255, 0]; // R, G, B, Y
+    debugInfo.testTargetColorsUsed = !targetColors?.length;
+
+    const hasOverlay = overlayMode && overlayMode !== 'none';
+    let outputBuf: Buffer;
+
+    if (hasOverlay) {
+      const rawBuf = await sharp({
+        create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+        limitInputPixels: false,
+      }).composite(compositeInputs).raw().toBuffer();
+
+      // Apply overlay manually (same as applyOverlay function)
+      const REFERENCE_TILE_PX = 64;
+      const strengthScale = tilePx <= REFERENCE_TILE_PX ? 1.0 : Math.min(1.0, Math.pow(REFERENCE_TILE_PX / tilePx, 0.25));
+      debugInfo.strengthScale = strengthScale;
+      debugInfo.effectiveBaseOverlay = baseOverlay * strengthScale;
+
+      const softLight = (base: number, blend: number): number => {
+        const b = blend / 255, s = base / 255;
+        const result = b < 0.5 ? s - (1 - 2 * b) * s * (1 - s) : s + (2 * b - 1) * (Math.sqrt(s) - s);
+        return Math.round(Math.max(0, Math.min(255, result * 255)));
+      };
+
+      for (let ci = 0; ci < 4; ci++) {
+        const row = Math.floor(ci / 2);
+        const col = ci % 2;
+        const tr = testTargetColors[ci * 3];
+        const tg = testTargetColors[ci * 3 + 1];
+        const tb = testTargetColors[ci * 3 + 2];
+        const strength = Math.min(0.85, baseOverlay) * strengthScale;
+        for (let py = row * tilePx; py < (row + 1) * tilePx; py++) {
+          for (let px = col * tilePx; px < (col + 1) * tilePx; px++) {
+            const pi = (py * outW + px) * 3;
+            if (overlayMode === 'softlight') {
+              rawBuf[pi]     = Math.round(rawBuf[pi]     * (1 - strength) + softLight(rawBuf[pi], tr) * strength);
+              rawBuf[pi + 1] = Math.round(rawBuf[pi + 1] * (1 - strength) + softLight(rawBuf[pi + 1], tg) * strength);
+              rawBuf[pi + 2] = Math.round(rawBuf[pi + 2] * (1 - strength) + softLight(rawBuf[pi + 2], tb) * strength);
+            } else {
+              rawBuf[pi]     = Math.round(rawBuf[pi]     * (1 - strength) + tr * strength);
+              rawBuf[pi + 1] = Math.round(rawBuf[pi + 1] * (1 - strength) + tg * strength);
+              rawBuf[pi + 2] = Math.round(rawBuf[pi + 2] * (1 - strength) + tb * strength);
+            }
+          }
+        }
+      }
+      outputBuf = await sharp(rawBuf, { raw: { width: outW, height: outH, channels: 3 }, limitInputPixels: false })
+        .jpeg({ quality: 90 }).toBuffer();
+    } else {
+      outputBuf = await sharp({
+        create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+        limitInputPixels: false,
+      }).composite(compositeInputs).jpeg({ quality: 90 }).toBuffer();
+      debugInfo.strengthScale = 'N/A (no overlay)';
+    }
+
+    debugInfo.outputSizeBytes = outputBuf.length;
+    debugInfo.outputSizeKB = Math.round(outputBuf.length / 1024);
+
+    // Return as multipart: JSON header + JPEG image
+    // For simplicity, return JSON with base64 image
+    res.json({
+      ...debugInfo,
+      imageBase64: outputBuf.toString('base64'),
+      imageDataUrl: 'data:image/jpeg;base64,' + outputBuf.toString('base64'),
+    });
+  } catch (e) {
+    console.error('[debug/print-render-test] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // ── Customer Order Endpoints ──────────────────────────────────────────────
