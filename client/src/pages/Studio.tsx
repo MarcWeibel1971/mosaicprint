@@ -4702,51 +4702,185 @@ export default function Studio() {
       setDlProgress(5);
 
       const digJobId = `dig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
-      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-      const overlayMode = dlSettings.overlayMode ?? 'softlight';
-      const baseOverlay = dlSettings.baseOverlay ?? 0.15;
-      const edgeBoost = dlSettings.edgeBoost ?? 0.20;
 
-      // 1. Fire-and-forget: start server render (responds immediately with {accepted: true})
-      const resp = await fetch('/api/print-render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tileIds: tileIdsRef.current,
-          assignment: assignmentRef.current,
-          cols, rows,
-          tilePx: TILE_PX,
-          format: useFormat,
-          jobId: digJobId,
-          overlayMode, baseOverlay, edgeBoost,
-          targetColors: targetColorsRef.current,
-          edgeMap: edgeMapRef.current,
-          faceMask: faceMaskRef.current,
-        }),
-      });
-      if (!resp.ok) {
-        throw new Error(`Server error: ${resp.status}`);
+      // CLIENT-SIDE RENDERING: Render print file locally using already-loaded tile images.
+      // This avoids the server tile download problem (gray images from failed URL fetches).
+      setDlProgressMsg(`Rendere ${digFmt.label} lokal...`);
+      setDlProgress(10);
+
+      const assignment = assignmentRef.current;
+      const validImgs = validImgsRef.current;
+      const hiResImgs = validImgsHiResRef.current;
+      const rotations = assignmentRotRef.current;
+      const snapshot = snapshotRef.current;
+      const tc = targetColorsRef.current;
+      const em = edgeMapRef.current;
+      const fm = faceMaskRef.current;
+      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+
+      // Create canvas — with progressive fallback for canvas size limits
+      let printCanvas: HTMLCanvasElement | null = null;
+      let printCtx: CanvasRenderingContext2D | null = null;
+      let actualTile = TILE_PX;
+      for (const tryTile of [TILE_PX, Math.floor(TILE_PX * 0.75), Math.floor(TILE_PX * 0.5), 64]) {
+        const c = document.createElement('canvas');
+        c.width = cols * tryTile;
+        c.height = rows * tryTile;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          printCanvas = c;
+          printCtx = ctx;
+          actualTile = tryTile;
+          break;
+        }
+      }
+      if (!printCanvas || !printCtx) throw new Error('Canvas creation failed');
+
+      const printW = printCanvas.width;
+      const printH = printCanvas.height;
+      console.log(`[DigitalDL] Rendering ${printW}x${printH} @ ${actualTile}px/tile`);
+
+      // Build snapshot canvas as fallback source for missing/GC'd tile images
+      const snapshotCanvas = document.createElement('canvas');
+      const snapshotCtx2 = snapshotCanvas.getContext('2d');
+      if (snapshot && snapshotCtx2) {
+        snapshotCanvas.width = snapshot.width;
+        snapshotCanvas.height = snapshot.height;
+        snapshotCtx2.putImageData(snapshot, 0, 0);
       }
 
-      // 2. Poll for completion (robust — works through any proxy, no SSE needed)
-      const result = await pollForResult(digJobId, setDlProgress, setDlProgressMsg);
+      // Draw all tiles
+      const totalCells = cols * rows;
+      for (let ci = 0; ci < totalCells; ci++) {
+        const col = ci % cols;
+        const row = Math.floor(ci / cols);
+        const x = col * actualTile;
+        const y = row * actualTile;
+        const tileIdx = assignment[ci];
+        const hiImg = hiResImgs[tileIdx];
+        const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
+        const rot = rotations[ci] || 0;
 
-      // 3. Trigger download
-      const { token, filename, size } = result;
-      setDlProgress(98);
-      setDlProgressMsg(`Download wird gestartet (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            if (rot === 0) {
+              printCtx.drawImage(img, x, y, actualTile, actualTile);
+            } else {
+              printCtx.save();
+              printCtx.translate(x + actualTile / 2, y + actualTile / 2);
+              printCtx.rotate(rot * Math.PI / 2);
+              printCtx.drawImage(img, -actualTile / 2, -actualTile / 2, actualTile, actualTile);
+              printCtx.restore();
+            }
+          } catch {
+            // Fallback: copy from rendered snapshot
+            const origTilePx = mosaicParamsRef.current?.tilePx || 8;
+            try {
+              printCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile);
+            } catch {
+              const ti = ci * 3;
+              printCtx.fillStyle = tc.length > ti + 2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc';
+              printCtx.fillRect(x, y, actualTile, actualTile);
+            }
+          }
+        } else {
+          // Image GC'd — copy from snapshot
+          const origTilePx = mosaicParamsRef.current?.tilePx || 8;
+          try {
+            printCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile);
+          } catch {
+            const ti = ci * 3;
+            printCtx.fillStyle = tc.length > ti + 2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc';
+            printCtx.fillRect(x, y, actualTile, actualTile);
+          }
+        }
+        if (ci % 500 === 0) {
+          setDlProgress(10 + Math.round((ci / totalCells) * 50));
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      setDlProgress(65);
+      setDlProgressMsg('Farbkorrektur...');
 
-      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      // Apply contrast boost + soft-light overlay (same as main canvas Step 6)
+      const cBoost = dlSettings.contrastBoost ?? 1.30;
+      const BASE_OL = dlSettings.baseOverlay ?? 0.15;
+      const EDGE_B = dlSettings.edgeBoost ?? 0.20;
+      const olMode = dlSettings.overlayMode ?? 'softlight';
+      const softLight = (base: number, blend: number) => {
+        const b2 = blend / 255, s = base / 255;
+        return Math.round((b2 < 0.5 ? s - (1 - 2*b2) * s * (1 - s) : s + (2*b2 - 1) * (Math.sqrt(s) - s)) * 255);
+      };
+
+      const imgData = printCtx.getImageData(0, 0, printW, printH);
+      const hd = imgData.data;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const ci2 = row * cols + col;
+          const ti = ci2 * 3;
+          const tr = tc.length > ti + 2 ? tc[ti] : 128;
+          const tg = tc.length > ti + 2 ? tc[ti + 1] : 128;
+          const tb = tc.length > ti + 2 ? tc[ti + 2] : 128;
+          const edge = em.length > ci2 ? em[ci2] : 0;
+          const faceBoost = fm.length > ci2 && fm[ci2] ? 0.25 : 0;
+          const strength = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge * EDGE_B + faceBoost) : 0;
+
+          const yStart = row * actualTile;
+          const yEnd = Math.min(yStart + actualTile, printH);
+          const xStart = col * actualTile;
+          const xEnd = Math.min(xStart + actualTile, printW);
+          for (let py = yStart; py < yEnd; py++) {
+            for (let px = xStart; px < xEnd; px++) {
+              const pi = (py * printW + px) * 4;
+              let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi] - 128) * cBoost)));
+              let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 1] - 128) * cBoost)));
+              let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 2] - 128) * cBoost)));
+              if (strength > 0.01) {
+                if (olMode === 'softlight') {
+                  r = Math.round(r * (1 - strength) + softLight(r, tr) * strength);
+                  g = Math.round(g * (1 - strength) + softLight(g, tg) * strength);
+                  b = Math.round(b * (1 - strength) + softLight(b, tb) * strength);
+                } else {
+                  r = Math.round(r * (1 - strength) + tr * strength);
+                  g = Math.round(g * (1 - strength) + tg * strength);
+                  b = Math.round(b * (1 - strength) + tb * strength);
+                }
+              }
+              hd[pi] = r; hd[pi + 1] = g; hd[pi + 2] = b;
+            }
+          }
+        }
+        if (row % 5 === 0) {
+          setDlProgress(65 + Math.round((row / rows) * 25));
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      printCtx.putImageData(imgData, 0, 0);
+      setDlProgress(92);
+      setDlProgressMsg('Erstelle Datei...');
+
+      // Convert to blob and download
+      const mimeType = useFormat === 'png' ? 'image/png' : 'image/jpeg';
+      const quality = useFormat === 'png' ? undefined : 0.95;
+      const blob = await new Promise<Blob | null>(resolve => {
+        const timeout2 = setTimeout(() => resolve(null), 60000);
+        printCanvas!.toBlob(b => { clearTimeout(timeout2); resolve(b); }, mimeType, quality);
+      });
+      if (!blob) throw new Error('Datei-Erstellung fehlgeschlagen');
+
+      const filename = `mosaicprint-${printW}x${printH}-druckbereit.${useFormat === 'png' ? 'png' : 'jpg'}`;
+      const url = URL.createObjectURL(blob);
       const dlLink = document.createElement('a');
-      dlLink.href = downloadUrl;
+      dlLink.href = url;
       dlLink.download = filename;
       dlLink.style.display = 'none';
       document.body.appendChild(dlLink);
       dlLink.click();
-      setTimeout(() => { document.body.removeChild(dlLink); }, 2000);
-      setDlProgressMsg(`✓ Download gestartet: ${filename}`);
+      setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
+      setDlProgressMsg(`✓ Download gestartet: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
