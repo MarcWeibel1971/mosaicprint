@@ -276,8 +276,21 @@ async function renderMosaicClientSide(opts: {
   const snapCtx = snapCanvas.getContext('2d');
   if (snapshot && snapCtx) { snapCanvas.width = snapshot.width; snapCanvas.height = snapshot.height; snapCtx.putImageData(snapshot, 0, 0); }
 
-  // Draw tiles
+  // Draw tiles with per-tile LAB color transfer (matches preview quality)
   const total = cols * rows;
+  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  const histBlend = algoSettings.histogramBlend ?? 0.0;
+  const blendFactor = Math.min(1.0, histBlend / 0.10);
+  const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
+  const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
+  const MAX_COLOR_SHIFT = 18;
+  const MAX_BLUE_SHIFT = 10;
+
+  // Offscreen buffer canvas for per-tile LAB processing
+  const bCanvas = document.createElement('canvas');
+  bCanvas.width = actualTile; bCanvas.height = actualTile;
+  const bCtx = bCanvas.getContext('2d')!;
+
   for (let ci = 0; ci < total; ci++) {
     const col = ci % cols, row = Math.floor(ci / cols);
     const x = col * actualTile, y = row * actualTile;
@@ -287,32 +300,94 @@ async function renderMosaicClientSide(opts: {
     const hiImg = reloadedImg || hiResImgs[idx];
     const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
     const rot = rotations[ci] || 0;
-    let drawn = false;
+    const tci = ci * 3;
+    const tR = tc.length > tci+2 ? tc[tci] : 128;
+    const tG = tc.length > tci+2 ? tc[tci+1] : 128;
+    const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
+    const [tL, tA, tB] = rgbToLab(tR, tG, tBv);
+
     if (img && img.complete && img.naturalWidth > 0) {
       try {
-        if (rot === 0) { ctx.drawImage(img, x, y, actualTile, actualTile); }
-        else { ctx.save(); ctx.translate(x + actualTile/2, y + actualTile/2); ctx.rotate(rot * Math.PI/2); ctx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); ctx.restore(); }
-        drawn = true;
-      } catch { /* fallback below */ }
-    }
-    if (!drawn) {
-      // Fallback: use target color (solid fill) instead of snapshot.
-      // Snapshot fallback causes wrong-colored tiles because the snapshot uses origTilePx coordinates
-      // which may not align with the current tilePx scale. A solid target color is less noticeable.
-      const ti = ci*3;
-      ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#888';
+        // Draw tile to offscreen buffer for pixel manipulation
+        bCtx.clearRect(0, 0, actualTile, actualTile);
+        if (rot === 0) { bCtx.drawImage(img, 0, 0, actualTile, actualTile); }
+        else { bCtx.save(); bCtx.translate(actualTile/2, actualTile/2); bCtx.rotate(rot * Math.PI/2); bCtx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); bCtx.restore(); }
+
+        // Per-tile LAB color transfer (same as preview rendering)
+        const isShadowZone = tL < 40;
+        const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
+        const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+
+        const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
+        const td = tilePixels.data;
+        // Compute tile average L
+        let sumL = 0;
+        const pCount = td.length / 4;
+        for (let pi = 0; pi < td.length; pi += 4) {
+          sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+        }
+        const avgL = sumL / pCount;
+        const rawLumScale = avgL > 1 ? tL / avgL : 1;
+        const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
+        const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
+        const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+        const outData = new Uint8ClampedArray(td.length);
+        for (let pi = 0; pi < td.length; pi += 4) {
+          const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+          let newL = Math.max(0, Math.min(100, pl * lumScale));
+          if (isShadowZone && shadowBoost > 0.05) {
+            const deviation = pl - avgL;
+            const stretchFactor = 1.0 + shadowBoost * 0.4;
+            newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+          }
+          if (isShadowZone && newL > tL + 25) {
+            newL = tL + 25 + (newL - tL - 25) * 0.2;
+          }
+          const rawDeltaA = (tA - pa) * AB_BLEND;
+          const rawDeltaB = (tB - pb) * AB_BLEND;
+          const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+          const clampedDeltaB = rawDeltaB < 0
+            ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
+            : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+          const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+          const newBv = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+          const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+          const satBoost = 0.90 + cBoost * 0.15;
+          const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+          const bSatBoost = newBv < 0 ? Math.min(satBoost, 1.0) : satBoost;
+          const boostedB = Math.max(-128, Math.min(127, newBv * bSatBoost));
+          const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+          outData[pi]   = nr;
+          outData[pi+1] = ng;
+          outData[pi+2] = nb;
+          outData[pi+3] = td[pi+3];
+        }
+        const outImageData = bCtx.createImageData(actualTile, actualTile);
+        outImageData.data.set(outData);
+        bCtx.putImageData(outImageData, 0, 0);
+        ctx.drawImage(bCanvas, x, y, actualTile, actualTile);
+      } catch {
+        // Fallback: fill with target pixel color
+        ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
+        ctx.fillRect(x, y, actualTile, actualTile);
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} LAB transfer failed, using target color`);
+        }
+      }
+    } else {
+      // Fallback: use target color
+      ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
       ctx.fillRect(x, y, actualTile, actualTile);
-      // Log failed tiles for debugging
       if (process.env.NODE_ENV !== 'production') {
         console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
       }
     }
-    if (ci % 500 === 0) { onProgress?.(15 + Math.round((ci/total)*40), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+    if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
   }
 
-  // Apply contrast + soft-light overlay
-  onProgress?.(58, 'Farbkorrektur...');
-  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  // Apply adaptive edge-based overlay (same as preview)
+  onProgress?.(72, 'Overlay anwenden...');
   const BASE_OL = algoSettings.baseOverlay ?? 0.15;
   const EDGE_B = algoSettings.edgeBoost ?? 0.20;
   const olMode = algoSettings.overlayMode ?? 'softlight';
@@ -332,17 +407,15 @@ async function renderMosaicClientSide(opts: {
       const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
       for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
         const pi = (py*W + px)*4;
-        let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi]-128)*cBoost)));
-        let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+1]-128)*cBoost)));
-        let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+2]-128)*cBoost)));
         if (str > 0.01) {
+          let r = hd[pi], g = hd[pi+1], b = hd[pi+2];
           if (olMode === 'softlight') { r = Math.round(r*(1-str)+sl(r,tr)*str); g = Math.round(g*(1-str)+sl(g,tg)*str); b = Math.round(b*(1-str)+sl(b,tb2)*str); }
           else { r = Math.round(r*(1-str)+tr*str); g = Math.round(g*(1-str)+tg*str); b = Math.round(b*(1-str)+tb2*str); }
+          hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
         }
-        hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
       }
     }
-    if (row % 5 === 0) { onProgress?.(58 + Math.round((row/rows)*32), 'Farbkorrektur...'); await new Promise(r => setTimeout(r, 0)); }
+    if (row % 5 === 0) { onProgress?.(72 + Math.round((row/rows)*18), 'Overlay...'); await new Promise(r => setTimeout(r, 0)); }
   }
   ctx.putImageData(imgData, 0, 0);
   onProgress?.(92, 'Erstelle Datei...');
