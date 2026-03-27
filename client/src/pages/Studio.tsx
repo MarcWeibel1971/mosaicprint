@@ -187,37 +187,46 @@ async function renderMosaicClientSide(opts: {
   }
   console.log(`[PrintRender] ${uniqueIdxs.length} unique tiles, ${missingCount} missing (GC'd)`);
 
-  // Re-load missing tiles from server (/api/tile/:id)
-  if (missingCount > 0) {
-    onProgress?.(3, `${missingCount} Tiles werden nachgeladen...`);
-    const reloadedImgs: Record<number, HTMLImageElement> = {};
-    const BATCH = 20;
-    const missingArr = [...missingIdxs];
+  // HI-RES RELOAD: For print quality, always reload DB tiles at the target print resolution.
+  // The validImgs array contains 64px thumbnails (loaded during mosaic creation for speed).
+  // Upscaling 64px → 400px produces blurry/gray output. We must reload at tilePx resolution.
+  // Only reload DB tiles (positive IDs); user-uploaded tiles (negative IDs) stay as-is.
+  const hiResReloadMap: Record<number, HTMLImageElement> = {};
+  const hiResNeeded = uniqueIdxs.filter(idx => {
+    const dbId = tileIds[idx];
+    if (!dbId || dbId <= 0) return false; // skip user tiles
+    const hiImg = hiResImgs[idx];
+    if (hiImg && hiImg.complete && hiImg.naturalWidth >= tilePx * 0.8) return false; // already hi-res
+    const img = validImgs[idx];
+    // Reload if: missing, or current image is smaller than 80% of target tilePx
+    return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < tilePx * 0.8;
+  });
+  console.log(`[PrintRender] Hi-res reload needed: ${hiResNeeded.length}/${uniqueIdxs.length} tiles (tilePx=${tilePx})`);
+  if (hiResNeeded.length > 0) {
+    const RELOAD_SIZE = Math.min(400, Math.max(128, tilePx));
+    onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
+    const BATCH = 30;
     let loaded = 0;
-    for (let i = 0; i < missingArr.length; i += BATCH) {
-      const batch = missingArr.slice(i, i + BATCH);
+    for (let i = 0; i < hiResNeeded.length; i += BATCH) {
+      const batch = hiResNeeded.slice(i, i + BATCH);
       await Promise.all(batch.map(async (idx) => {
         const dbId = tileIds[idx];
-        if (!dbId || dbId <= 0) return; // user-uploaded tiles can't be reloaded
         try {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           await new Promise<void>((resolve, reject) => {
             img.onload = () => resolve();
             img.onerror = () => reject(new Error('load failed'));
-            img.src = `/api/tile/${dbId}?size=${Math.min(256, tilePx)}`;
+            img.src = `/api/tile/${dbId}?size=${RELOAD_SIZE}`;
           });
-          reloadedImgs[idx] = img;
+          hiResReloadMap[idx] = img;
           loaded++;
-        } catch { /* tile stays missing */ }
+        } catch { /* keep existing thumbnail */ }
       }));
-      onProgress?.(3 + Math.round((loaded / missingCount) * 10), `Tiles nachladen: ${loaded}/${missingCount}`);
+      onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 10), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
+      await new Promise(r => setTimeout(r, 0));
     }
-    console.log(`[PrintRender] Reloaded ${loaded}/${missingCount} missing tiles from server`);
-    // Patch into validImgs array (mutates the ref — these tiles are now available)
-    for (const [idx, img] of Object.entries(reloadedImgs)) {
-      validImgs[Number(idx)] = img;
-    }
+    console.log(`[PrintRender] Hi-res reloaded: ${loaded}/${hiResNeeded.length} tiles at ${RELOAD_SIZE}px`);
   }
 
   onProgress?.(15, 'Canvas erstellen...');
@@ -246,7 +255,9 @@ async function renderMosaicClientSide(opts: {
     const col = ci % cols, row = Math.floor(ci / cols);
     const x = col * actualTile, y = row * actualTile;
     const idx = assignment[ci];
-    const hiImg = hiResImgs[idx];
+    // Priority: hi-res reloaded > existing hiResImgs > validImgs (thumbnail)
+    const reloadedImg = hiResReloadMap[idx];
+    const hiImg = reloadedImg || hiResImgs[idx];
     const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
     const rot = rotations[ci] || 0;
     let drawn = false;
@@ -836,6 +847,43 @@ export default function Studio() {
         return;
       }
       const rotations = assignmentRotRef.current;
+      const tileIds = tileIdsRef.current;
+
+      // HI-RES RELOAD for zoom: reload DB tiles at actualTile resolution (CDN tiles are 128px,
+      // validImgs are 64px thumbnails — upscaling causes blur/gray)
+      const zoomHiResMap: Record<number, HTMLImageElement> = {};
+      const uniqueZoomIdxs = [...new Set(assignment)];
+      const zoomReloadNeeded = uniqueZoomIdxs.filter(idx => {
+        const dbId = tileIds[idx];
+        if (!dbId || dbId <= 0) return false;
+        const hi = hiResImgs[idx];
+        if (hi && hi.complete && hi.naturalWidth >= actualTile * 0.8) return false;
+        const img = validImgs[idx];
+        return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < actualTile * 0.8;
+      });
+      if (zoomReloadNeeded.length > 0) {
+        const ZOOM_SIZE = Math.min(256, Math.max(128, actualTile));
+        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles at ${ZOOM_SIZE}px for zoom`);
+        const ZBATCH = 30;
+        for (let i = 0; i < zoomReloadNeeded.length; i += ZBATCH) {
+          const batch = zoomReloadNeeded.slice(i, i + ZBATCH);
+          await Promise.all(batch.map(async (idx) => {
+            const dbId = tileIds[idx];
+            try {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              await new Promise<void>((resolve, reject) => {
+                img.onload = () => resolve();
+                img.onerror = () => reject();
+                img.src = `/api/tile/${dbId}?size=${ZOOM_SIZE}`;
+              });
+              zoomHiResMap[idx] = img;
+            } catch { /* keep existing */ }
+          }));
+          await new Promise(r => setTimeout(r, 0));
+        }
+        console.log(`[ClientHiRes] Zoom hi-res loaded: ${Object.keys(zoomHiResMap).length}/${zoomReloadNeeded.length}`);
+      }
 
       // Helper: extract tile region from original rendered canvas (snapshot) as fallback
       // This prevents gray patches when tile images are GC'd or broken
@@ -853,8 +901,9 @@ export default function Studio() {
         const x = col * actualTile;
         const y = row * actualTile;
         const tileIdx = assignment[ci];
-        // Prefer hi-res (512px) over thumbnail (64px) for sharper zoom
-        const hiImg = hiResImgs[tileIdx];
+        // Priority: zoom-reloaded hi-res > existing hiResImgs > validImgs (thumbnail)
+        const zoomReloaded = zoomHiResMap[tileIdx];
+        const hiImg = (zoomReloaded && zoomReloaded.complete && zoomReloaded.naturalWidth > 0) ? zoomReloaded : hiResImgs[tileIdx];
         const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
         const rot = rotations[ci] || 0;
 
