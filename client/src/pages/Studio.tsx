@@ -201,7 +201,7 @@ async function renderMosaicClientSide(opts: {
   console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles at ${RELOAD_SIZE}px`);
   if (hiResNeeded.length > 0) {
     onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
-    const BATCH = 40; // larger batches for faster desktop loading (was 8 – too slow for 2728 tiles)
+    const BATCH = 8; // small batches for reliable mobile loading
     let loaded = 0;
     let failed = 0;
     // Helper: load a single tile with up to 3 retries and 10s timeout each
@@ -256,24 +256,11 @@ async function renderMosaicClientSide(opts: {
 
   onProgress?.(15, 'Canvas erstellen...');
 
-  // iOS Safari hard limit: canvas.getContext('2d') returns null if width*height > 16,777,216 (16 MP).
-  // toBlob() also returns null above this limit. Cap tilePx on mobile to stay under 16 MP.
-  const isMobileDevice = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
-  const IOS_MAX_CANVAS_AREA = 16_000_000;
-  let safeTilePx = tilePx;
-  if (isMobileDevice) {
-    const maxTileForIOS = Math.floor(Math.sqrt(IOS_MAX_CANVAS_AREA / (cols * rows)));
-    if (safeTilePx > maxTileForIOS) {
-      console.warn(`[PrintRender] Mobile: tilePx=${tilePx} exceeds iOS limit, capping to ${maxTileForIOS}px (${cols}x${rows} grid, max ${(IOS_MAX_CANVAS_AREA/1e6).toFixed(0)}MP)`);
-      safeTilePx = maxTileForIOS;
-    }
-  }
-
   // Create canvas with progressive fallback
   let canvas: HTMLCanvasElement | null = null;
   let ctx: CanvasRenderingContext2D | null = null;
-  let actualTile = safeTilePx;
-  for (const tryTile of [safeTilePx, Math.floor(safeTilePx * 0.75), Math.floor(safeTilePx * 0.5), 64]) {
+  let actualTile = tilePx;
+  for (const tryTile of [tilePx, Math.floor(tilePx * 0.75), Math.floor(tilePx * 0.5), 64]) {
     const c = document.createElement('canvas');
     c.width = cols * tryTile; c.height = rows * tryTile;
     const cx = c.getContext('2d');
@@ -705,12 +692,10 @@ export default function Studio() {
     setProgress(5);
 
     const { cols, rows } = mosaicParamsRef.current;
-    // Mobile: server renders on Railway (no iOS canvas limit!). The result is a JPEG blob
-    // displayed as <img> – iOS Safari can display images of any size.
-    // Use 8192px max for mobile (gives ~154px/tile for 40x53 grid → sharp zoom).
-    // Desktop: allow up to 12000px for maximum sharpness.
+    // Mobile: limit output to ~16 MP (4096px max dimension) to prevent iOS Safari OOM crash
+    // Desktop: allow up to 12000px for sharp zoom
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const maxDim = isMob ? 8192 : 12000;
+    const maxDim = isMob ? 4096 : 12000;
     const ZOOM_TILE_PX = Math.min(256, Math.floor(maxDim / Math.max(cols, rows)));
     console.log(`[HiRes] Server render: ${cols}x${rows} @ ${ZOOM_TILE_PX}px = ${cols*ZOOM_TILE_PX}x${rows*ZOOM_TILE_PX} (mobile=${isMob})`);
     const zoomJobId = `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -784,8 +769,7 @@ export default function Studio() {
       if (!imgResp.ok) throw new Error('Download failed');
       const blob = await imgResp.blob();
       // Safety: check blob size – if too large for mobile, skip (will fall back to client render)
-      // 50 MB allows ~50 MP JPEG at q=0.85 (typical mosaic: 10-20 MB)
-      const MAX_BLOB_MB = isMob ? 50 : 100;
+      const MAX_BLOB_MB = isMob ? 15 : 100;
       if (blob.size > MAX_BLOB_MB * 1024 * 1024) {
         console.warn(`[HiRes] Blob too large for mobile: ${(blob.size/1024/1024).toFixed(1)}MB > ${MAX_BLOB_MB}MB`);
         throw new Error(`Image too large: ${(blob.size/1024/1024).toFixed(1)}MB`);
@@ -845,16 +829,14 @@ export default function Studio() {
     // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
     // Desktop can handle much larger canvases (up to ~268 MP).
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    // iOS Safari hard limit: canvas.getContext('2d') returns null if width*height > 16,777,216 (16 MP).
-    // toBlob() also returns null above this limit. We must stay under 16 MP on mobile.
-    // Desktop: 200 MP is fine (Chrome/Firefox handle large canvases well).
-    const maxCanvasArea = isMob ? 16_000_000 : 200_000_000; // 16 MP mobile (iOS Safari limit), 200 MP desktop
-    const maxCanvasDim = isMob ? 4096 : 16000;
+    // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
+    // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
+    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
+    const maxCanvasDim = isMob ? 8192 : 16000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    // Mobile: use largest tile that fits within iOS 16 MP limit
-    // For 40x53 grid: maxTileFromArea = sqrt(16MP/2120) = 86px
-    const idealMobileTile = Math.min(128, maxTileFromArea, maxTileFromDim);
+    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
+    const idealMobileTile = 128;
     const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
@@ -1087,10 +1069,7 @@ export default function Studio() {
         hrCtx!.putImageData(hrImageData, 0, 0);
       }
 
-      // 3. Convert to image URL
-      // On iOS Safari, toBlob() returns null for canvases > 16 MP.
-      // Fallback: use toDataURL (synchronous, works on all canvas sizes iOS supports).
-      let hiResUrl: string | null = null;
+      // 3. Convert to blob URL (with timeout for mobile)
       const blob = await new Promise<Blob | null>(resolve => {
         const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 45000);
         try {
@@ -1099,32 +1078,14 @@ export default function Studio() {
       });
 
       if (blob) {
-        console.log(`[ClientHiRes] Success (blob): ${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
+        console.log(`[ClientHiRes] Success: blob=${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
         if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
-        hiResUrl = URL.createObjectURL(blob);
-        hiResImgUrlRef.current = hiResUrl;
-      } else {
-        // Fallback: toDataURL (synchronous, works when toBlob fails on iOS)
-        try {
-          const dataUrl = hrCanvas!.toDataURL('image/jpeg', isMob ? 0.85 : 0.92);
-          if (dataUrl && dataUrl.length > 100) {
-            console.log(`[ClientHiRes] Success (dataURL): tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
-            if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
-            hiResUrl = dataUrl;
-            hiResImgUrlRef.current = null; // dataURL, no revoke needed
-          } else {
-            console.error('[ClientHiRes] Both toBlob and toDataURL failed');
-          }
-        } catch (e2) {
-          console.error('[ClientHiRes] toDataURL error:', e2);
-        }
-      }
-
-      if (hiResUrl) {
-        setHiResImgUrl(hiResUrl);
+        const url = URL.createObjectURL(blob);
+        hiResImgUrlRef.current = url;
+        setHiResImgUrl(url);
         setHiResReady(true);
       } else {
-        console.error('[ClientHiRes] No hi-res URL generated');
+        console.error('[ClientHiRes] toBlob returned null');
       }
     } catch (e) {
       console.error('[ClientHiRes] Failed:', e);
@@ -4329,14 +4290,8 @@ export default function Studio() {
     let tileUrl = '';
     const tileId = tileIdsRef.current[tileIdx];
     if (tileId && tileId > 0) {
-      // DB tile – prefer direct CDN URL (fast, no proxy latency), fall back to server proxy
-      // tileUrlIndexRef maps tileId -> R2 CDN URL (128px, already sharp for the modal)
-      const cdnUrl = tileUrlIndexRef.current?.[String(tileId)];
-      if (cdnUrl) {
-        tileUrl = cdnUrl; // direct CDN: no proxy latency, always loads
-      } else {
-        tileUrl = `/api/tile/${tileId}?size=400`; // server proxy fallback
-      }
+      // DB tile – load from server at high resolution (400px = 1cm @ 400 PPI, scharf im Detail-Modal)
+      tileUrl = `/api/tile/${tileId}?size=400`;
     } else {
       // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
@@ -4871,82 +4826,20 @@ export default function Studio() {
         return;
       }
 
-      // PRINT RENDER: On mobile, use server-side rendering to bypass iOS Safari's 16 MP canvas limit.
-      // The server (Railway) has no canvas limits and can render at full 400px tile quality.
-      // On desktop, render client-side (faster, no server round-trip needed).
-      const isMobPrint = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-      const useServerPrint = isMobPrint && canDoHiRes();
+      // CLIENT-SIDE PRINT RENDER: renders locally using loaded tile images (no server needed)
       try {
         setDlLoading(true);
+        setDlProgressMsg(`Rendere Druckqualitaet lokal...`);
+        setDlProgress(5);
 
-        let printBlob: Blob;
-        let printFilename: string;
-
-        if (useServerPrint) {
-          // SERVER-SIDE PRINT RENDER: use /api/print-render (no iOS canvas limit)
-          setDlProgressMsg(`Server rendert Druckqualität (${PRINT_TILE_PX}px Tiles)...`);
-          setDlProgress(3);
-          const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-          const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-          // Mobile: allow up to 120s for server render (large mosaics take time)
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 120000);
-          const resp = await fetch('/api/print-render', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              tileIds: tileIdsRef.current,
-              assignment: assignmentRef.current,
-              cols, rows,
-              tilePx: PRINT_TILE_PX,
-              format: 'jpg',
-              jobId: printJobId,
-              overlayMode: algoSettings.overlayMode ?? 'softlight',
-              baseOverlay: algoSettings.baseOverlay ?? 0.15,
-              edgeBoost: algoSettings.edgeBoost ?? 0.20,
-              targetColors: targetColorsRef.current,
-              edgeMap: edgeMapRef.current,
-              faceMask: faceMaskRef.current,
-            }),
-          });
-          clearTimeout(timeoutId);
-          if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-          const acceptedData = await resp.json();
-          if (!acceptedData.accepted) throw new Error('Server did not accept job');
-          setDlProgress(8);
-          setDlProgressMsg('Druckqualität wird server-seitig gerendert...');
-          // Poll for completion
-          const prtResult = await pollForResult(
-            printJobId,
-            (p) => setDlProgress(Math.max(8, Math.min(85, p))),
-            (m) => setDlProgressMsg(m),
-          );
-          setDlProgress(88);
-          setDlProgressMsg('Lade Druckdatei...');
-          const dlController = new AbortController();
-          const dlTimeout = setTimeout(() => dlController.abort(), 60000);
-          const imgResp = await fetch(`/api/print-download/${prtResult.token}`, { signal: dlController.signal });
-          clearTimeout(dlTimeout);
-          if (!imgResp.ok) throw new Error('Download failed');
-          printBlob = await imgResp.blob();
-          printFilename = prtResult.filename || `mosaicprint-${cols*PRINT_TILE_PX}x${rows*PRINT_TILE_PX}-druckbereit.jpg`;
-          setDlProgress(95);
-        } else {
-          // CLIENT-SIDE PRINT RENDER: renders locally using loaded tile images (desktop)
-          setDlProgressMsg(`Rendere Druckqualität lokal...`);
-          setDlProgress(5);
-          const result = await renderMosaicClientSide({
-            cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
-            assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
-            validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
-            snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
-            targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
-            onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
-          });
-          printBlob = result.blob;
-          printFilename = result.filename;
-        }
+        const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
+          cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
+          assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
+          validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+          snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+          targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+          onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
+        });
 
         const printUrl = URL.createObjectURL(printBlob);
         const dlLink = document.createElement('a');
