@@ -256,11 +256,24 @@ async function renderMosaicClientSide(opts: {
 
   onProgress?.(15, 'Canvas erstellen...');
 
+  // iOS Safari hard limit: canvas.getContext('2d') returns null if width*height > 16,777,216 (16 MP).
+  // toBlob() also returns null above this limit. Cap tilePx on mobile to stay under 16 MP.
+  const isMobileDevice = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
+  const IOS_MAX_CANVAS_AREA = 16_000_000;
+  let safeTilePx = tilePx;
+  if (isMobileDevice) {
+    const maxTileForIOS = Math.floor(Math.sqrt(IOS_MAX_CANVAS_AREA / (cols * rows)));
+    if (safeTilePx > maxTileForIOS) {
+      console.warn(`[PrintRender] Mobile: tilePx=${tilePx} exceeds iOS limit, capping to ${maxTileForIOS}px (${cols}x${rows} grid, max ${(IOS_MAX_CANVAS_AREA/1e6).toFixed(0)}MP)`);
+      safeTilePx = maxTileForIOS;
+    }
+  }
+
   // Create canvas with progressive fallback
   let canvas: HTMLCanvasElement | null = null;
   let ctx: CanvasRenderingContext2D | null = null;
-  let actualTile = tilePx;
-  for (const tryTile of [tilePx, Math.floor(tilePx * 0.75), Math.floor(tilePx * 0.5), 64]) {
+  let actualTile = safeTilePx;
+  for (const tryTile of [safeTilePx, Math.floor(safeTilePx * 0.75), Math.floor(safeTilePx * 0.5), 64]) {
     const c = document.createElement('canvas');
     c.width = cols * tryTile; c.height = rows * tryTile;
     const cx = c.getContext('2d');
@@ -829,14 +842,16 @@ export default function Studio() {
     // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
     // Desktop can handle much larger canvases (up to ~268 MP).
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
-    // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
-    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
-    const maxCanvasDim = isMob ? 8192 : 16000;
+    // iOS Safari hard limit: canvas.getContext('2d') returns null if width*height > 16,777,216 (16 MP).
+    // toBlob() also returns null above this limit. We must stay under 16 MP on mobile.
+    // Desktop: 200 MP is fine (Chrome/Firefox handle large canvases well).
+    const maxCanvasArea = isMob ? 16_000_000 : 200_000_000; // 16 MP mobile (iOS Safari limit), 200 MP desktop
+    const maxCanvasDim = isMob ? 4096 : 16000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
-    const idealMobileTile = 128;
+    // Mobile: use largest tile that fits within iOS 16 MP limit
+    // For 40x53 grid: maxTileFromArea = sqrt(16MP/2120) = 86px
+    const idealMobileTile = Math.min(128, maxTileFromArea, maxTileFromDim);
     const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
@@ -1069,7 +1084,10 @@ export default function Studio() {
         hrCtx!.putImageData(hrImageData, 0, 0);
       }
 
-      // 3. Convert to blob URL (with timeout for mobile)
+      // 3. Convert to image URL
+      // On iOS Safari, toBlob() returns null for canvases > 16 MP.
+      // Fallback: use toDataURL (synchronous, works on all canvas sizes iOS supports).
+      let hiResUrl: string | null = null;
       const blob = await new Promise<Blob | null>(resolve => {
         const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 45000);
         try {
@@ -1078,14 +1096,32 @@ export default function Studio() {
       });
 
       if (blob) {
-        console.log(`[ClientHiRes] Success: blob=${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
+        console.log(`[ClientHiRes] Success (blob): ${(blob.size/1024).toFixed(0)}KB, tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
         if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
-        const url = URL.createObjectURL(blob);
-        hiResImgUrlRef.current = url;
-        setHiResImgUrl(url);
+        hiResUrl = URL.createObjectURL(blob);
+        hiResImgUrlRef.current = hiResUrl;
+      } else {
+        // Fallback: toDataURL (synchronous, works when toBlob fails on iOS)
+        try {
+          const dataUrl = hrCanvas!.toDataURL('image/jpeg', isMob ? 0.85 : 0.92);
+          if (dataUrl && dataUrl.length > 100) {
+            console.log(`[ClientHiRes] Success (dataURL): tile=${actualTile}px, canvas=${hrCanvas!.width}×${hrCanvas!.height}`);
+            if (hiResImgUrlRef.current) URL.revokeObjectURL(hiResImgUrlRef.current);
+            hiResUrl = dataUrl;
+            hiResImgUrlRef.current = null; // dataURL, no revoke needed
+          } else {
+            console.error('[ClientHiRes] Both toBlob and toDataURL failed');
+          }
+        } catch (e2) {
+          console.error('[ClientHiRes] toDataURL error:', e2);
+        }
+      }
+
+      if (hiResUrl) {
+        setHiResImgUrl(hiResUrl);
         setHiResReady(true);
       } else {
-        console.error('[ClientHiRes] toBlob returned null');
+        console.error('[ClientHiRes] No hi-res URL generated');
       }
     } catch (e) {
       console.error('[ClientHiRes] Failed:', e);
