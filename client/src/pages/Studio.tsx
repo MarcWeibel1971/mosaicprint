@@ -4023,9 +4023,16 @@ export default function Studio() {
     const popContainer = popOutContainerRef.current;
     if (!snapshot || !params || !popContainer) return;
     const { cols, rows, tilePx } = params;
-    const gap = Math.max(1, Math.round(tilePx * 0.12)); // 12% gap
+    const displayScale = (params as any)._displayScale || 1;
+    const gap = Math.max(1, Math.round(tilePx * 0.12)); // 12% gap between tiles
+    // Internal pixel dimensions
     const outW = cols * (tilePx + gap) + gap;
     const outH = rows * (tilePx + gap) + gap;
+    // CSS display dimensions (matching how the normal canvas is sized)
+    const cssW = Math.round(outW * displayScale);
+    const cssH = Math.round(outH * displayScale);
+    const cssTilePx = tilePx * displayScale;
+    const cssGap = gap * displayScale;
 
     // Create source canvas from snapshot
     const srcCanvas = document.createElement('canvas');
@@ -4035,10 +4042,11 @@ export default function Studio() {
 
     // Clear previous tiles
     popContainer.innerHTML = '';
-    popContainer.style.width = `${outW}px`;
-    popContainer.style.height = `${outH}px`;
+    popContainer.style.width = `${cssW}px`;
+    popContainer.style.height = `${cssH}px`;
     popContainer.style.background = '#1a1a1a';
     popContainer.style.position = 'relative';
+    popContainer.style.overflow = 'visible';
 
     // Create individual tile canvases that GSAP can animate
     for (let row = 0; row < rows; row++) {
@@ -4049,9 +4057,12 @@ export default function Studio() {
         tileCanvas.className = 'pop-wave-tile';
         const tCtx = tileCanvas.getContext('2d')!;
         tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, tilePx, tilePx);
-        const dx = gap + col * (tilePx + gap);
-        const dy = gap + row * (tilePx + gap);
-        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${tilePx}px;height:${tilePx}px;transform-origin:center center;will-change:transform;box-shadow:${Math.max(1, Math.round(tilePx * 0.04))}px ${Math.max(1, Math.round(tilePx * 0.06))}px ${Math.max(2, Math.round(tilePx * 0.15))}px rgba(0,0,0,0.45);border-radius:1px;`;
+        const dx = cssGap + col * (cssTilePx + cssGap);
+        const dy = cssGap + row * (cssTilePx + cssGap);
+        const shadowX = Math.max(1, Math.round(cssTilePx * 0.04));
+        const shadowY = Math.max(1, Math.round(cssTilePx * 0.06));
+        const shadowBlur = Math.max(2, Math.round(cssTilePx * 0.15));
+        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${cssTilePx}px;height:${cssTilePx}px;transform-origin:center center;will-change:transform;box-shadow:${shadowX}px ${shadowY}px ${shadowBlur}px rgba(0,0,0,0.45);border-radius:1px;`;
         popContainer.appendChild(tileCanvas);
       }
     }
