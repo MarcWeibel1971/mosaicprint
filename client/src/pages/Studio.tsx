@@ -187,45 +187,52 @@ async function renderMosaicClientSide(opts: {
   }
   console.log(`[PrintRender] ${uniqueIdxs.length} unique tiles, ${missingCount} missing (GC'd)`);
 
-  // HI-RES RELOAD: For print quality, always reload DB tiles at the target print resolution.
-  // The validImgs array contains 64px thumbnails (loaded during mosaic creation for speed).
-  // Upscaling 64px → 400px produces blurry/gray output. We must reload at tilePx resolution.
-  // Only reload DB tiles (positive IDs); user-uploaded tiles (negative IDs) stay as-is.
+  // HI-RES RELOAD: For print quality, always reload ALL DB tiles at 400px.
+  // The validImgs array contains 64px thumbnails → must reload for sharp print output.
+  // Only skip user-uploaded tiles (negative IDs).
+  const RELOAD_SIZE = 400;
   const hiResReloadMap: Record<number, HTMLImageElement> = {};
+  // Always reload all DB tiles – do not skip based on existing img size
+  // (cached 64px thumbnails look fine in memory but produce blurry print output)
   const hiResNeeded = uniqueIdxs.filter(idx => {
     const dbId = tileIds[idx];
-    if (!dbId || dbId <= 0) return false; // skip user tiles
-    const hiImg = hiResImgs[idx];
-    if (hiImg && hiImg.complete && hiImg.naturalWidth >= tilePx * 0.8) return false; // already hi-res
-    const img = validImgs[idx];
-    // Reload if: missing, or current image is smaller than 80% of target tilePx
-    return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < tilePx * 0.8;
+    return dbId && dbId > 0; // reload all DB tiles, skip user tiles
   });
-  console.log(`[PrintRender] Hi-res reload needed: ${hiResNeeded.length}/${uniqueIdxs.length} tiles (tilePx=${tilePx})`);
+  console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles at ${RELOAD_SIZE}px`);
   if (hiResNeeded.length > 0) {
-    // Always reload at 400px for print quality. Use smaller batches to avoid overwhelming mobile.
-    const RELOAD_SIZE = 400;
     onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
-    const BATCH = 10; // smaller batches = more reliable on mobile Safari
+    const BATCH = 8; // small batches for reliable mobile loading
     let loaded = 0;
-    // Helper: load a single tile with 1 retry on failure
+    let failed = 0;
+    // Helper: load a single tile with up to 3 retries and 10s timeout each
     const loadTileWithRetry = (dbId: number, size: number): Promise<HTMLImageElement | null> =>
       new Promise(resolve => {
         const attempt = (retries: number) => {
           const img = new Image();
-          // No crossOrigin needed: /api/tile is same-origin, avoids CORS cache issues on iOS
           const timeout = setTimeout(() => {
             img.onload = img.onerror = null;
-            if (retries > 0) { attempt(retries - 1); } else { resolve(null); }
-          }, 8000);
-          img.onload = () => { clearTimeout(timeout); resolve(img); };
+            console.warn(`[PrintRender] Tile ${dbId} timeout (${3 - retries + 1}/3)`);
+            if (retries > 0) { setTimeout(() => attempt(retries - 1), 300); } else { resolve(null); }
+          }, 10000);
+          img.onload = () => {
+            clearTimeout(timeout);
+            // Validate: reject suspiciously small images (failed loads sometimes return 1x1 error imgs)
+            if (img.naturalWidth < 10 || img.naturalHeight < 10) {
+              console.warn(`[PrintRender] Tile ${dbId} returned tiny image ${img.naturalWidth}x${img.naturalHeight}`);
+              if (retries > 0) { setTimeout(() => attempt(retries - 1), 300); } else { resolve(null); }
+            } else {
+              resolve(img);
+            }
+          };
           img.onerror = () => {
             clearTimeout(timeout);
+            console.warn(`[PrintRender] Tile ${dbId} error (${3 - retries + 1}/3)`);
             if (retries > 0) { setTimeout(() => attempt(retries - 1), 500); } else { resolve(null); }
           };
-          img.src = `/api/tile/${dbId}?size=${size}&t=${Date.now()}`; // cache-bust to avoid stale 64px version
+          // cache-bust: force fresh load at correct size, avoid stale 64px cached version
+          img.src = `/api/tile/${dbId}?size=${size}&t=${Date.now()}`;
         };
-        attempt(1);
+        attempt(2); // up to 3 attempts total
       });
     for (let i = 0; i < hiResNeeded.length; i += BATCH) {
       const batch = hiResNeeded.slice(i, i + BATCH);
@@ -233,15 +240,18 @@ async function renderMosaicClientSide(opts: {
         const dbId = tileIds[idx];
         if (!dbId || dbId <= 0) return;
         const img = await loadTileWithRetry(dbId, RELOAD_SIZE);
-        if (img && img.naturalWidth > 0) {
+        if (img && img.naturalWidth >= 10) {
           hiResReloadMap[idx] = img;
           loaded++;
+        } else {
+          failed++;
+          console.error(`[PrintRender] FAILED to load tile ${dbId} after 3 retries`);
         }
       }));
-      onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 10), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
+      onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 12), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
       await new Promise(r => setTimeout(r, 0));
     }
-    console.log(`[PrintRender] Hi-res reloaded: ${loaded}/${hiResNeeded.length} tiles at ${RELOAD_SIZE}px`);
+    console.log(`[PrintRender] Hi-res done: ${loaded} loaded, ${failed} failed out of ${hiResNeeded.length}`);
   }
 
   onProgress?.(15, 'Canvas erstellen...');
@@ -284,8 +294,16 @@ async function renderMosaicClientSide(opts: {
       } catch { /* fallback below */ }
     }
     if (!drawn) {
-      try { ctx.drawImage(snapCanvas, col*origTilePx, row*origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile); }
-      catch { const ti = ci*3; ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc'; ctx.fillRect(x, y, actualTile, actualTile); }
+      // Fallback: use target color (solid fill) instead of snapshot.
+      // Snapshot fallback causes wrong-colored tiles because the snapshot uses origTilePx coordinates
+      // which may not align with the current tilePx scale. A solid target color is less noticeable.
+      const ti = ci*3;
+      ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#888';
+      ctx.fillRect(x, y, actualTile, actualTile);
+      // Log failed tiles for debugging
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
+      }
     }
     if (ci % 500 === 0) { onProgress?.(15 + Math.round((ci/total)*40), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
   }
