@@ -356,16 +356,14 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
 // rgbToLab, toLinear, deltaE2000: importiert aus ../lib/colorUtils.ts (keine lokalen Duplikate)
 
 // Printolino-konforme Druckformate
-// Pixelgroesse bei 300 dpi: px = cm x (300 / 2.54) = cm x 118.11
-// 300 DPI ist der Standard fuer hochwertige Fotoprodukte (Leinwand, Alu-Dibond)
-// Tile-Groesse fuer Druckqualitaet: 300px pro Tile (aus source_url geladen)
+// Pixelgroesse bei 400 dpi (Ultra HD Druckqualitaet): px = cm x (400 / 2.54) = cm x 157.48
+// 400 DPI = 1 Kachel pro cm bei 157px Kachelgroesse → optimale Druckschaerfe
+// Kleinste sinnvolle Kachelgroesse: 40x40cm (darunter sind einzelne Kacheln zu klein)
 const PRINT_FORMATS = [
-  { label: "20x20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 300, pxW: 2362, pxH: 2362 },
-  { label: "30x30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 300, pxW: 3543, pxH: 3543 },
-  { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 300, pxW: 4724, pxH: 4724 },
-  { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 300, pxW: 5906, pxH: 8268 },
-  { label: "70x70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 300, pxW: 8268, pxH: 8268 },
-  { label: "100x100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 300, pxW: 11811, pxH: 11811 },
+  { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 400, pxW: 6299, pxH: 6299 },
+  { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 400, pxW: 7874, pxH: 11024 },
+  { label: "70x70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 400, pxW: 11024, pxH: 11024 },
+  { label: "100x100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 400, pxW: 15748, pxH: 15748 },
 ];
 
 const MATERIALS = [
@@ -383,7 +381,7 @@ const MATERIALS = [
 const DIGITAL_FORMATS = [
   { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
   { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 100, price: 19, format: 'jpg' as const },
-  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 160, price: 29, format: 'jpg' as const },
+  { label: "Ultra HD", desc: "Maximale Auflösung (1cm@400PPI)", tilePx: 157, price: 29, format: 'jpg' as const },
   { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 128, price: 39, format: 'png' as const },
 ];
 
@@ -412,7 +410,7 @@ export default function Studio() {
   const [distancePreview, setDistancePreview] = useState(false); // Simulate 2-3m viewing distance
   const [comparePos, setComparePos] = useState(50);
   const [popOutMode, setPopOutMode] = useState(false);
-  const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
+  const [selectedFormat, setSelectedFormat] = useState(0); // 40x40 default (smallest available)
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
 
   // Tile source mode: 'pool' = our DB only (default), 'own' = user photos only, 'mix' = user + DB
@@ -4273,8 +4271,8 @@ export default function Studio() {
     let tileUrl = '';
     const tileId = tileIdsRef.current[tileIdx];
     if (tileId && tileId > 0) {
-      // DB tile – load from server at high resolution
-      tileUrl = `/api/tile/${tileId}?size=256`;
+      // DB tile – load from server at high resolution (400px = 1cm @ 400 PPI, scharf im Detail-Modal)
+      tileUrl = `/api/tile/${tileId}?size=400`;
     } else {
       // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
@@ -4676,10 +4674,10 @@ export default function Studio() {
 
     if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
       const { cols, rows } = mosaicParamsRef.current;
-      const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
+      const PX_PER_CM = 400 / 2.54; // = 157.48 px/cm at 400 DPI (Ultra HD: 1 Kachel = 1cm @ 400 PPI)
       const tileSizeCm = fmt.widthCm / cols;
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max available from API)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
       console.log(`[Print] Format: ${fmt.label}, cols=${cols}, rows=${rows}, naturalTilePx=${naturalTilePx}, PRINT_TILE_PX=${PRINT_TILE_PX}, output=${printOutW}x${printOutH}px`);
@@ -4996,10 +4994,10 @@ export default function Studio() {
     setPrintolinoLoading(true);
     try {
       // 1. Calculate tilePx for the print format (matching handleDownload logic)
-      const PX_PER_CM = 300 / 2.54;
+      const PX_PER_CM = 400 / 2.54; // 400 DPI = 1 Kachel pro cm bei 157px
       const tileSizeCm = fmt.widthCm / cols;
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max API)
       const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
       // 2. Create order in DB with render params
@@ -6087,7 +6085,7 @@ export default function Studio() {
                   const fmt = PRINT_FORMATS[selectedFormat];
                   const cols = mosaicParamsRef.current?.cols ?? 60;
                   const rows = mosaicParamsRef.current?.rows ?? 80;
-                  const PX_PER_CM = 300 / 2.54;
+                  const PX_PER_CM = 400 / 2.54; // 400 DPI Ultra HD
                   const tileSizeCm = fmt.widthCm / cols;
                   const tileMm = Math.round(tileSizeCm * 10);
                   const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
