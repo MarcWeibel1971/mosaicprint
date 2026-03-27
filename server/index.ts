@@ -150,8 +150,6 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     return null;
   }
 }
-  console.log(`[cache] Evicted 500 tile cache entries, size now: ${tileCacheMap.size}`);
-}
 
 // 3. Tile URL cache: maps tile id → {tile128_url, source_url} to avoid DB per request
 const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; ts: number }>();
