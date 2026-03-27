@@ -634,7 +634,7 @@ export default function Studio() {
   const isDragging = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
   const snapshotRef = useRef<ImageData | null>(null);
-  const popOutCanvasRef = useRef<HTMLCanvasElement>(null);
+  const popOutContainerRef = useRef<HTMLDivElement>(null);
   const popOutWaveTlRef = useRef<gsap.core.Timeline | null>(null);
   const compareDragging = useRef(false);
   // Store tile assignment for hi-res re-render
@@ -4159,78 +4159,58 @@ export default function Studio() {
   const renderPopOut = useCallback(() => {
     const snapshot = snapshotRef.current;
     const params = mosaicParamsRef.current;
-    const popCanvas = popOutCanvasRef.current;
-    if (!snapshot || !params || !popCanvas) return;
+    const popContainer = popOutContainerRef.current;
+    if (!snapshot || !params || !popContainer) return;
     const { cols, rows, tilePx } = params;
     const gap = Math.max(1, Math.round(tilePx * 0.12)); // 12% gap
     const outW = cols * (tilePx + gap) + gap;
     const outH = rows * (tilePx + gap) + gap;
-    popCanvas.width = outW;
-    popCanvas.height = outH;
-    const ctx = popCanvas.getContext('2d')!;
-    // Dark background visible through gaps
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, outW, outH);
+
     // Create source canvas from snapshot
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = snapshot.width;
     srcCanvas.height = snapshot.height;
     srcCanvas.getContext('2d')!.putImageData(snapshot, 0, 0);
-    // Draw each tile with shadow
-    ctx.shadowColor = 'rgba(0,0,0,0.45)';
-    ctx.shadowBlur = Math.max(2, Math.round(tilePx * 0.15));
-    ctx.shadowOffsetX = Math.max(1, Math.round(tilePx * 0.04));
-    ctx.shadowOffsetY = Math.max(1, Math.round(tilePx * 0.06));
+
+    // Clear previous tiles
+    popContainer.innerHTML = '';
+    popContainer.style.width = `${outW}px`;
+    popContainer.style.height = `${outH}px`;
+    popContainer.style.background = '#1a1a1a';
+    popContainer.style.position = 'relative';
+
+    // Create individual tile canvases that GSAP can animate
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const sx = col * tilePx, sy = row * tilePx;
-        const dx = gap + col * (tilePx + gap), dy = gap + row * (tilePx + gap);
-        ctx.drawImage(srcCanvas, sx, sy, tilePx, tilePx, dx, dy, tilePx, tilePx);
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = tilePx;
+        tileCanvas.height = tilePx;
+        tileCanvas.className = 'pop-wave-tile';
+        const tCtx = tileCanvas.getContext('2d')!;
+        tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, tilePx, tilePx);
+        const dx = gap + col * (tilePx + gap);
+        const dy = gap + row * (tilePx + gap);
+        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${tilePx}px;height:${tilePx}px;transform-origin:center center;will-change:transform;box-shadow:${Math.max(1, Math.round(tilePx * 0.04))}px ${Math.max(1, Math.round(tilePx * 0.06))}px ${Math.max(2, Math.round(tilePx * 0.15))}px rgba(0,0,0,0.45);border-radius:1px;`;
+        popContainer.appendChild(tileCanvas);
       }
     }
   }, []);
 
-  // Toggle pop-out: render/clear the overlay + GSAP Welleneffekt
+  // Toggle pop-out: render tiles + GSAP Welleneffekt
   useEffect(() => {
     if (popOutMode && ready) {
       renderPopOut();
-      // Kurze Verzögerung damit der Canvas sichtbar ist, dann Welleneffekt starten
+      // Kurze Verzögerung damit die Tiles gerendert sind, dann Welleneffekt starten
       setTimeout(() => {
-        const popCanvas = popOutCanvasRef.current;
-        if (!popCanvas) return;
+        const popContainer = popOutContainerRef.current;
+        if (!popContainer) return;
         const params = mosaicParamsRef.current;
         if (!params) return;
         const { cols, rows } = params;
-        // Erstelle ein transparentes Overlay-Grid für GSAP-Animation
-        const container = popCanvas.parentElement;
-        if (!container) return;
-        // Entferne altes Wave-Overlay falls vorhanden
-        const old = container.querySelector('.pop-wave-overlay');
-        if (old) old.remove();
-        const overlay = document.createElement('div');
-        overlay.className = 'pop-wave-overlay';
-        overlay.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;`;
-        // Erstelle Tile-Divs die über dem Canvas liegen (transparent, nur für GSAP-Transform)
-        const tileW = popCanvas.width / cols;
-        const tileH = popCanvas.height / rows;
-        const canvasRect = popCanvas.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const scaleX = canvasRect.width / popCanvas.width;
-        const scaleY = canvasRect.height / popCanvas.height;
-        for (let row = 0; row < rows; row++) {
-          for (let col = 0; col < cols; col++) {
-            const div = document.createElement('div');
-            div.className = 'pop-wave-tile';
-            const left = (canvasRect.left - containerRect.left) + col * tileW * scaleX;
-            const top = (canvasRect.top - containerRect.top) + row * tileH * scaleY;
-            div.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${tileW * scaleX}px;height:${tileH * scaleY}px;transform-origin:center center;will-change:transform;`;
-            overlay.appendChild(div);
-          }
-        }
-        container.appendChild(overlay);
-        // GSAP Welleneffekt starten
+        // GSAP Welleneffekt auf die echten Tile-Canvases
         if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); }
-        const tiles = overlay.querySelectorAll('.pop-wave-tile');
+        const tiles = popContainer.querySelectorAll('.pop-wave-tile');
+        if (tiles.length === 0) return;
         popOutWaveTlRef.current = gsap.timeline({ repeat: -1, repeatDelay: 1.2 })
           .to(tiles, {
             scale: 1.15,
@@ -4246,13 +4226,10 @@ export default function Studio() {
           }, '+=0.2');
       }, 80);
     } else {
-      // Pop-out deaktiviert: Welleneffekt stoppen und Overlay entfernen
+      // Pop-out deaktiviert: Welleneffekt stoppen und Tiles entfernen
       if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); popOutWaveTlRef.current = null; }
-      const popCanvas = popOutCanvasRef.current;
-      if (popCanvas?.parentElement) {
-        const old = popCanvas.parentElement.querySelector('.pop-wave-overlay');
-        if (old) old.remove();
-      }
+      const popContainer = popOutContainerRef.current;
+      if (popContainer) popContainer.innerHTML = '';
     }
   }, [popOutMode, ready, renderPopOut]);
 
@@ -5588,13 +5565,11 @@ export default function Studio() {
                       maxWidth: "none",
                     }}
                   />
-                  {/* Pop-Out overlay canvas */}
-                  <canvas
-                    ref={popOutCanvasRef}
+                  {/* Pop-Out tile container (individual tiles for GSAP animation) */}
+                  <div
+                    ref={popOutContainerRef}
                     style={{
                       display: popOutMode && ready ? "block" : "none",
-                      position: "absolute",
-                      top: 0, left: 0, width: "100%", height: "100%",
                       imageRendering: zoom > 1 ? "pixelated" : "auto",
                       maxWidth: "none",
                     }}
