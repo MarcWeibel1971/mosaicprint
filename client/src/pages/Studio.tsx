@@ -203,25 +203,40 @@ async function renderMosaicClientSide(opts: {
   });
   console.log(`[PrintRender] Hi-res reload needed: ${hiResNeeded.length}/${uniqueIdxs.length} tiles (tilePx=${tilePx})`);
   if (hiResNeeded.length > 0) {
-    const RELOAD_SIZE = Math.min(400, Math.max(128, tilePx));
+    // Always reload at 400px for print quality. Use smaller batches to avoid overwhelming mobile.
+    const RELOAD_SIZE = 400;
     onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
-    const BATCH = 30;
+    const BATCH = 10; // smaller batches = more reliable on mobile Safari
     let loaded = 0;
+    // Helper: load a single tile with 1 retry on failure
+    const loadTileWithRetry = (dbId: number, size: number): Promise<HTMLImageElement | null> =>
+      new Promise(resolve => {
+        const attempt = (retries: number) => {
+          const img = new Image();
+          // No crossOrigin needed: /api/tile is same-origin, avoids CORS cache issues on iOS
+          const timeout = setTimeout(() => {
+            img.onload = img.onerror = null;
+            if (retries > 0) { attempt(retries - 1); } else { resolve(null); }
+          }, 8000);
+          img.onload = () => { clearTimeout(timeout); resolve(img); };
+          img.onerror = () => {
+            clearTimeout(timeout);
+            if (retries > 0) { setTimeout(() => attempt(retries - 1), 500); } else { resolve(null); }
+          };
+          img.src = `/api/tile/${dbId}?size=${size}&t=${Date.now()}`; // cache-bust to avoid stale 64px version
+        };
+        attempt(1);
+      });
     for (let i = 0; i < hiResNeeded.length; i += BATCH) {
       const batch = hiResNeeded.slice(i, i + BATCH);
       await Promise.all(batch.map(async (idx) => {
         const dbId = tileIds[idx];
-        try {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          await new Promise<void>((resolve, reject) => {
-            img.onload = () => resolve();
-            img.onerror = () => reject(new Error('load failed'));
-            img.src = `/api/tile/${dbId}?size=${RELOAD_SIZE}`;
-          });
+        if (!dbId || dbId <= 0) return;
+        const img = await loadTileWithRetry(dbId, RELOAD_SIZE);
+        if (img && img.naturalWidth > 0) {
           hiResReloadMap[idx] = img;
           loaded++;
-        } catch { /* keep existing thumbnail */ }
+        }
       }));
       onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 10), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
       await new Promise(r => setTimeout(r, 0));
@@ -853,32 +868,45 @@ export default function Studio() {
       // validImgs are 64px thumbnails — upscaling causes blur/gray)
       const zoomHiResMap: Record<number, HTMLImageElement> = {};
       const uniqueZoomIdxs = [...new Set(assignment)];
+      const ZOOM_NEED_SIZE = 256; // we want 256px tiles for zoom
       const zoomReloadNeeded = uniqueZoomIdxs.filter(idx => {
         const dbId = tileIds[idx];
         if (!dbId || dbId <= 0) return false;
         const hi = hiResImgs[idx];
-        if (hi && hi.complete && hi.naturalWidth >= actualTile * 0.8) return false;
+        if (hi && hi.complete && hi.naturalWidth >= ZOOM_NEED_SIZE * 0.8) return false; // already hi-res
         const img = validImgs[idx];
-        return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < actualTile * 0.8;
+        // Reload if missing or smaller than 80% of desired zoom size (256px)
+        return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < ZOOM_NEED_SIZE * 0.8;
       });
       if (zoomReloadNeeded.length > 0) {
-        const ZOOM_SIZE = Math.min(256, Math.max(128, actualTile));
+        const ZOOM_SIZE = 256; // fixed 256px for zoom — sharp enough for 128px display tiles
         console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles at ${ZOOM_SIZE}px for zoom`);
-        const ZBATCH = 30;
+        const ZBATCH = 10;
+        // Load with retry + timeout (no crossOrigin: same-origin, avoids iOS CORS cache issues)
+        const loadZoomTile = (dbId: number): Promise<HTMLImageElement | null> =>
+          new Promise(resolve => {
+            const attempt = (retries: number) => {
+              const img = new Image();
+              const timeout = setTimeout(() => {
+                img.onload = img.onerror = null;
+                if (retries > 0) attempt(retries - 1); else resolve(null);
+              }, 8000);
+              img.onload = () => { clearTimeout(timeout); resolve(img); };
+              img.onerror = () => {
+                clearTimeout(timeout);
+                if (retries > 0) setTimeout(() => attempt(retries - 1), 500); else resolve(null);
+              };
+              img.src = `/api/tile/${dbId}?size=${ZOOM_SIZE}&t=${Date.now()}`;
+            };
+            attempt(1);
+          });
         for (let i = 0; i < zoomReloadNeeded.length; i += ZBATCH) {
           const batch = zoomReloadNeeded.slice(i, i + ZBATCH);
           await Promise.all(batch.map(async (idx) => {
             const dbId = tileIds[idx];
-            try {
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              await new Promise<void>((resolve, reject) => {
-                img.onload = () => resolve();
-                img.onerror = () => reject();
-                img.src = `/api/tile/${dbId}?size=${ZOOM_SIZE}`;
-              });
-              zoomHiResMap[idx] = img;
-            } catch { /* keep existing */ }
+            if (!dbId || dbId <= 0) return;
+            const img = await loadZoomTile(dbId);
+            if (img && img.naturalWidth > 0) zoomHiResMap[idx] = img;
           }));
           await new Promise(r => setTimeout(r, 0));
         }
