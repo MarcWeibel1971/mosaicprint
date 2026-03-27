@@ -2737,7 +2737,7 @@ app.get("/api/projects", requireAuth, async (req, res) => {
     const pool = db.getPool();
     const user = (req as any).user as AuthUser;
     const result = await pool.query(
-      "SELECT id, name, thumbnail_url, tile_source_mode, project_type, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
+      "SELECT id, name, thumbnail_url, tile_source_mode, project_type, created_at, updated_at, print_url FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
       [user.id]
     );
     res.json({ ok: true, projects: result.rows });
@@ -2807,6 +2807,55 @@ app.delete("/api/projects/:id", requireAuth, async (req, res) => {
     await pool.query("DELETE FROM projects WHERE id = $1 AND user_id = $2", [req.params.id, user.id]);
     res.json({ ok: true });
   } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Upload print file to R2 and save URL in project
+app.post("/api/projects/:id/print-url", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    // Ensure print_url column exists (lazy migration)
+    try {
+      await pool.query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS print_url TEXT");
+    } catch { /* column may already exist */ }
+    // Expect multipart/form-data with 'file' field (JPEG blob)
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    await new Promise<void>((resolve, reject) => { req.on('end', resolve); req.on('error', reject); });
+    const fileBuffer = Buffer.concat(chunks);
+    if (!fileBuffer.length) return res.status(400).json({ ok: false, error: 'No file data received' });
+    // Check project ownership
+    const projRes = await pool.query("SELECT id FROM projects WHERE id = $1 AND user_id = $2", [req.params.id, user.id]);
+    if (projRes.rows.length === 0) return res.status(404).json({ ok: false, error: 'Projekt nicht gefunden' });
+    // Upload to R2 under prints/ prefix
+    let printUrl: string | null = null;
+    if (isR2Configured()) {
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      const s3 = new S3Client({
+        endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID!, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY! },
+        region: 'auto',
+      });
+      const key = `prints/project-${req.params.id}-${Date.now()}.jpg`;
+      await s3.send(new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME ?? 'mosaicprint-tiles',
+        Key: key,
+        Body: fileBuffer,
+        ContentType: 'image/jpeg',
+        CacheControl: 'public, max-age=86400',
+      }));
+      const r2PublicUrl = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
+      printUrl = `${r2PublicUrl}/${key}`;
+    } else {
+      return res.status(503).json({ ok: false, error: 'R2 not configured' });
+    }
+    // Save URL in project
+    await pool.query("UPDATE projects SET print_url = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3", [printUrl, req.params.id, user.id]);
+    res.json({ ok: true, printUrl });
+  } catch (e) {
+    console.error('[PrintUrl] Upload failed:', e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });

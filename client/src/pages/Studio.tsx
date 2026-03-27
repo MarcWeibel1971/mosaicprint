@@ -543,6 +543,7 @@ export default function Studio() {
   const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
   // -- Project Save/Restore (localStorage) ------------------------------------
+  const savedProjectIdRef = useRef<number | null>(null); // ID of last saved project (for print upload)
   const [hasSavedProject, setHasSavedProject] = useState<boolean>(() => {
     try { return !!localStorage.getItem('mosaicprint_saved_project'); } catch { return false; }
   });
@@ -4410,6 +4411,7 @@ export default function Studio() {
         }
         const result = await res.json();
         if (result.ok) {
+          if (result.project?.id) savedProjectIdRef.current = result.project.id;
           setHasSavedProject(true);
           setShowSaveModal(false);
         } else {
@@ -4505,6 +4507,7 @@ export default function Studio() {
     const projectId = searchParams.get('project');
     console.log(`[ProjectLoad] Effect fired: projectId=${projectId}, user=${user?.email ?? 'null'}`);
     if (!projectId || !user) return;
+    if (projectId) savedProjectIdRef.current = parseInt(projectId, 10);
     (async () => {
       try {
         setProjectLoading(true);
@@ -4845,6 +4848,25 @@ export default function Studio() {
         setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
         setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
         setDlProgress(100);
+        // Upload print file to R2 and save URL in project (background, non-blocking)
+        if (savedProjectIdRef.current && user) {
+          (async () => {
+            try {
+              setDlProgressMsg(`Druckdatei wird gespeichert...`);
+              const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+                body: printBlob,
+              });
+              const uploadResult = await uploadRes.json();
+              if (uploadResult.ok) {
+                setDlProgressMsg(`✓ Druckdatei gespeichert – abrufbar unter Projekte`);
+              }
+            } catch (uploadErr) {
+              console.warn('[PrintUpload] Failed to save print URL:', uploadErr);
+            }
+          })();
+        }
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setDlProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
