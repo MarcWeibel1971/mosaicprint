@@ -201,7 +201,7 @@ async function renderMosaicClientSide(opts: {
   console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles at ${RELOAD_SIZE}px`);
   if (hiResNeeded.length > 0) {
     onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
-    const BATCH = 8; // small batches for reliable mobile loading
+    const BATCH = 40; // larger batches for faster desktop loading (was 8 – too slow for 2728 tiles)
     let loaded = 0;
     let failed = 0;
     // Helper: load a single tile with up to 3 retries and 10s timeout each
@@ -4329,8 +4329,14 @@ export default function Studio() {
     let tileUrl = '';
     const tileId = tileIdsRef.current[tileIdx];
     if (tileId && tileId > 0) {
-      // DB tile – load from server at high resolution (400px = 1cm @ 400 PPI, scharf im Detail-Modal)
-      tileUrl = `/api/tile/${tileId}?size=400`;
+      // DB tile – prefer direct CDN URL (fast, no proxy latency), fall back to server proxy
+      // tileUrlIndexRef maps tileId -> R2 CDN URL (128px, already sharp for the modal)
+      const cdnUrl = tileUrlIndexRef.current?.[String(tileId)];
+      if (cdnUrl) {
+        tileUrl = cdnUrl; // direct CDN: no proxy latency, always loads
+      } else {
+        tileUrl = `/api/tile/${tileId}?size=400`; // server proxy fallback
+      }
     } else {
       // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
