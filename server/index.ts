@@ -1611,10 +1611,13 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
 
       if (hasOverlay) {
         // Get raw pixels so we can apply per-pixel overlay blending
+        // IMPORTANT: .flatten() before .raw() ensures we get 3-channel RGB (not 4-channel RGBA)
+        // Without .flatten(), sharp returns RGBA (4 bytes/pixel) but applyOverlay expects RGB (3 bytes/pixel)
+        // causing completely wrong pixel indexing and the "grid/mosaic" artifact in downloads.
         const rawBuf = await sharp({
           create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
-        }).composite(compositeInputs).raw().toBuffer();
+        }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
         updateProgress(80, 'Overlay anwenden...');
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
           overlayMode as 'softlight' | 'alphablend',
@@ -1671,10 +1674,11 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
       const hasStripOverlay = overlayMode && overlayMode !== 'none' && targetColors?.length;
       if (hasStripOverlay) {
         // Get raw pixels for overlay processing
+        // IMPORTANT: .flatten() before .raw() ensures 3-channel RGB output (not 4-channel RGBA)
         const rawStrip = await sharp({
           create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
-        }).composite(compositeInputs).raw().toBuffer();
+        }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
