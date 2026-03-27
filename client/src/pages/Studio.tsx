@@ -705,10 +705,12 @@ export default function Studio() {
     setProgress(5);
 
     const { cols, rows } = mosaicParamsRef.current;
-    // Mobile: limit output to ~16 MP (4096px max dimension) to prevent iOS Safari OOM crash
-    // Desktop: allow up to 12000px for sharp zoom
+    // Mobile: server renders on Railway (no iOS canvas limit!). The result is a JPEG blob
+    // displayed as <img> – iOS Safari can display images of any size.
+    // Use 8192px max for mobile (gives ~154px/tile for 40x53 grid → sharp zoom).
+    // Desktop: allow up to 12000px for maximum sharpness.
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const maxDim = isMob ? 4096 : 12000;
+    const maxDim = isMob ? 8192 : 12000;
     const ZOOM_TILE_PX = Math.min(256, Math.floor(maxDim / Math.max(cols, rows)));
     console.log(`[HiRes] Server render: ${cols}x${rows} @ ${ZOOM_TILE_PX}px = ${cols*ZOOM_TILE_PX}x${rows*ZOOM_TILE_PX} (mobile=${isMob})`);
     const zoomJobId = `zoom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -782,7 +784,8 @@ export default function Studio() {
       if (!imgResp.ok) throw new Error('Download failed');
       const blob = await imgResp.blob();
       // Safety: check blob size – if too large for mobile, skip (will fall back to client render)
-      const MAX_BLOB_MB = isMob ? 15 : 100;
+      // 50 MB allows ~50 MP JPEG at q=0.85 (typical mosaic: 10-20 MB)
+      const MAX_BLOB_MB = isMob ? 50 : 100;
       if (blob.size > MAX_BLOB_MB * 1024 * 1024) {
         console.warn(`[HiRes] Blob too large for mobile: ${(blob.size/1024/1024).toFixed(1)}MB > ${MAX_BLOB_MB}MB`);
         throw new Error(`Image too large: ${(blob.size/1024/1024).toFixed(1)}MB`);
@@ -4862,20 +4865,82 @@ export default function Studio() {
         return;
       }
 
-      // CLIENT-SIDE PRINT RENDER: renders locally using loaded tile images (no server needed)
+      // PRINT RENDER: On mobile, use server-side rendering to bypass iOS Safari's 16 MP canvas limit.
+      // The server (Railway) has no canvas limits and can render at full 400px tile quality.
+      // On desktop, render client-side (faster, no server round-trip needed).
+      const isMobPrint = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+      const useServerPrint = isMobPrint && canDoHiRes();
       try {
         setDlLoading(true);
-        setDlProgressMsg(`Rendere Druckqualitaet lokal...`);
-        setDlProgress(5);
 
-        const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
-          cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
-          assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
-          validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
-          snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
-          targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
-          onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
-        });
+        let printBlob: Blob;
+        let printFilename: string;
+
+        if (useServerPrint) {
+          // SERVER-SIDE PRINT RENDER: use /api/print-render (no iOS canvas limit)
+          setDlProgressMsg(`Server rendert Druckqualität (${PRINT_TILE_PX}px Tiles)...`);
+          setDlProgress(3);
+          const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+          const printJobId = `print-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          // Mobile: allow up to 120s for server render (large mosaics take time)
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 120000);
+          const resp = await fetch('/api/print-render', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              tileIds: tileIdsRef.current,
+              assignment: assignmentRef.current,
+              cols, rows,
+              tilePx: PRINT_TILE_PX,
+              format: 'jpg',
+              jobId: printJobId,
+              overlayMode: algoSettings.overlayMode ?? 'softlight',
+              baseOverlay: algoSettings.baseOverlay ?? 0.15,
+              edgeBoost: algoSettings.edgeBoost ?? 0.20,
+              targetColors: targetColorsRef.current,
+              edgeMap: edgeMapRef.current,
+              faceMask: faceMaskRef.current,
+            }),
+          });
+          clearTimeout(timeoutId);
+          if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+          const acceptedData = await resp.json();
+          if (!acceptedData.accepted) throw new Error('Server did not accept job');
+          setDlProgress(8);
+          setDlProgressMsg('Druckqualität wird server-seitig gerendert...');
+          // Poll for completion
+          const prtResult = await pollForResult(
+            printJobId,
+            (p) => setDlProgress(Math.max(8, Math.min(85, p))),
+            (m) => setDlProgressMsg(m),
+          );
+          setDlProgress(88);
+          setDlProgressMsg('Lade Druckdatei...');
+          const dlController = new AbortController();
+          const dlTimeout = setTimeout(() => dlController.abort(), 60000);
+          const imgResp = await fetch(`/api/print-download/${prtResult.token}`, { signal: dlController.signal });
+          clearTimeout(dlTimeout);
+          if (!imgResp.ok) throw new Error('Download failed');
+          printBlob = await imgResp.blob();
+          printFilename = prtResult.filename || `mosaicprint-${cols*PRINT_TILE_PX}x${rows*PRINT_TILE_PX}-druckbereit.jpg`;
+          setDlProgress(95);
+        } else {
+          // CLIENT-SIDE PRINT RENDER: renders locally using loaded tile images (desktop)
+          setDlProgressMsg(`Rendere Druckqualität lokal...`);
+          setDlProgress(5);
+          const result = await renderMosaicClientSide({
+            cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
+            assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
+            validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+            snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+            targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+            onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
+          });
+          printBlob = result.blob;
+          printFilename = result.filename;
+        }
 
         const printUrl = URL.createObjectURL(printBlob);
         const dlLink = document.createElement('a');
