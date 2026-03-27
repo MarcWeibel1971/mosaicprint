@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import ReactCrop, { type Crop, type PixelCrop, centerCrop, makeAspectCrop } from 'react-image-crop';
+import 'react-image-crop/dist/ReactCrop.css';
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 gsap.registerPlugin(useGSAP);
@@ -445,6 +447,12 @@ export default function Studio() {
   const [orderMode, setOrderMode] = useState<'print' | 'digital'>('print');
   const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(1); // HD default
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
+  // Crop modal state
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [cropSrc, setCropSrc] = useState<string | null>(null); // original uploaded image URL for cropping
+  const [crop, setCrop] = useState<Crop>();
+  const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
+  const cropImgRef = useRef<HTMLImageElement | null>(null);
   const [cacheSize, setCacheSize] = useState(0);
   const [dbTileCount, setDbTileCount] = useState<number | null>(null);
   const [showPayModal, setShowPayModal] = useState(false);
@@ -1106,12 +1114,49 @@ export default function Studio() {
 
   const tilesRef = useRef<Array<{ x: number; y: number; px: number; url?: string }>>([]);
 
+  // Apply a crop to the uploaded image and set it as the user photo
+  const applyCropAndSetPhoto = useCallback((dataUrl: string, pixelCrop?: PixelCrop | null) => {
+    if (!pixelCrop || pixelCrop.width === 0 || pixelCrop.height === 0) {
+      // No crop: use full image
+      const img = new Image();
+      img.onload = async () => {
+        setUserPhoto(dataUrl);
+        setUserPhotoImg(img);
+        setReady(false); setError(null); setZoom(1); setPan({ x: 0, y: 0 }); setCompareMode(false);
+      };
+      img.src = dataUrl;
+      return;
+    }
+    // Crop: draw cropped region onto a new canvas
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = pixelCrop.width;
+      canvas.height = pixelCrop.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height, 0, 0, pixelCrop.width, pixelCrop.height);
+      const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+      const croppedImg = new Image();
+      croppedImg.onload = async () => {
+        setUserPhoto(croppedDataUrl);
+        setUserPhotoImg(croppedImg);
+        setReady(false); setError(null); setZoom(1); setPan({ x: 0, y: 0 }); setCompareMode(false);
+      };
+      croppedImg.src = croppedDataUrl;
+    };
+    img.src = dataUrl;
+  }, []);
+
   const handleUpload = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) return;
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUrl = e.target?.result as string;
-      setUserPhoto(dataUrl);
+      // Open crop modal instead of directly setting photo
+      setCropSrc(dataUrl);
+      setCrop(undefined);
+      setCompletedCrop(null);
+      setCropModalOpen(true);
       const img = new Image();
       img.onload = async () => {
         setUserPhotoImg(img);
@@ -6595,6 +6640,89 @@ export default function Studio() {
             </div>
 
             <p className="text-[10px] text-gray-400 mt-3 text-center">Klick auf eine Kachel im Mosaik um Details zu sehen</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Crop Modal ── */}
+      {cropModalOpen && cropSrc && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.85)' }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col"
+            style={{ maxHeight: '90vh' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-100">
+              <div>
+                <p className="font-bold text-gray-900 text-base">Bildausschnitt wählen</p>
+                <p className="text-xs text-gray-500 mt-0.5">Ziehe einen Rahmen um den gewünschten Bereich — z.B. Gesicht vergrößern</p>
+              </div>
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  // Use full image if user closes without cropping
+                  if (cropSrc) applyCropAndSetPhoto(cropSrc, null);
+                }}
+                className="text-gray-400 hover:text-gray-700 ml-3 flex-shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Crop area */}
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-gray-50">
+              <ReactCrop
+                crop={crop}
+                onChange={(c) => setCrop(c)}
+                onComplete={(c) => setCompletedCrop(c)}
+                minWidth={50}
+                minHeight={50}
+                keepSelection
+              >
+                <img
+                  ref={cropImgRef}
+                  src={cropSrc}
+                  alt="Zu croppende Bild"
+                  style={{ maxWidth: '100%', maxHeight: '55vh', objectFit: 'contain', display: 'block' }}
+                  onLoad={(e) => {
+                    // Default: center crop covering 80% of the image
+                    const { naturalWidth, naturalHeight } = e.currentTarget;
+                    const defaultCrop = centerCrop(
+                      makeAspectCrop({ unit: '%', width: 80 }, naturalWidth / naturalHeight, naturalWidth, naturalHeight),
+                      naturalWidth, naturalHeight
+                    );
+                    setCrop(defaultCrop);
+                  }}
+                />
+              </ReactCrop>
+            </div>
+
+            {/* Footer buttons */}
+            <div className="px-5 pb-5 pt-3 flex gap-3 border-t border-gray-100">
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  if (cropSrc) applyCropAndSetPhoto(cropSrc, null);
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                Ganzes Bild verwenden
+              </button>
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  if (cropSrc) applyCropAndSetPhoto(cropSrc, completedCrop);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-coral-500 text-white text-sm font-semibold hover:bg-coral-600 transition-colors"
+                style={{ backgroundColor: '#e05c4b' }}
+              >
+                Ausschnitt verwenden
+              </button>
+            </div>
           </div>
         </div>
       )}
