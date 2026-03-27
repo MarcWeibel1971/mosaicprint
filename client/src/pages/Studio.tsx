@@ -6715,7 +6715,34 @@ export default function Studio() {
               <button
                 onClick={() => {
                   setCropModalOpen(false);
-                  if (cropSrc) applyCropAndSetPhoto(cropSrc, completedCrop);
+                  if (!cropSrc) return;
+                  // Convert current crop (may be % or px) to pixel coordinates
+                  const imgEl = cropImgRef.current;
+                  if (imgEl && crop && crop.width && crop.height) {
+                    const scaleX = imgEl.naturalWidth / imgEl.width;
+                    const scaleY = imgEl.naturalHeight / imgEl.height;
+                    let pixCrop: PixelCrop;
+                    if (crop.unit === '%') {
+                      pixCrop = {
+                        unit: 'px',
+                        x: Math.round((crop.x / 100) * imgEl.naturalWidth),
+                        y: Math.round((crop.y / 100) * imgEl.naturalHeight),
+                        width: Math.round((crop.width / 100) * imgEl.naturalWidth),
+                        height: Math.round((crop.height / 100) * imgEl.naturalHeight),
+                      };
+                    } else {
+                      pixCrop = {
+                        unit: 'px',
+                        x: Math.round(crop.x * scaleX),
+                        y: Math.round(crop.y * scaleY),
+                        width: Math.round(crop.width * scaleX),
+                        height: Math.round(crop.height * scaleY),
+                      };
+                    }
+                    applyCropAndSetPhoto(cropSrc, pixCrop);
+                  } else {
+                    applyCropAndSetPhoto(cropSrc, completedCrop);
+                  }
                 }}
                 className="flex-1 py-2.5 rounded-xl bg-coral-500 text-white text-sm font-semibold hover:bg-coral-600 transition-colors"
                 style={{ backgroundColor: '#e05c4b' }}
