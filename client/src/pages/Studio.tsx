@@ -5023,25 +5023,17 @@ export default function Studio() {
       console.log(`[Print] Format: ${fmt.label}, cols=${cols}, rows=${rows}, naturalTilePx=${naturalTilePx}, PRINT_TILE_PX=${PRINT_TILE_PX}, output=${printOutW}x${printOutH}px`);
 
       // CLIENT-SIDE PRINT RENDER: used when tiles are user-uploaded (negative IDs)
-      // Server can't access user photos, so we render locally using the original images.
+      // Uses renderMosaicClientSide (same as DB-tiles path) to ensure LAB color correction is applied.
       if (!canDoHiRes()) {
         try {
-          setLoading(true);
-          setProgressMsg(`Client rendert Druckqualität (${printOutW}x${printOutH}px)...`);
-          setProgress(5);
+          setDlLoading(true);
+          setDlProgressMsg(`Rendere Druckqualitaet lokal (${printOutW}x${printOutH}px)...`);
+          setDlProgress(5);
 
-          const assignment = assignmentRef.current;
-          const validImgs = validImgsRef.current;
-          const hiResImgs = validImgsHiResRef.current;
-          const snapshot = snapshotRef.current;
-          const rotations = assignmentRotRef.current;
-          const totalCells = cols * rows;
-
-          // Canvas size limits
+          // Canvas size limits for mobile
           const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
           const maxArea = isMob ? 16_000_000 : 200_000_000;
           const maxDim = isMob ? 4096 : 16000;
-          // Clamp tile size for client canvas limits
           const maxTileArea = Math.floor(Math.sqrt(maxArea / (cols * rows)));
           const maxTileDim = Math.floor(maxDim / Math.max(cols, rows));
           const CLIENT_TILE = Math.min(PRINT_TILE_PX, maxTileArea, maxTileDim);
@@ -5053,94 +5045,31 @@ export default function Studio() {
             throw new Error(`Canvas zu gross: ${cW}x${cH}`);
           }
 
-          // Snapshot canvas for fallback tile extraction
-          const snapshotCanvas = document.createElement('canvas');
-          const snapshotCtxH = snapshotCanvas.getContext('2d');
-          if (snapshot && snapshotCtxH) {
-            snapshotCanvas.width = snapshot.width;
-            snapshotCanvas.height = snapshot.height;
-            snapshotCtxH.putImageData(snapshot, 0, 0);
-          }
+          // Use renderMosaicClientSide for consistent LAB color correction (same as DB-tile path)
+          const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
+            cols, rows, tilePx: CLIENT_TILE, format: 'jpg',
+            assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
+            validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+            snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+            targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+            cellLab: cellLabRef.current,
+            userOverlay, userPhotoImg,
+            onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
+          });
 
-          const printCanvas = document.createElement('canvas');
-          printCanvas.width = cW;
-          printCanvas.height = cH;
-          const pCtx = printCanvas.getContext('2d')!;
-
-          for (let ci = 0; ci < totalCells; ci++) {
-            const col = ci % cols;
-            const row = Math.floor(ci / cols);
-            const x = col * CLIENT_TILE;
-            const y = row * CLIENT_TILE;
-            const tileIdx = assignment[ci];
-            const hiImg = hiResImgs[tileIdx];
-            const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
-            const rot = rotations[ci] || 0;
-
-            if (img && img.complete && img.naturalWidth > 0) {
-              try {
-                if (rot === 0) {
-                  pCtx.drawImage(img, x, y, CLIENT_TILE, CLIENT_TILE);
-                } else {
-                  pCtx.save();
-                  pCtx.translate(x + CLIENT_TILE / 2, y + CLIENT_TILE / 2);
-                  pCtx.rotate(rot * Math.PI / 2);
-                  pCtx.drawImage(img, -CLIENT_TILE / 2, -CLIENT_TILE / 2, CLIENT_TILE, CLIENT_TILE);
-                  pCtx.restore();
-                }
-              } catch {
-                const { tilePx: origTilePx } = mosaicParamsRef.current!;
-                try {
-                  pCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, CLIENT_TILE, CLIENT_TILE);
-                } catch {
-                  const tc = targetColorsRef.current, tci = ci * 3;
-                  pCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
-                  pCtx.fillRect(x, y, CLIENT_TILE, CLIENT_TILE);
-                }
-              }
-            } else {
-              const { tilePx: origTilePx } = mosaicParamsRef.current!;
-              try {
-                pCtx.drawImage(snapshotCanvas, col * origTilePx, row * origTilePx, origTilePx, origTilePx, x, y, CLIENT_TILE, CLIENT_TILE);
-              } catch {
-                const tc = targetColorsRef.current, tci = ci * 3;
-                pCtx.fillStyle = tc.length > tci + 2 ? `rgb(${tc[tci]},${tc[tci+1]},${tc[tci+2]})` : '#ccc';
-                pCtx.fillRect(x, y, CLIENT_TILE, CLIENT_TILE);
-              }
-            }
-
-            if (ci % 500 === 0) {
-              setProgress(5 + Math.round((ci / totalCells) * 70));
-              await new Promise(r => setTimeout(r, 0));
-            }
-          }
-
-          setProgress(80);
-          setProgressMsg('Bild wird erstellt...');
-
-          // Convert to blob and download
-          const blob = await new Promise<Blob | null>(resolve =>
-            printCanvas.toBlob(resolve, 'image/png')
-          );
-          if (!blob) throw new Error('Canvas toBlob failed');
-
-          const url = URL.createObjectURL(blob);
+          const printUrl = URL.createObjectURL(printBlob);
           const dlLink = document.createElement('a');
-          dlLink.download = `mosaicprint-${cW}x${cH}-druckbereit.png`;
-          dlLink.href = url;
-          dlLink.style.display = 'none';
-          document.body.appendChild(dlLink);
-          dlLink.click();
-          setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
-
-          setProgress(100);
-          setProgressMsg(`✓ Download gestartet: ${cW}x${cH}px`);
+          dlLink.href = printUrl; dlLink.download = printFilename; dlLink.style.display = 'none';
+          document.body.appendChild(dlLink); dlLink.click();
+          setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
+          setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
+          setDlProgress(100);
         } catch (e) {
           console.error('[ClientPrint] Failed:', e);
-          setProgressMsg(`Fehler: ${e}`);
+          setDlProgressMsg(`Fehler: ${e}`);
         } finally {
-          setLoading(false);
-          setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+          setDlLoading(false);
+          setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 5000);
         }
         return;
       }
