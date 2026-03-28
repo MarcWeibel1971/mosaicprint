@@ -6599,13 +6599,11 @@ export default function Studio() {
                   // 1cm/Kachel Regel: für 70x70cm = 70x70 Kacheln, für 40x40cm = 40x40 Kacheln
                   const TARGET_TILE_CM = 1.0; // 1 Kachel pro cm (optimal für 20-30cm Betrachtungsabstand)
                   const targetTileMm = Math.round(TARGET_TILE_CM * 10); // = 10mm
-                  const targetCols = Math.round(fmt.widthCm / TARGET_TILE_CM); // z.B. 70cm → 70 Kacheln
-                  // Reverse-compute baseTiles from targetCols based on aspect ratio
-                  const imgAspect = cols / rows; // approximate from current grid
-                  const optimalBaseTiles = imgAspect >= 1
-                    ? targetCols                                    // landscape: baseTiles = cols
-                    : Math.round(targetCols / imgAspect);           // portrait: baseTiles = cols / aspect
-                  const targetRows = imgAspect >= 1 ? Math.round(targetCols / imgAspect) : targetCols;
+                  // 1cm/Kachel: targetCols = widthCm, targetRows = heightCm (direkt vom Format)
+                  const targetCols = Math.round(fmt.widthCm / TARGET_TILE_CM);  // 70cm → 70 Kacheln
+                  const targetRows = Math.round(fmt.heightCm / TARGET_TILE_CM); // 70cm → 70 Kacheln
+                  // baseTiles = längere Seite (wie renderMosaic es erwartet)
+                  const optimalBaseTiles = Math.max(targetCols, targetRows);
                   const isAlreadyOptimal = cols === targetCols && rows === targetRows;
                   const needsOptimize = !isAlreadyOptimal;
                   // Re-render handler: update baseTiles and trigger renderMosaic
