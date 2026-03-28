@@ -4418,8 +4418,9 @@ export default function Studio() {
     const targetZoomedPx = 150;
     const popScale = Math.max(3, targetZoomedPx / cssTileW);
 
-    // Hi-res canvas resolution for sharp zoom
-    const canvasResPx = Math.min(256, Math.max(128, Math.round(targetZoomedPx * (window.devicePixelRatio || 1))));
+    // Hi-res canvas resolution: must be large enough to look sharp at ~150px CSS display
+    // Use at least 512px so the zoomed tile is crisp even on retina screens
+    const canvasResPx = 512;
 
     // Create snapshot fallback canvas
     const snapshot = snapshotRef.current;
@@ -4456,11 +4457,14 @@ export default function Studio() {
       tCtx.imageSmoothingEnabled = true;
       tCtx.imageSmoothingQuality = 'high';
 
-      // Draw from original tile image (sharp)
+      // Draw from best available tile image: hi-res > original > snapshot
       let drawn = false;
       if (assignment && validImgs) {
         const tileIdx = assignment[ci];
-        const img = validImgs[tileIdx];
+        // Prefer hi-res image (full resolution, not downscaled)
+        const hiResImgs = validImgsHiResRef.current;
+        const hiImg = hiResImgs?.[tileIdx];
+        const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
         if (img && img.complete && img.naturalWidth > 0) {
           try {
             const rot = rotations?.[ci] || 0;
@@ -4484,7 +4488,7 @@ export default function Studio() {
       // Position exactly over the tile's spot in the mosaic
       const left = col * cssTileW;
       const top = row * cssTileH;
-      tileCanvas.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${cssTileW}px;height:${cssTileH}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;border-radius:3px;pointer-events:none;`;
+      tileCanvas.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${cssTileW}px;height:${cssTileH}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;pointer-events:none;`;
       popContainer.appendChild(tileCanvas);
       tileEls.push(tileCanvas);
     }
