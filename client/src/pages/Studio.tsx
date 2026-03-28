@@ -423,8 +423,8 @@ async function renderMosaicClientSide(opts: {
 
   // Apply adaptive edge-based overlay (same as preview)
   onProgress?.(72, 'Overlay anwenden...');
-  const BASE_OL = algoSettings.baseOverlay ?? 0.15;
-  const EDGE_B = algoSettings.edgeBoost ?? 0.20;
+  const BASE_OL = algoSettings.baseOverlay ?? 0.08;   // reduced: 0.15→0.08 to prevent color patches in print
+  const EDGE_B = algoSettings.edgeBoost ?? 0.10;      // reduced: 0.20→0.10
   const olMode = algoSettings.overlayMode ?? 'softlight';
   const sl = (base: number, blend: number) => {
     const b2 = blend/255, s = base/255;
@@ -437,8 +437,8 @@ async function renderMosaicClientSide(opts: {
       const ci2 = row*cols + col, ti = ci2*3;
       const tr = tc.length > ti+2 ? tc[ti] : 128, tg = tc.length > ti+2 ? tc[ti+1] : 128, tb2 = tc.length > ti+2 ? tc[ti+2] : 128;
       const edge = em.length > ci2 ? em[ci2] : 0;
-      const fb = fm.length > ci2 && fm[ci2] ? 0.25 : 0;
-      const str = olMode !== 'none' ? Math.min(0.85, BASE_OL + edge*EDGE_B + fb) : 0;
+      const fb = fm.length > ci2 && fm[ci2] ? 0.04 : 0;  // reduced: 0.25→0.04 to prevent brownish face patches
+      const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;  // cap 0.85→0.30
       const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
       for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
         const pi = (py*W + px)*4;
@@ -1176,9 +1176,9 @@ export default function Studio() {
         const em = edgeMapRef.current;
         const fm = faceMaskRef.current;
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-        const cBoost = algoSettings.contrastBoost ?? 1.30;
-        const BASE_OL = algoSettings.baseOverlay ?? 0.15;
-        const EDGE_B = algoSettings.edgeBoost ?? 0.20;
+        const cBoost = algoSettings.contrastBoost ?? 1.15;  // reduced: 1.30→1.15 to avoid over-saturating skin tones
+        const BASE_OL = algoSettings.baseOverlay ?? 0.08;   // reduced: 0.15→0.08 to reduce color patches
+        const EDGE_B = algoSettings.edgeBoost ?? 0.10;      // reduced: 0.20→0.10 to reduce edge color bleeding
         const olMode = algoSettings.overlayMode ?? 'softlight';
 
         // Soft-light blend function (Photoshop formula)
@@ -1201,8 +1201,8 @@ export default function Studio() {
             // Overlay strength — reduced for hi-res since tiles aren't LAB-corrected.
             // Face boost reduced to prevent brownish patches on skin tones.
             const edge = em.length > ci ? em[ci] : 0;
-            const faceBoost = fm.length > ci && fm[ci] ? 0.10 : 0;
-            const strength = olMode !== 'none' ? Math.min(0.55, BASE_OL * 0.7 + edge * EDGE_B * 0.7 + faceBoost) : 0;
+            const faceBoost = fm.length > ci && fm[ci] ? 0.04 : 0;  // reduced: 0.10→0.04 to prevent brownish skin patches
+            const strength = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge * EDGE_B + faceBoost) : 0;  // cap 0.55→0.30
 
             // Process all pixels in this cell
             const yStart = row * actualTile;
@@ -4217,9 +4217,9 @@ export default function Studio() {
           const tr = targetData[i], tg = targetData[i+1], tb = targetData[i+2];
           const edge = edgeMap[ci];
           // Adaptive strength: BASE_OVERLAY at flat areas, +EDGE_BOOST at edges
-          // In face regions: extra +0.25 boost for better portrait visibility (was +0.15)
-          const faceBoost = faceMask[ci] ? 0.25 : 0;
-          const strength = Math.min(0.85, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);
+          // In face regions: small boost for portrait visibility (reduced to avoid brownish patches)
+          const faceBoost = faceMask[ci] ? 0.04 : 0;  // reduced: 0.25→0.04
+          const strength = Math.min(0.30, BASE_OVERLAY + edge * EDGE_BOOST + faceBoost);  // cap 0.85→0.30
           for (let py = row * TILE_PX; py < (row + 1) * TILE_PX && py < (CANVAS_H); py++) {
             for (let px = col * TILE_PX; px < (col + 1) * TILE_PX && px < (CANVAS_W); px++) {
               const pi = (py * CANVAS_W + px) * 4;
