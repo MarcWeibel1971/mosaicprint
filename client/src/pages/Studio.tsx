@@ -793,7 +793,7 @@ export default function Studio() {
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
     // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
-    const idealMobileTile = 128;
+    const idealMobileTile = 256;
     const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
@@ -845,6 +845,15 @@ export default function Studio() {
         snapshotCanvas.width = snapshot.width;
         snapshotCanvas.height = snapshot.height;
         snapshotCtxHelper.putImageData(snapshot, 0, 0);
+      }
+
+      // Wait for any pending data-URL images to finish decoding (fixes gray tiles on mobile)
+      const pendingDecodes = validImgs.filter(img => img && !img.complete).map(img =>
+        img.decode().catch(() => {})
+      );
+      if (pendingDecodes.length > 0) {
+        console.log(`[ClientHiRes] Waiting for ${pendingDecodes.length} images to decode...`);
+        await Promise.all(pendingDecodes);
       }
 
       for (let ci = 0; ci < totalCells; ci++) {
@@ -979,7 +988,7 @@ export default function Studio() {
       const blob = await new Promise<Blob | null>(resolve => {
         const timeout = setTimeout(() => { console.warn('[ClientHiRes] toBlob timed out'); resolve(null); }, 45000);
         try {
-          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.88 : 0.92);
+          hrCanvas!.toBlob(b => { clearTimeout(timeout); resolve(b); }, 'image/jpeg', isMob ? 0.92 : 0.95);
         } catch (e) { clearTimeout(timeout); console.error('[ClientHiRes] toBlob error:', e); resolve(null); }
       });
 
@@ -5435,7 +5444,7 @@ export default function Studio() {
                         position: "absolute",
                         top: 0, left: 0, width: "100%", height: "100%",
                         pointerEvents: "none",
-                        imageRendering: zoom > 4 ? "pixelated" as const : "auto" as const,
+                        imageRendering: "auto" as const,
                       }}
                     />
                   )}
