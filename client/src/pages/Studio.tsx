@@ -537,6 +537,9 @@ export default function Studio() {
   const [dlProgressMsg, setDlProgressMsg] = useState("");
   const [dlLoading, setDlLoading] = useState(false);
   const [ready, setReady] = useState(false);
+  const readyRef = useRef(false);
+  // Keep readyRef in sync for use in stable callbacks (timers, etc.)
+  readyRef.current = ready;
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1318,7 +1321,10 @@ export default function Studio() {
       setCropModalOpen(true);
       const img = new Image();
       img.onload = async () => {
-        setUserPhotoImg(img);
+        // NOTE: Do NOT call setUserPhotoImg here – that would trigger the auto-render useEffect
+        // before the crop modal is confirmed. setUserPhotoImg is called in applyCropAndSetPhoto
+        // after the user confirms the crop, which is the correct single trigger point.
+        // Calling it here caused a double renderMosaic (first with uncropped, then with cropped image).
         setReady(false);
         setError(null);
         setZoom(1);
@@ -4436,8 +4442,10 @@ export default function Studio() {
   useEffect(() => {
     if (!ready) return;
     if (hiResReadyRef.current || hiResLoadingRef.current) return;
-    // Short delay so UI renders first
+    // Short delay so UI renders first, then verify ready is still true
+    // (a second renderMosaic call could have reset ready=false in the meantime)
     const timer = setTimeout(() => {
+      if (!readyRef.current) return; // mosaic was re-rendered, skip stale hi-res
       if (hiResReadyRef.current || hiResLoadingRef.current) return;
       triggerClientHiResRender();
     }, 1500);
