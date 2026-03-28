@@ -349,134 +349,225 @@ async function renderMosaicClientSide(opts: {
   const EDGE_B = algoSettings.edgeBoost ?? 0.20;
   const olMode = algoSettings.overlayMode ?? 'none';
 
-  // Offscreen buffer canvas for per-tile LAB processing (reused across all tiles)
-  const bCanvas = document.createElement('canvas');
-  bCanvas.width = actualTile; bCanvas.height = actualTile;
-  const bCtx = bCanvas.getContext('2d')!;
-  for (let ci = 0; ci < total; ci++) {
-    const col = ci % cols, row = Math.floor(ci / cols);
-    const x = col * actualTile, y = row * actualTile;
-    const idx = assignment[ci];
-    // Priority: hi-res reloaded > existing hiResImgs > validImgs (thumbnail)
-    const reloadedImg = hiResReloadMap[idx];
-    const hiImg = reloadedImg || hiResImgs[idx];
-    const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
-    const rot = rotations[ci] || 0;
-    const tci = ci * 3;
-    const tR = tc.length > tci+2 ? tc[tci] : 128;
-    const tG = tc.length > tci+2 ? tc[tci+1] : 128;
-    const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
-    // Use cellLab if available (blurred+original mix, same as renderMosaic) for accurate color correction
-    // Fallback: compute from raw targetColors (100% original, slightly different)
-    const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : fastRgbToLab(tR, tG, tBv);
+  // ── Web Worker parallel tile rendering ──
+  // Split rows across N workers, each renders its strip via OffscreenCanvas.
+  const useWorkers = typeof OffscreenCanvas !== 'undefined' && typeof Worker !== 'undefined';
+  const numWorkers = useWorkers ? Math.min(navigator.hardwareConcurrency || 4, rows, 8) : 0;
+  console.log(`[PrintRender] Workers: ${numWorkers} (OffscreenCanvas=${typeof OffscreenCanvas !== 'undefined'})`);
 
-    if (img && img.complete && img.naturalWidth > 0) {
-      try {
-        // Draw tile to offscreen buffer for pixel manipulation
-        bCtx.clearRect(0, 0, actualTile, actualTile);
-        if (rot === 0) { bCtx.drawImage(img, 0, 0, actualTile, actualTile); }
-        else { bCtx.save(); bCtx.translate(actualTile/2, actualTile/2); bCtx.rotate(rot * Math.PI/2); bCtx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); bCtx.restore(); }
-
-        // Per-tile LAB color transfer (same as preview rendering)
-        const isShadowZone = tL < 40;
-        const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
-        const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
-
-        const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
-        const td = tilePixels.data;
-        // Compute tile average L using 8x8 subsample from existing pixel data.
-        // No extra canvas needed — just step through the pixel array at regular intervals.
-        // This matches the preview behavior (which also uses 8x8 reference).
-        const REF_N = 8;
-        const stepY = Math.max(1, Math.floor(actualTile / REF_N));
-        const stepX = Math.max(1, Math.floor(actualTile / REF_N));
-        let sumL = 0, pCount = 0;
-        for (let sy = 0; sy < REF_N; sy++) {
-          const py = Math.min(sy * stepY, actualTile - 1);
-          for (let sx = 0; sx < REF_N; sx++) {
-            const px = Math.min(sx * stepX, actualTile - 1);
-            const pi = (py * actualTile + px) * 4;
-            sumL += fastRgbToLab(td[pi], td[pi+1], td[pi+2])[0];
-            pCount++;
-          }
-        }
-        const avgL = pCount > 0 ? sumL / pCount : 50;
-        const rawLumScale = avgL > 1 ? tL / avgL : 1;
-        const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
-        const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
-        const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
-
-        // Pre-compute overlay strength for this tile (avoid per-pixel recompute)
-        const edge = em.length > ci ? em[ci] : 0;
-        const fb = fm.length > ci && fm[ci] ? 0.04 : 0;
-        const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;
-        const applyOverlay = str > 0.01;
-
-        const outData = new Uint8ClampedArray(td.length);
-        for (let pi = 0; pi < td.length; pi += 4) {
-          const [pl, pa, pb] = fastRgbToLab(td[pi], td[pi+1], td[pi+2]);
-          let newL = Math.max(0, Math.min(100, pl * lumScale));
-          if (isShadowZone && shadowBoost > 0.05) {
-            const deviation = pl - avgL;
-            const stretchFactor = 1.0 + shadowBoost * 0.4;
-            newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
-          }
-          if (isShadowZone && newL > tL + 25) {
-            newL = tL + 25 + (newL - tL - 25) * 0.2;
-          }
-          const rawDeltaA = (tA - pa) * AB_BLEND;
-          const rawDeltaB = (tB - pb) * AB_BLEND;
-          const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
-          const clampedDeltaB = rawDeltaB < 0
-            ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
-            : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
-          const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
-          const newBv = Math.max(-128, Math.min(127, pb + clampedDeltaB));
-          const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
-          const satBoost = 0.90 + cBoost * 0.15;
-          const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
-          const bSatBoost = newBv < 0 ? Math.min(satBoost, 1.0) : satBoost;
-          const boostedB = Math.max(-128, Math.min(127, newBv * bSatBoost));
-          let [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
-          // Apply overlay inline (avoids second full-image pass)
-          if (applyOverlay) {
-            if (olMode === 'softlight') {
-              const sl2 = (base: number, blend: number) => { const b2=blend/255,s=base/255; return Math.round((b2<0.5?s-(1-2*b2)*s*(1-s):s+(2*b2-1)*(Math.sqrt(s)-s))*255); };
-              nr = Math.round(nr*(1-str)+sl2(nr,tR)*str);
-              ng = Math.round(ng*(1-str)+sl2(ng,tG)*str);
-              nb = Math.round(nb*(1-str)+sl2(nb,tBv)*str);
-            } else {
-              nr = Math.round(nr*(1-str)+tR*str);
-              ng = Math.round(ng*(1-str)+tG*str);
-              nb = Math.round(nb*(1-str)+tBv*str);
-            }
-          }
-          outData[pi]   = nr;
-          outData[pi+1] = ng;
-          outData[pi+2] = nb;
-          outData[pi+3] = td[pi+3];
-        }
-        const outImageData = bCtx.createImageData(actualTile, actualTile);
-        outImageData.data.set(outData);
-        bCtx.putImageData(outImageData, 0, 0);
-        ctx.drawImage(bCanvas, x, y, actualTile, actualTile);
-      } catch {
-        // Fallback: fill with target pixel color
-        ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
-        ctx.fillRect(x, y, actualTile, actualTile);
-        if (process.env.NODE_ENV !== 'production') {
-          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} LAB transfer failed, using target color`);
-        }
-      }
-    } else {
-      // Fallback: use target color
-      ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
-      ctx.fillRect(x, y, actualTile, actualTile);
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
+  if (numWorkers >= 2) {
+    // Step 1: Create ImageBitmaps for all unique tile images
+    onProgress?.(16, 'Tile-Bitmaps vorbereiten...');
+    const uniqueTileIdxs = [...new Set(assignment)];
+    const bitmapMap: Record<number, ImageBitmap> = {};
+    const bmpPromises: Promise<void>[] = [];
+    for (const idx of uniqueTileIdxs) {
+      const reloadedImg = hiResReloadMap[idx];
+      const hiImg = reloadedImg || hiResImgs[idx];
+      const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
+      if (img && img.complete && img.naturalWidth > 0) {
+        bmpPromises.push(
+          createImageBitmap(img).then(bmp => { bitmapMap[idx] = bmp; }).catch(() => {})
+        );
       }
     }
-    if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+    await Promise.all(bmpPromises);
+    console.log(`[PrintRender] Created ${Object.keys(bitmapMap).length}/${uniqueTileIdxs.length} ImageBitmaps`);
+
+    // Step 2: Split rows across workers
+    const rowsPerWorker = Math.ceil(rows / numWorkers);
+    const workerPromises: Promise<{ workerId: number; bitmap: ImageBitmap; startRow: number }>[] = [];
+    const workers: Worker[] = [];
+
+    let totalProcessed = 0;
+
+    for (let wi = 0; wi < numWorkers; wi++) {
+      const startRow = wi * rowsPerWorker;
+      const endRow = Math.min(startRow + rowsPerWorker, rows);
+      if (startRow >= endRow) break;
+      const stripRows = endRow - startRow;
+
+      // Build task list for this worker's rows
+      const tasks: Array<{
+        col: number; row: number; assignment: number; rotation: number;
+        tR: number; tG: number; tBv: number; tL: number; tA: number; tB: number;
+        edgeVal: number; faceMaskVal: boolean;
+      }> = [];
+      for (let r = startRow; r < endRow; r++) {
+        for (let c = 0; c < cols; c++) {
+          const ci = r * cols + c;
+          const idx = assignment[ci];
+          const tci = ci * 3;
+          const tR = tc.length > tci + 2 ? tc[tci] : 128;
+          const tG = tc.length > tci + 2 ? tc[tci + 1] : 128;
+          const tBv = tc.length > tci + 2 ? tc[tci + 2] : 128;
+          const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : fastRgbToLab(tR, tG, tBv);
+          tasks.push({
+            col: c, row: r - startRow, assignment: idx, rotation: rotations[ci] || 0,
+            tR, tG, tBv, tL, tA, tB,
+            edgeVal: em.length > ci ? em[ci] : 0,
+            faceMaskVal: fm.length > ci ? !!fm[ci] : false,
+          });
+        }
+      }
+
+      // Only send bitmaps that this worker actually needs
+      const neededIdxs = new Set(tasks.map(t => t.assignment));
+      const workerBitmaps: Record<number, ImageBitmap> = {};
+      for (const idx of neededIdxs) {
+        if (bitmapMap[idx]) workerBitmaps[idx] = bitmapMap[idx];
+      }
+
+      const workerPromise = new Promise<{ workerId: number; bitmap: ImageBitmap; startRow: number }>((resolve, reject) => {
+        const worker = new Worker(
+          new URL('../workers/tileRenderWorker.ts', import.meta.url),
+          { type: 'module' },
+        );
+        workers.push(worker);
+
+        const timeout = setTimeout(() => {
+          worker.terminate();
+          reject(new Error(`Worker ${wi} timeout`));
+        }, 300000); // 5 min timeout
+
+        worker.onmessage = (ev: MessageEvent) => {
+          if (ev.data.type === 'progress') {
+            totalProcessed += 50;
+            onProgress?.(15 + Math.round((totalProcessed / total) * 55), `Tiles: ${totalProcessed}/${total}`);
+          } else if (ev.data.type === 'stripDone') {
+            clearTimeout(timeout);
+            worker.terminate();
+            resolve({ workerId: wi, bitmap: ev.data.bitmap, startRow });
+          }
+        };
+        worker.onerror = (err) => {
+          clearTimeout(timeout);
+          worker.terminate();
+          reject(err);
+        };
+
+        worker.postMessage({
+          type: 'renderStrip',
+          tileBitmaps: workerBitmaps,
+          tasks,
+          params: { actualTile, cols, L_BLEND, AB_BLEND, MAX_COLOR_SHIFT, MAX_BLUE_SHIFT, cBoost, BASE_OL, EDGE_B, olMode },
+          stripRows,
+          workerId: wi,
+        });
+      });
+      workerPromises.push(workerPromise);
+    }
+
+    onProgress?.(18, `${numWorkers} Worker gestartet...`);
+
+    // Step 3: Await all workers and composite strips
+    const results = await Promise.all(workerPromises);
+    onProgress?.(72, 'Strips zusammenfügen...');
+    for (const { bitmap, startRow } of results) {
+      ctx.drawImage(bitmap, 0, startRow * actualTile);
+      bitmap.close();
+    }
+    // Clean up ImageBitmaps
+    for (const bmp of Object.values(bitmapMap)) bmp.close();
+
+  } else {
+    // ── Fallback: single-threaded rendering (no OffscreenCanvas support) ──
+    const bCanvas = document.createElement('canvas');
+    bCanvas.width = actualTile; bCanvas.height = actualTile;
+    const bCtx = bCanvas.getContext('2d')!;
+    for (let ci = 0; ci < total; ci++) {
+      const col = ci % cols, row = Math.floor(ci / cols);
+      const x = col * actualTile, y = row * actualTile;
+      const idx = assignment[ci];
+      const reloadedImg = hiResReloadMap[idx];
+      const hiImg = reloadedImg || hiResImgs[idx];
+      const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
+      const rot = rotations[ci] || 0;
+      const tci = ci * 3;
+      const tR = tc.length > tci+2 ? tc[tci] : 128;
+      const tG = tc.length > tci+2 ? tc[tci+1] : 128;
+      const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
+      const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : fastRgbToLab(tR, tG, tBv);
+
+      if (img && img.complete && img.naturalWidth > 0) {
+        try {
+          bCtx.clearRect(0, 0, actualTile, actualTile);
+          if (rot === 0) { bCtx.drawImage(img, 0, 0, actualTile, actualTile); }
+          else { bCtx.save(); bCtx.translate(actualTile/2, actualTile/2); bCtx.rotate(rot * Math.PI/2); bCtx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); bCtx.restore(); }
+
+          const isShadowZone = tL < 40;
+          const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
+          const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+          const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
+          const td = tilePixels.data;
+          const REF_N = 8;
+          const stepY = Math.max(1, Math.floor(actualTile / REF_N));
+          const stepX = Math.max(1, Math.floor(actualTile / REF_N));
+          let sumL = 0, pCount = 0;
+          for (let sy = 0; sy < REF_N; sy++) {
+            const py = Math.min(sy * stepY, actualTile - 1);
+            for (let sx = 0; sx < REF_N; sx++) {
+              const px = Math.min(sx * stepX, actualTile - 1);
+              const pi = (py * actualTile + px) * 4;
+              sumL += fastRgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+              pCount++;
+            }
+          }
+          const avgL = pCount > 0 ? sumL / pCount : 50;
+          const rawLumScale = avgL > 1 ? tL / avgL : 1;
+          const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
+          const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
+          const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+          const edge = em.length > ci ? em[ci] : 0;
+          const fb = fm.length > ci && fm[ci] ? 0.04 : 0;
+          const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;
+          const applyOverlay = str > 0.01;
+          const outData = new Uint8ClampedArray(td.length);
+          for (let pi = 0; pi < td.length; pi += 4) {
+            const [pl, pa, pb] = fastRgbToLab(td[pi], td[pi+1], td[pi+2]);
+            let newL = Math.max(0, Math.min(100, pl * lumScale));
+            if (isShadowZone && shadowBoost > 0.05) {
+              const deviation = pl - avgL;
+              const stretchFactor = 1.0 + shadowBoost * 0.4;
+              newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+            }
+            if (isShadowZone && newL > tL + 25) { newL = tL + 25 + (newL - tL - 25) * 0.2; }
+            const rawDeltaA = (tA - pa) * AB_BLEND;
+            const rawDeltaB = (tB - pb) * AB_BLEND;
+            const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+            const clampedDeltaB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+            const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+            const newBv = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+            const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+            const satBoost = 0.90 + cBoost * 0.15;
+            const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+            const bSatBoost = newBv < 0 ? Math.min(satBoost, 1.0) : satBoost;
+            const boostedB = Math.max(-128, Math.min(127, newBv * bSatBoost));
+            let [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+            if (applyOverlay) {
+              if (olMode === 'softlight') {
+                const sl2 = (base: number, blend: number) => { const b2=blend/255,s=base/255; return Math.round((b2<0.5?s-(1-2*b2)*s*(1-s):s+(2*b2-1)*(Math.sqrt(s)-s))*255); };
+                nr = Math.round(nr*(1-str)+sl2(nr,tR)*str); ng = Math.round(ng*(1-str)+sl2(ng,tG)*str); nb = Math.round(nb*(1-str)+sl2(nb,tBv)*str);
+              } else {
+                nr = Math.round(nr*(1-str)+tR*str); ng = Math.round(ng*(1-str)+tG*str); nb = Math.round(nb*(1-str)+tBv*str);
+              }
+            }
+            outData[pi] = nr; outData[pi+1] = ng; outData[pi+2] = nb; outData[pi+3] = td[pi+3];
+          }
+          const outImageData = bCtx.createImageData(actualTile, actualTile);
+          outImageData.data.set(outData);
+          bCtx.putImageData(outImageData, 0, 0);
+          ctx.drawImage(bCanvas, x, y, actualTile, actualTile);
+        } catch {
+          ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
+          ctx.fillRect(x, y, actualTile, actualTile);
+        }
+      } else {
+        ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
+        ctx.fillRect(x, y, actualTile, actualTile);
+      }
+      if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+    }
   }
 
   // Apply user photo overlay (Foto-Overlay slider) — same as preview
