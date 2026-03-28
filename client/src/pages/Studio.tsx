@@ -5117,12 +5117,14 @@ export default function Studio() {
             onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
           });
 
-          const printUrl = URL.createObjectURL(printBlob);
+          // Re-wrap blob with explicit MIME type to prevent Edge from showing PDF icon
+          const jpgBlob1 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+          const printUrl = URL.createObjectURL(jpgBlob1);
           const dlLink = document.createElement('a');
-          dlLink.href = printUrl; dlLink.download = printFilename; dlLink.style.display = 'none';
+          dlLink.href = printUrl; dlLink.download = printFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
           document.body.appendChild(dlLink); dlLink.click();
           setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
-          setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
+          setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob1.size / 1024 / 1024).toFixed(1)} MB)`);
           setDlProgress(100);
         } catch (e) {
           console.error('[ClientPrint] Failed:', e);
@@ -5151,12 +5153,14 @@ export default function Studio() {
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
-        const printUrl = URL.createObjectURL(printBlob);
+        // Re-wrap blob with explicit MIME type to prevent Edge from showing PDF icon
+        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+        const printUrl = URL.createObjectURL(jpgBlob2);
         const dlLink = document.createElement('a');
-        dlLink.href = printUrl; dlLink.download = printFilename; dlLink.style.display = 'none';
+        dlLink.href = printUrl; dlLink.download = printFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
         document.body.appendChild(dlLink); dlLink.click();
         setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
-        setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
+        setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
         setDlProgress(100);
         // Upload print file to R2 and save URL in project
         if (savedProjectIdRef.current && user) {
@@ -5275,12 +5279,14 @@ export default function Studio() {
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
 
-      const url = URL.createObjectURL(blob);
+      const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
+      const blob3 = new Blob([await blob.arrayBuffer()], { type: mimeType3 });
+      const url = URL.createObjectURL(blob3);
       const dlLink = document.createElement('a');
-      dlLink.href = url; dlLink.download = filename; dlLink.style.display = 'none';
+      dlLink.href = url; dlLink.download = filename; dlLink.type = mimeType3; dlLink.style.display = 'none';
       document.body.appendChild(dlLink); dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
-      setDlProgressMsg(`✓ Download: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${filename} (${(blob3.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
@@ -5319,12 +5325,13 @@ export default function Studio() {
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
 
-      const adminUrl = URL.createObjectURL(adminBlob);
+      const adminBlob2 = new Blob([await adminBlob.arrayBuffer()], { type: 'image/jpeg' });
+      const adminUrl = URL.createObjectURL(adminBlob2);
       const dlLink = document.createElement('a');
-      dlLink.href = adminUrl; dlLink.download = adminFilename; dlLink.style.display = 'none';
+      dlLink.href = adminUrl; dlLink.download = adminFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
       document.body.appendChild(dlLink); dlLink.click();
       setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(adminUrl); }, 10000);
-      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
