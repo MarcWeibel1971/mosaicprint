@@ -178,6 +178,24 @@ async function renderMosaicClientSide(opts: {
     userOverlay = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
+  // ── PERFORMANCE: Pre-compute LUT for sRGB→Linear (eliminates Math.pow per pixel) ──
+  const linearLUT = new Float64Array(256);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255;
+    linearLUT[i] = v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  // Fast rgbToLab using LUT (avoids 2× Math.pow + 3× Math.cbrt per pixel)
+  const fastRgbToLab = (r: number, g: number, b: number): [number, number, number] => {
+    const rl = linearLUT[r], gl = linearLUT[g], bl = linearLUT[b];
+    const x = (rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375) / 0.95047;
+    const y = (rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750);
+    const z = (rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041) / 1.08883;
+    const fx = x > 0.008856 ? Math.cbrt(x) : 7.787 * x + 0.137931;
+    const fy = y > 0.008856 ? Math.cbrt(y) : 7.787 * y + 0.137931;
+    const fz = z > 0.008856 ? Math.cbrt(z) : 7.787 * z + 0.137931;
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+  };
+
   onProgress?.(2, 'Tiles prüfen...');
 
   // Pre-check: count how many tile images are still available
@@ -335,10 +353,6 @@ async function renderMosaicClientSide(opts: {
   const bCanvas = document.createElement('canvas');
   bCanvas.width = actualTile; bCanvas.height = actualTile;
   const bCtx = bCanvas.getContext('2d')!;
-  // Direct pixel subsampling for avgL (no extra canvas needed)
-  // Sample every Nth pixel from getImageData for consistent avgL with preview
-  const REF_SAMPLES = 64; // 8x8 equivalent sample count
-
   for (let ci = 0; ci < total; ci++) {
     const col = ci % cols, row = Math.floor(ci / cols);
     const x = col * actualTile, y = row * actualTile;
@@ -354,7 +368,7 @@ async function renderMosaicClientSide(opts: {
     const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
     // Use cellLab if available (blurred+original mix, same as renderMosaic) for accurate color correction
     // Fallback: compute from raw targetColors (100% original, slightly different)
-    const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : rgbToLab(tR, tG, tBv);
+    const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : fastRgbToLab(tR, tG, tBv);
 
     if (img && img.complete && img.naturalWidth > 0) {
       try {
@@ -370,17 +384,23 @@ async function renderMosaicClientSide(opts: {
 
         const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
         const td = tilePixels.data;
-        // Compute tile average L by direct subsampling of getImageData (no extra canvas).
-        // Sample REF_SAMPLES evenly-spaced pixels — equivalent to 8x8 downsample.
-        const totalPx = td.length / 4;
-        const step = Math.max(1, Math.floor(totalPx / REF_SAMPLES));
-        let sumL = 0, sampleCount = 0;
-        for (let si = 0; si < totalPx; si += step) {
-          const spi = si * 4;
-          sumL += rgbToLab(td[spi], td[spi+1], td[spi+2])[0];
-          sampleCount++;
+        // Compute tile average L using 8x8 subsample from existing pixel data.
+        // No extra canvas needed — just step through the pixel array at regular intervals.
+        // This matches the preview behavior (which also uses 8x8 reference).
+        const REF_N = 8;
+        const stepY = Math.max(1, Math.floor(actualTile / REF_N));
+        const stepX = Math.max(1, Math.floor(actualTile / REF_N));
+        let sumL = 0, pCount = 0;
+        for (let sy = 0; sy < REF_N; sy++) {
+          const py = Math.min(sy * stepY, actualTile - 1);
+          for (let sx = 0; sx < REF_N; sx++) {
+            const px = Math.min(sx * stepX, actualTile - 1);
+            const pi = (py * actualTile + px) * 4;
+            sumL += fastRgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+            pCount++;
+          }
         }
-        const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
+        const avgL = pCount > 0 ? sumL / pCount : 50;
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
         const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
         const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
@@ -394,7 +414,7 @@ async function renderMosaicClientSide(opts: {
 
         const outData = new Uint8ClampedArray(td.length);
         for (let pi = 0; pi < td.length; pi += 4) {
-          const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+          const [pl, pa, pb] = fastRgbToLab(td[pi], td[pi+1], td[pi+2]);
           let newL = Math.max(0, Math.min(100, pl * lumScale));
           if (isShadowZone && shadowBoost > 0.05) {
             const deviation = pl - avgL;
@@ -982,14 +1002,14 @@ export default function Studio() {
     // Mobile Safari limits total canvas area to ~16.7 MP (4096×4096).
     // Desktop can handle much larger canvases (up to ~268 MP).
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
-    // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
-    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
-    const maxCanvasDim = isMob ? 8192 : 16000;
+    // Mobile: much smaller canvas to prevent memory eviction of main canvas.
+    // iOS Safari limits total canvas area to ~16.7 MP, and we need headroom for the main canvas + snapshot.
+    const maxCanvasArea = isMob ? 16_000_000 : 200_000_000; // 16 MP mobile (safe for iOS), 200 MP desktop
+    const maxCanvasDim = isMob ? 4096 : 16000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
-    const idealMobileTile = 256;
+    // Mobile: 96px tiles — enough for 2-3x zoom sharpness without blowing memory
+    const idealMobileTile = 96;
     const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
@@ -1315,17 +1335,30 @@ export default function Studio() {
       setHiResLoading(false);
       // MOBILE FIX: Restore main canvas from snapshot after hi-res render.
       // Mobile browsers may evict main canvas pixels when large hi-res canvases
-      // are created (canvas memory pressure). This restores the mosaic appearance.
+      // are created (canvas memory pressure). The evicted canvas may appear as
+      // all-transparent (0,0,0,0) or all-black (0,0,0,255) depending on the browser.
       const mainCanvas = canvasRef.current;
       const snap = snapshotRef.current;
-      if (mainCanvas && snap) {
+      if (mainCanvas && snap && mainCanvas.width > 0 && mainCanvas.height > 0) {
         const mainCtx = mainCanvas.getContext('2d');
         if (mainCtx) {
           try {
-            // Check if canvas was evicted (first pixel is 0,0,0,0 = transparent)
-            const probe = mainCtx.getImageData(0, 0, 1, 1).data;
-            if (probe[3] === 0 && snap.data[3] !== 0) {
-              console.warn('[ClientHiRes] Main canvas was evicted, restoring from snapshot');
+            // Sample a few pixels across the canvas to detect eviction
+            const w = mainCanvas.width, h = mainCanvas.height;
+            const probePoints = [
+              [0, 0], [Math.floor(w/2), Math.floor(h/2)], [w-1, h-1],
+              [Math.floor(w/4), Math.floor(h/4)], [Math.floor(3*w/4), Math.floor(3*h/4)],
+            ];
+            let allZero = true;
+            for (const [px, py] of probePoints) {
+              const p = mainCtx.getImageData(px, py, 1, 1).data;
+              if (p[0] !== 0 || p[1] !== 0 || p[2] !== 0 || p[3] !== 0) {
+                allZero = false;
+                break;
+              }
+            }
+            if (allZero) {
+              console.warn('[ClientHiRes] Main canvas was evicted (all probe pixels zero), restoring from snapshot');
               mainCtx.putImageData(snap, 0, 0);
             }
           } catch { /* ignore */ }
@@ -4587,6 +4620,36 @@ export default function Studio() {
     }, 1500);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  // MOBILE: Periodic canvas health check — restore from snapshot if browser evicted pixels.
+  // Mobile browsers aggressively reclaim canvas memory under pressure (zoom, hi-res, pop-out).
+  // This runs every 2s while the mosaic is visible and restores if all sampled pixels are zero.
+  useEffect(() => {
+    if (!ready) return;
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    if (!isMob) return;
+    const interval = setInterval(() => {
+      const mainCanvas = canvasRef.current;
+      const snap = snapshotRef.current;
+      if (!mainCanvas || !snap || mainCanvas.width === 0) return;
+      const ctx = mainCanvas.getContext('2d');
+      if (!ctx) return;
+      try {
+        const w = mainCanvas.width, h = mainCanvas.height;
+        const probes = [[0,0],[Math.floor(w/2),Math.floor(h/2)],[w-1,h-1]];
+        let allZero = true;
+        for (const [px, py] of probes) {
+          const p = ctx.getImageData(px, py, 1, 1).data;
+          if (p[0] !== 0 || p[1] !== 0 || p[2] !== 0 || p[3] !== 0) { allZero = false; break; }
+        }
+        if (allZero) {
+          console.warn('[CanvasHealth] Main canvas evicted, restoring from snapshot');
+          ctx.putImageData(snap, 0, 0);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
   }, [ready]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
