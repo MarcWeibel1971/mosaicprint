@@ -4357,25 +4357,37 @@ export default function Studio() {
     setShowOrderPanel(true);
   }, []);
 
-  // Pop-Out effect: re-render snapshot with gaps + shadows between tiles
+  // Pop-Out effect: render individual tiles large enough to see (min ~4cm = ~150px)
   const renderPopOut = useCallback(() => {
     const snapshot = snapshotRef.current;
     const params = mosaicParamsRef.current;
     const popContainer = popOutContainerRef.current;
     if (!snapshot || !params || !popContainer) return;
     const { cols, rows, tilePx } = params;
-    const displayScale = (params as any)._displayScale || 1;
-    const gap = Math.max(1, Math.round(tilePx * 0.12)); // 12% gap between tiles
-    // Internal pixel dimensions
-    const outW = cols * (tilePx + gap) + gap;
-    const outH = rows * (tilePx + gap) + gap;
-    // CSS display dimensions (matching how the normal canvas is sized)
-    const cssW = Math.round(outW * displayScale);
-    const cssH = Math.round(outH * displayScale);
-    const cssTilePx = tilePx * displayScale;
-    const cssGap = gap * displayScale;
 
-    // Create source canvas from snapshot
+    // Determine tile display size: at least 150px (~4cm on screen), fit within viewport
+    const viewW = window.innerWidth * 0.92;
+    const viewH = window.innerHeight * 0.7;
+    const minTileCss = 150; // ~4cm on mobile
+    // Scale so tiles fill the viewport area, but each tile is at least minTileCss
+    const gap = 4; // fixed 4px gap
+    const fitTileCss = Math.floor(Math.min(
+      (viewW - gap * (cols + 1)) / cols,
+      (viewH - gap * (rows + 1)) / rows
+    ));
+    const cssTilePx = Math.max(minTileCss, fitTileCss);
+    const cssW = cols * (cssTilePx + gap) + gap;
+    const cssH = rows * (cssTilePx + gap) + gap;
+
+    // Hi-res source: use loaded tile images if available, otherwise snapshot
+    const validImgs = validImgsRef.current;
+    const assignment = assignmentRef.current;
+    const rotations = assignmentRotRef.current;
+
+    // Canvas resolution per tile for sharp rendering (match CSS size or higher)
+    const canvasTilePx = Math.min(256, Math.max(cssTilePx, 128));
+
+    // Create source canvas from snapshot as fallback
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = snapshot.width;
     srcCanvas.height = snapshot.height;
@@ -4388,22 +4400,49 @@ export default function Studio() {
     popContainer.style.background = '#1a1a1a';
     popContainer.style.position = 'relative';
     popContainer.style.overflow = 'visible';
+    popContainer.style.borderRadius = '12px';
 
-    // Create individual tile canvases that GSAP can animate
+    // Create individual tile canvases with sharp rendering
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
+        const ci = row * cols + col;
         const tileCanvas = document.createElement('canvas');
-        tileCanvas.width = tilePx;
-        tileCanvas.height = tilePx;
+        tileCanvas.width = canvasTilePx;
+        tileCanvas.height = canvasTilePx;
         tileCanvas.className = 'pop-wave-tile';
         const tCtx = tileCanvas.getContext('2d')!;
-        tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, tilePx, tilePx);
-        const dx = cssGap + col * (cssTilePx + cssGap);
-        const dy = cssGap + row * (cssTilePx + cssGap);
-        const shadowX = Math.max(1, Math.round(cssTilePx * 0.04));
-        const shadowY = Math.max(1, Math.round(cssTilePx * 0.06));
-        const shadowBlur = Math.max(2, Math.round(cssTilePx * 0.15));
-        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${cssTilePx}px;height:${cssTilePx}px;transform-origin:center center;will-change:transform;box-shadow:${shadowX}px ${shadowY}px ${shadowBlur}px rgba(0,0,0,0.45);border-radius:1px;`;
+        tCtx.imageSmoothingEnabled = true;
+        tCtx.imageSmoothingQuality = 'high';
+
+        // Try to draw from the original tile image (sharp)
+        let drawn = false;
+        if (assignment && validImgs) {
+          const tileIdx = assignment[ci];
+          const img = validImgs[tileIdx];
+          if (img && img.complete && img.naturalWidth > 0) {
+            try {
+              const rot = rotations?.[ci] || 0;
+              if (rot === 0) {
+                tCtx.drawImage(img, 0, 0, canvasTilePx, canvasTilePx);
+              } else {
+                tCtx.save();
+                tCtx.translate(canvasTilePx / 2, canvasTilePx / 2);
+                tCtx.rotate(rot * Math.PI / 2);
+                tCtx.drawImage(img, -canvasTilePx / 2, -canvasTilePx / 2, canvasTilePx, canvasTilePx);
+                tCtx.restore();
+              }
+              drawn = true;
+            } catch { /* fallback below */ }
+          }
+        }
+        // Fallback: extract from snapshot
+        if (!drawn) {
+          tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, canvasTilePx, canvasTilePx);
+        }
+
+        const dx = gap + col * (cssTilePx + gap);
+        const dy = gap + row * (cssTilePx + gap);
+        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${cssTilePx}px;height:${cssTilePx}px;transform-origin:center center;will-change:transform;box-shadow:2px 3px 10px rgba(0,0,0,0.4);border-radius:3px;`;
         popContainer.appendChild(tileCanvas);
       }
     }
@@ -5805,15 +5844,7 @@ export default function Studio() {
                       maxWidth: "none",
                     }}
                   />
-                  {/* Pop-Out tile container (individual tiles for GSAP animation) */}
-                  <div
-                    ref={popOutContainerRef}
-                    style={{
-                      display: popOutMode && ready ? "block" : "none",
-                      imageRendering: zoom > 1 ? "pixelated" : "auto",
-                      maxWidth: "none",
-                    }}
-                  />
+                  {/* Pop-Out container moved to fullscreen overlay below */}
                   {/* Hi-Res image overlay - sharp zoom (show from zoom > 1.5 for better quality on mobile) */}
                   {hiResImgUrl && hiResReady && zoom > 1.5 && (
                     <img
@@ -6594,6 +6625,36 @@ export default function Studio() {
           </div>
         )}
       </div>
+
+      {/* Pop-Out Fullscreen Overlay */}
+      {popOutMode && ready && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 50,
+            background: 'rgba(15,15,20,0.95)',
+            overflow: 'auto',
+            WebkitOverflowScrolling: 'touch',
+          }}
+        >
+          {/* Close button */}
+          <button
+            onClick={() => setPopOutMode(false)}
+            style={{
+              position: 'fixed', top: 16, right: 16, zIndex: 60,
+              width: 40, height: 40, borderRadius: '50%',
+              background: 'rgba(255,255,255,0.15)', border: 'none',
+              color: 'white', fontSize: 20, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            ✕
+          </button>
+          <div style={{ padding: '60px 16px 32px', display: 'flex', justifyContent: 'center' }}>
+            <div ref={popOutContainerRef} />
+          </div>
+        </div>
+      )}
 
       {/* Stripe Payment Modal */}
       {/* Photo Preview Modal */}
