@@ -4409,37 +4409,56 @@ export default function Studio() {
     }
   }, []);
 
-  // Toggle pop-out: render tiles + GSAP Welleneffekt
+  // Toggle pop-out: render tiles + GSAP random fly-out effect
   useEffect(() => {
     if (popOutMode && ready) {
       renderPopOut();
-      // Kurze Verzögerung damit die Tiles gerendert sind, dann Welleneffekt starten
       setTimeout(() => {
         const popContainer = popOutContainerRef.current;
         if (!popContainer) return;
         const params = mosaicParamsRef.current;
         if (!params) return;
-        const { cols, rows } = params;
-        // GSAP Welleneffekt auf die echten Tile-Canvases
         if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); }
-        const tiles = popContainer.querySelectorAll('.pop-wave-tile');
-        if (tiles.length === 0) return;
-        popOutWaveTlRef.current = gsap.timeline({ repeat: -1, repeatDelay: 1.2 })
-          .to(tiles, {
-            scale: 1.15,
-            duration: 0.6,
-            ease: 'power2.out',
-            stagger: { amount: 2.0, from: 'center', grid: [rows, cols] },
-          })
-          .to(tiles, {
-            scale: 1,
-            duration: 0.55,
-            ease: 'power2.inOut',
-            stagger: { amount: 1.6, from: 'center', grid: [rows, cols] },
-          }, '+=0.2');
+        const allTiles = Array.from(popContainer.querySelectorAll('.pop-wave-tile'));
+        if (allTiles.length === 0) return;
+
+        // Endlos-Timeline: zufällige Kacheln fliegen nacheinander "entgegen"
+        const tl = gsap.timeline({ repeat: -1, repeatDelay: 0.3 });
+
+        // Pro Durchlauf ~8-12 zufällige Kacheln animieren
+        const numPerBatch = Math.min(Math.max(6, Math.round(allTiles.length * 0.01)), 12);
+        const totalBatches = 5; // 5 Durchläufe pro Repeat-Zyklus
+
+        for (let batch = 0; batch < totalBatches; batch++) {
+          // Zufällige Kacheln auswählen (ohne Duplikate pro Batch)
+          const shuffled = [...allTiles].sort(() => Math.random() - 0.5);
+          const selected = shuffled.slice(0, numPerBatch);
+
+          selected.forEach((tile, i) => {
+            const delay = batch * 1.8 + i * 0.15;
+            // Fly towards viewer: scale up + lift with shadow + slight rotation
+            tl.to(tile, {
+              scale: 1.6,
+              zIndex: 20,
+              boxShadow: '0 8px 30px rgba(0,0,0,0.6)',
+              duration: 0.5,
+              ease: 'back.out(1.4)',
+            }, delay);
+            // Zurück ins Mosaik
+            tl.to(tile, {
+              scale: 1,
+              zIndex: 0,
+              boxShadow: '',
+              duration: 0.6,
+              ease: 'power2.inOut',
+            }, delay + 0.7);
+          });
+        }
+
+        popOutWaveTlRef.current = tl;
       }, 80);
     } else {
-      // Pop-out deaktiviert: Welleneffekt stoppen und Tiles entfernen
+      // Pop-out deaktiviert: Effekt stoppen und Tiles entfernen
       if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); popOutWaveTlRef.current = null; }
       const popContainer = popOutContainerRef.current;
       if (popContainer) popContainer.innerHTML = '';
