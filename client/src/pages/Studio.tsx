@@ -2569,7 +2569,7 @@ export default function Studio() {
       downscaleCtx.drawImage(img, 0, 0, MOBILE_TILE_DOWNSCALE, MOBILE_TILE_DOWNSCALE);
       const smallImg = new Image();
       smallImg.src = downscaleCanvas.toDataURL('image/jpeg', 0.8);
-      smallImg.dataset.originalSrc = img.dataset.originalSrc || '';
+      smallImg.dataset.originalSrc = (img.dataset && img.dataset.originalSrc) ? img.dataset.originalSrc : '';
       return smallImg;
     }
 
@@ -4044,7 +4044,8 @@ export default function Studio() {
         const bCtx = boostCanvas.getContext('2d')!;
         try { bCtx.drawImage(tileOffscreen, 0, 0); } catch { bCtx.drawImage(tileOffscreen, 0, 0, TILE_PX, TILE_PX); }
         // Store original URL for hi-res re-render
-        tilesRef.current[ci].url = img.dataset.originalSrc || img.src;
+        // Note: user-uploaded tiles (from canvas.toDataURL) may not have dataset.originalSrc
+        tilesRef.current[ci].url = (img.dataset && img.dataset.originalSrc) ? img.dataset.originalSrc : img.src;
         // -- Professional Luminance-Scale + Moderate AB-Transfer (Reinhard-style) --------
         // Based on best-practice mosaic engine pipeline:
         //   1. Luminance scaling: pixel.L *= (targetL / tileAvgL)   -> clamp 0.6-1.5
