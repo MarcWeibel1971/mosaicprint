@@ -382,6 +382,7 @@ export default function Studio() {
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [colorEnhance, setColorEnhance] = useState(0); // 0-100: tint tiles toward target color
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
+  const [userOverlayUrl, setUserOverlayUrl] = useState<string | null>(null); // data URL of target photo at canvas aspect ratio
   const [compareMode, setCompareMode] = useState(false);
   const [distancePreview, setDistancePreview] = useState(false); // Simulate 2-3m viewing distance
   const [comparePos, setComparePos] = useState(50);
@@ -1701,6 +1702,14 @@ export default function Studio() {
     const targetCtx = targetCanvas.getContext("2d")!;
     targetCtx.drawImage(targetImg, 0, 0, targetW, targetH);
     const targetPixels = targetCtx.getImageData(0, 0, targetW, targetH).data;
+
+    // Create overlay image at canvas aspect ratio (prevents misalignment on mobile)
+    {
+      const olCanvas = document.createElement('canvas');
+      olCanvas.width = CANVAS_W; olCanvas.height = CANVAS_H;
+      olCanvas.getContext('2d')!.drawImage(targetImg, 0, 0, CANVAS_W, CANVAS_H);
+      setUserOverlayUrl(olCanvas.toDataURL('image/jpeg', 0.92));
+    }
 
     // Extract target region pixels for each cell (flattened RGB arrays)
     // targetRegions[cellIndex] = Uint8Array of SSD_SIZE*SSD_SIZE*3 values
@@ -5472,15 +5481,16 @@ export default function Studio() {
                       />
                     );
                   })()}
-                  {/* User overlay - original photo shown on top of everything (including hi-res) */}
-                  {userPhotoImg && userOverlay > 0 && ready && (
+                  {/* User overlay - original photo at canvas aspect ratio (prevents mobile misalignment) */}
+                  {userOverlayUrl && userOverlay > 0 && ready && (
                     <img
-                      src={userPhotoImg.src}
+                      src={userOverlayUrl}
                       alt=""
                       style={{
                         display: "block",
                         position: "absolute",
                         top: 0, left: 0, width: "100%", height: "100%",
+                        objectFit: "fill",
                         opacity: userOverlay / 100,
                         pointerEvents: "none",
                         mixBlendMode: "normal",
