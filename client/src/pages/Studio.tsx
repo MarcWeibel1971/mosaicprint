@@ -781,6 +781,7 @@ export default function Studio() {
   const targetColorsRef = useRef<number[]>([]); // flat [r,g,b,r,g,b,...] per cell (COLS×ROWS)
   const edgeMapRef = useRef<number[]>([]);      // edge strength 0-1 per cell
   const faceMaskRef = useRef<boolean[]>([]);     // face region flag per cell
+  const cellLabRef = useRef<[number, number, number][]>([]); // LAB target color per cell (for hi-res color correction)
   const assignmentRotRef = useRef<number[]>([]);  // rotation per cell (0-3)
   const colorEnhanceCanvasRef = useRef<HTMLCanvasElement | null>(null); // small canvas with target colors per cell
   const colorEnhanceRef = useRef(0); // current colorEnhance value for use in callbacks
@@ -1164,91 +1165,100 @@ export default function Studio() {
         if (ci % 200 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
-      // 2. Apply contrast boost + soft-light overlay to match main canvas appearance
-      // Skip on mobile: the per-pixel processing is too expensive (getImageData on large canvas
-      // can crash mobile Safari). The CSS Color Enhance overlay handles color correction instead.
+      // 2. Apply LAB-based color correction to match main canvas appearance
+      // The main render applies luminance scaling + AB color transfer per tile (Reinhard-style).
+      // Hi-res uses original photos which are more saturated/different than 64px thumbnails.
+      // We apply the same LAB correction here to ensure visual consistency between preview and zoom.
+      // Skip on mobile: getImageData on large canvas can crash mobile Safari.
       if (!isMob) {
         const hrW = hrCanvas!.width;
         const hrH = hrCanvas!.height;
         const hrImageData = hrCtx!.getImageData(0, 0, hrW, hrH);
         const hd = hrImageData.data;
-        const tc = targetColorsRef.current;
-        const em = edgeMapRef.current;
-        const fm = faceMaskRef.current;
+        const cellLabData = cellLabRef.current;  // LAB target per cell
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-        // IMPORTANT: Use same defaults as main renderMosaic to ensure visual consistency.
-        // Main render defaults: overlayMode='none', no contrastBoost.
-        // Hi-res must match exactly – any divergence causes visible color difference when zooming.
-        const cBoost = algoSettings.contrastBoost ?? 1.0;   // 1.0 = no boost (match main render)
-        const BASE_OL = algoSettings.baseOverlay ?? 0.08;
-        const EDGE_B = algoSettings.edgeBoost ?? 0.10;
-        const olMode = algoSettings.overlayMode ?? 'none';  // match main render default ('none', not 'softlight')
+        const blendFactor = Math.min(1.0, (algoSettings.histogramBlend ?? 0.0) / 0.10);
+        // Use same parameters as renderMosaic for visual consistency
+        const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
+        const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
+        const MAX_COLOR_SHIFT = 18;
+        const MAX_BLUE_SHIFT = 10;
+        const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
-        // Skip pixel processing entirely when there's nothing to do (default case).
-        // This avoids any color distortion and matches the main render output exactly.
-        if (cBoost === 1.0 && olMode === 'none') {
-          // No contrast boost, no overlay → hi-res tiles are already correct colors
-          console.log('[ClientHiRes] Skipping pixel post-processing (cBoost=1.0, olMode=none)');
-        } else {
+        if (cellLabData.length > 0) {
+          console.log('[ClientHiRes] Applying LAB color correction (same as renderMosaic)');
+          // Process each tile cell
+          for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+              const ci = row * cols + col;
+              if (ci >= cellLabData.length) continue;
+              const [tL, tA, tB] = cellLabData[ci];
+              const isShadowZone = tL < 40;
+              const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
+              const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
 
-        // Soft-light blend function (Photoshop formula)
-        const softLight = (base: number, blend: number) => {
-          const b = blend / 255, s = base / 255;
-          const result = b < 0.5
-            ? s - (1 - 2 * b) * s * (1 - s)
-            : s + (2 * b - 1) * (Math.sqrt(s) - s);
-          return Math.round(result * 255);
-        };
-
-        for (let row = 0; row < rows; row++) {
-          for (let col = 0; col < cols; col++) {
-            const ci = row * cols + col;
-            const ti = ci * 3;
-            // Target color for this cell
-            const tr = tc.length > ti + 2 ? tc[ti] : 128;
-            const tg = tc.length > ti + 2 ? tc[ti + 1] : 128;
-            const tb = tc.length > ti + 2 ? tc[ti + 2] : 128;
-            // Overlay strength — reduced for hi-res since tiles aren't LAB-corrected.
-            // Face boost reduced to prevent brownish patches on skin tones.
-            const edge = em.length > ci ? em[ci] : 0;
-            const faceBoost = fm.length > ci && fm[ci] ? 0.04 : 0;  // reduced: 0.10→0.04 to prevent brownish skin patches
-            const strength = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge * EDGE_B + faceBoost) : 0;  // cap 0.55→0.30
-
-            // Process all pixels in this cell
-            const yStart = row * actualTile;
-            const yEnd = Math.min(yStart + actualTile, hrH);
-            const xStart = col * actualTile;
-            const xEnd = Math.min(xStart + actualTile, hrW);
-            for (let py = yStart; py < yEnd; py++) {
-              for (let px = xStart; px < xEnd; px++) {
-                const pi = (py * hrW + px) * 4;
-                // Apply contrast boost (scale around midpoint 128)
-                let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi] - 128) * cBoost)));
-                let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 1] - 128) * cBoost)));
-                let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi + 2] - 128) * cBoost)));
-                // Apply soft-light overlay
-                if (strength > 0.01) {
-                  if (olMode === 'softlight') {
-                    r = Math.round(r * (1 - strength) + softLight(r, tr) * strength);
-                    g = Math.round(g * (1 - strength) + softLight(g, tg) * strength);
-                    b = Math.round(b * (1 - strength) + softLight(b, tb) * strength);
-                  } else {
-                    r = Math.round(r * (1 - strength) + tr * strength);
-                    g = Math.round(g * (1 - strength) + tg * strength);
-                    b = Math.round(b * (1 - strength) + tb * strength);
-                  }
+              // Compute tile average L for luminance scaling
+              const yStart = row * actualTile;
+              const yEnd = Math.min(yStart + actualTile, hrH);
+              const xStart = col * actualTile;
+              const xEnd = Math.min(xStart + actualTile, hrW);
+              let sumL = 0, pCount = 0;
+              for (let py = yStart; py < yEnd; py++) {
+                for (let px = xStart; px < xEnd; px++) {
+                  const pi = (py * hrW + px) * 4;
+                  sumL += rgbToLab(hd[pi], hd[pi+1], hd[pi+2])[0];
+                  pCount++;
                 }
-                hd[pi] = r;
-                hd[pi + 1] = g;
-                hd[pi + 2] = b;
+              }
+              const avgL = pCount > 0 ? sumL / pCount : 50;
+              const rawLumScale = avgL > 1 ? tL / avgL : 1;
+              const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
+              const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
+              const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+              // Apply per-pixel LAB correction
+              for (let py = yStart; py < yEnd; py++) {
+                for (let px = xStart; px < xEnd; px++) {
+                  const pi = (py * hrW + px) * 4;
+                  const [pl, pa, pb] = rgbToLab(hd[pi], hd[pi+1], hd[pi+2]);
+                  let newL = Math.max(0, Math.min(100, pl * lumScale));
+                  if (isShadowZone && shadowBoost > 0.05) {
+                    const deviation = pl - avgL;
+                    const stretchFactor = 1.0 + shadowBoost * 0.4;
+                    newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+                  }
+                  if (isShadowZone && newL > tL + 25) {
+                    newL = tL + 25 + (newL - tL - 25) * 0.2;
+                  }
+                  const rawDeltaA = (tA - pa) * AB_BLEND;
+                  const rawDeltaB = (tB - pb) * AB_BLEND;
+                  const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                  const clampedDeltaB = rawDeltaB < 0
+                    ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
+                    : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                  const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+                  const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+                  const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+                  const satBoost = 0.90 + cBoost * 0.15;
+                  const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+                  const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                  const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
+                  const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+                  hd[pi] = nr;
+                  hd[pi+1] = ng;
+                  hd[pi+2] = nb;
+                }
               }
             }
+            // Yield to UI every few rows
+            if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
           }
-          // Yield to UI every few rows
-          if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
+          hrCtx!.putImageData(hrImageData, 0, 0);
+        } else {
+          // No cellLab data available (e.g. loaded from saved project without re-render)
+          // Fall back to simple contrast boost only
+          console.log('[ClientHiRes] No cellLab data, skipping LAB correction');
         }
-        hrCtx!.putImageData(hrImageData, 0, 0);
-        } // end else (cBoost !== 1.0 || olMode !== 'none')
       }
 
       // 3. Convert to blob URL (with timeout for mobile)
@@ -3868,6 +3878,7 @@ export default function Studio() {
     targetColorsRef.current = targetColorsFlat;
     edgeMapRef.current = [...edgeMap];
     faceMaskRef.current = [...faceMask];
+    cellLabRef.current = [...cellLab]; // Store for hi-res color correction
 
     // Build color enhance canvas: 1 pixel per cell with target color
     // Used as a real-time multiply overlay controlled by the Color Enhance slider
@@ -5865,6 +5876,9 @@ export default function Studio() {
                         height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                         pointerEvents: "none",
                         imageRendering: "auto" as const,
+                        // No CSS filter needed: LAB color correction is applied directly in canvas
+                        // during hi-res rendering (same Reinhard-style correction as renderMosaic).
+                        filter: undefined,
                       }}
                     />
                   )}
@@ -6845,10 +6859,17 @@ export default function Studio() {
                   alt={`Tile ${tileDetail.col},${tileDetail.row}`}
                   className="w-full aspect-square object-cover"
                   onError={(e) => {
-                    // If primary URL fails (e.g. DB tile proxy error), extract from canvas
+                    // If primary URL fails (e.g. DB tile 404), try source_url (Pexels original ~940px)
                     const img = e.currentTarget;
                     if (img.dataset.retried) return;
                     img.dataset.retried = 'true';
+                    // Try source_url via tile API with size=original
+                    const tileId = tileIdsRef.current[tileDetail.tileIdx];
+                    if (tileId && tileId > 0) {
+                      img.src = `/api/tile/${tileId}?size=256`;
+                      return;
+                    }
+                    // Last resort: extract from canvas (16px upscaled, blurry but better than nothing)
                     try {
                       const snap = snapshotRef.current;
                       const params = mosaicParamsRef.current;
