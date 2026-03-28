@@ -167,10 +167,13 @@ async function renderMosaicClientSide(opts: {
   validImgs: HTMLImageElement[]; hiResImgs: (HTMLImageElement | null)[];
   snapshot: ImageData | null; origTilePx: number;
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
+  userOverlay?: number; // 0-100: how much original photo shows through (from Foto-Overlay slider)
+  userPhotoImg?: HTMLImageElement | null; // original user photo for overlay
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
   const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
-    snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm, onProgress } = opts;
+    snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm,
+    userOverlay = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
   onProgress?.(2, 'Tiles prüfen...');
@@ -418,6 +421,17 @@ async function renderMosaicClientSide(opts: {
     if (row % 5 === 0) { onProgress?.(72 + Math.round((row/rows)*18), 'Overlay...'); await new Promise(r => setTimeout(r, 0)); }
   }
   ctx.putImageData(imgData, 0, 0);
+
+  // Apply user photo overlay (Foto-Overlay slider) — same as preview
+  if (userOverlay > 0 && userPhotoImg && userPhotoImg.complete && userPhotoImg.naturalWidth > 0) {
+    onProgress?.(90, 'Foto-Overlay anwenden...');
+    ctx.save();
+    ctx.globalAlpha = userOverlay / 100;
+    ctx.drawImage(userPhotoImg, 0, 0, W, H);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
   onProgress?.(92, 'Erstelle Datei...');
 
   const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
@@ -4339,7 +4353,7 @@ export default function Studio() {
 
     // Always use client-side hi-res render for zoom preview (fast, no downloads needed).
     // Server render is reserved for actual print downloads to avoid gray tiles from failed URL fetches.
-    if (newZ > 1.8 && !hiResReadyRef.current && !hiResLoadingRef.current) {
+    if (newZ > 1.5 && !hiResReadyRef.current && !hiResLoadingRef.current) {
       triggerClientHiResRender();
     }
 
@@ -4944,6 +4958,7 @@ export default function Studio() {
           validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+          userOverlay, userPhotoImg,
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
@@ -5569,7 +5584,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.8 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.5 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -5633,18 +5648,23 @@ export default function Studio() {
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 {/* Wrapper: all layers share position via this relative container */}
+                {/* FIX: use explicit width/height from canvas CSS size so transformOrigin:center center
+                     is computed correctly on mobile (avoids jump-to-right at zoom > 1) */}
                 <div style={{
                   position: "relative",
-                  display: "inline-block",
+                  display: "block",
+                  flexShrink: 0,
                   transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                   transformOrigin: "center center",
                   transition: isDragging.current ? "none" : "transform 0.1s ease",
+                  width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : undefined,
+                  height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : undefined,
                 }}>
                   <canvas
                     ref={canvasRef}
                     style={{
                       display: (ready || loading || projectLoading) && !popOutMode ? "block" : "none",
-                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 2.0) ? "pixelated" : "auto",
+                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 1.5) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
@@ -5658,15 +5678,17 @@ export default function Studio() {
                       maxWidth: "none",
                     }}
                   />
-                  {/* Hi-Res image overlay - sharp zoom (only at high zoom where CSS scaling is noticeably blurry) */}
-                  {hiResImgUrl && hiResReady && zoom > 2.0 && (
+                  {/* Hi-Res image overlay - sharp zoom (show from zoom > 1.5 for better quality on mobile) */}
+                  {hiResImgUrl && hiResReady && zoom > 1.5 && (
                     <img
                       src={hiResImgUrl}
                       alt=""
                       style={{
                         display: "block",
                         position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
+                        top: 0, left: 0,
+                        width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                        height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                         pointerEvents: "none",
                         imageRendering: zoom > 4 ? "pixelated" as const : "auto" as const,
                       }}
@@ -5687,7 +5709,9 @@ export default function Studio() {
                         style={{
                           display: "block",
                           position: "absolute",
-                          top: 0, left: 0, width: "100%", height: "100%",
+                          top: 0, left: 0,
+                          width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                          height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                           pointerEvents: "none",
                           imageRendering: "pixelated" as const,
                           mixBlendMode: "color" as const,
@@ -5704,7 +5728,9 @@ export default function Studio() {
                       style={{
                         display: "block",
                         position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
+                        top: 0, left: 0,
+                        width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                        height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                         opacity: userOverlay / 100,
                         pointerEvents: "none",
                         mixBlendMode: "normal",
