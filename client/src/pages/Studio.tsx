@@ -5131,24 +5131,27 @@ export default function Studio() {
         setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
         setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
         setDlProgress(100);
-        // Upload print file to R2 and save URL in project (background, non-blocking)
+        // Upload print file to R2 and save URL in project
         if (savedProjectIdRef.current && user) {
-          (async () => {
-            try {
-              setDlProgressMsg(`Druckdatei wird gespeichert...`);
-              const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
-                body: printBlob,
-              });
-              const uploadResult = await uploadRes.json();
-              if (uploadResult.ok) {
-                setDlProgressMsg(`✓ Druckdatei gespeichert – abrufbar unter Projekte`);
-              }
-            } catch (uploadErr) {
-              console.warn('[PrintUpload] Failed to save print URL:', uploadErr);
+          try {
+            setDlProgressMsg('Druckdatei wird auf Server gespeichert...');
+            const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+              body: printBlob,
+            });
+            const uploadResult = await uploadRes.json();
+            if (uploadResult.ok) {
+              setDlProgressMsg('✓ Druckdatei gespeichert – abrufbar unter Projekte');
+            } else {
+              setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
             }
-          })();
+          } catch (uploadErr) {
+            console.warn('[PrintUpload] Failed:', uploadErr);
+            setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wurde lokal heruntergeladen.');
+          }
+        } else if (!savedProjectIdRef.current && user) {
+          setDlProgressMsg('✓ Download fertig. Tipp: Projekt speichern, um Druckdatei unter Projekte abzurufen.');
         }
       } catch (e) {
         console.error('[Print] Server render failed:', e);
@@ -5172,7 +5175,7 @@ export default function Studio() {
         setTimeout(() => (URL).revokeObjectURL(url2), 10000);
       } finally {
         setDlLoading(false);
-        setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
+        setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 8000);
       }
       return; // early return for print mode
     }
