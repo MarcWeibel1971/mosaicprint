@@ -551,6 +551,8 @@ export default function Studio() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [sharpness] = useState(100); // always 100% hi-res
   const [showStatsModal, setShowStatsModal] = useState(false);
+  const [editCols, setEditCols] = useState<number | null>(null); // editable cols in stats modal
+  const [editRows, setEditRows] = useState<number | null>(null); // editable rows in stats modal
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [colorEnhance, setColorEnhance] = useState(0); // 0-100: tint tiles toward target color
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
@@ -6075,7 +6077,34 @@ export default function Studio() {
                   </div>
 
                   {/* Mosaik-Statistik */}
-                  {qualityMetrics && (
+                  {qualityMetrics && (() => {
+                    const curCols = mosaicParamsRef.current?.cols ?? 0;
+                    const curRows = mosaicParamsRef.current?.rows ?? 0;
+                    const imgAspect = curCols > 0 && curRows > 0 ? curCols / curRows : 1;
+                    // Min/Max: 10-200 Spalten, proportionale Zeilen
+                    const MIN_COLS = 10; const MAX_COLS = 200;
+                    const dispCols = editCols ?? curCols;
+                    const dispRows = editRows ?? curRows;
+                    const clampCols = (v: number) => Math.max(MIN_COLS, Math.min(MAX_COLS, v));
+                    const clampRows = (v: number) => Math.max(Math.ceil(MIN_COLS / Math.max(imgAspect, 0.1)), Math.min(Math.ceil(MAX_COLS / Math.max(imgAspect, 0.1)), v));
+                    const handleRerender = () => {
+                      if (!userPhotoImg) return;
+                      const newCols = clampCols(dispCols);
+                      const newRows = clampRows(dispRows);
+                      // Derive baseTiles from newCols/newRows (baseTiles = longer side)
+                      const newBase = imgAspect >= 1 ? newCols : newRows;
+                      try {
+                        const s = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}');
+                        s.baseTiles = newBase;
+                        localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(s));
+                      } catch { /* ignore */ }
+                      setEditCols(null); setEditRows(null);
+                      setShowStatsModal(false);
+                      setReady(false); setLoading(true); setProgress(0);
+                      renderMosaic(userPhotoImg);
+                    };
+                    const colsChanged = dispCols !== curCols || dispRows !== curRows;
+                    return (
                     <div className="mb-5">
                       <div className="flex items-center gap-2 mb-3">
                         <BarChart3 className="w-4 h-4 text-gray-500" />
@@ -6111,8 +6140,73 @@ export default function Studio() {
                           <div className="bg-emerald-500" style={{ width: `${qualityMetrics.satHigh}%` }} />
                         </div>
                       </div>
+
+                      {/* Zeilen / Spalten Stepper */}
+                      <div className="mt-4 border-t border-gray-100 pt-4">
+                        <p className="text-xs font-bold text-gray-700 mb-3">Raster anpassen</p>
+                        <div className="grid grid-cols-2 gap-3">
+                          {/* Spalten */}
+                          <div className="bg-gray-50 rounded-xl p-3">
+                            <div className="text-[10px] text-gray-500 font-medium mb-2">Spalten (Breite)</div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => setEditCols(clampCols((editCols ?? curCols) - 5))}
+                                className="w-7 h-7 rounded-lg bg-white border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-100 flex items-center justify-center"
+                              >−</button>
+                              <input
+                                type="number" min={MIN_COLS} max={MAX_COLS} step={1}
+                                value={dispCols}
+                                onChange={e => setEditCols(clampCols(Number(e.target.value)))}
+                                className="flex-1 w-0 text-center text-sm font-extrabold text-gray-900 bg-white border border-gray-200 rounded-lg py-1 px-1 focus:outline-none focus:border-blue-400"
+                              />
+                              <button
+                                onClick={() => setEditCols(clampCols((editCols ?? curCols) + 5))}
+                                className="w-7 h-7 rounded-lg bg-white border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-100 flex items-center justify-center"
+                              >+</button>
+                            </div>
+                            <div className="text-[9px] text-gray-400 mt-1 text-center">Min {MIN_COLS} – Max {MAX_COLS}</div>
+                          </div>
+                          {/* Zeilen */}
+                          <div className="bg-gray-50 rounded-xl p-3">
+                            <div className="text-[10px] text-gray-500 font-medium mb-2">Zeilen (Höhe)</div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => setEditRows(clampRows((editRows ?? curRows) - 5))}
+                                className="w-7 h-7 rounded-lg bg-white border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-100 flex items-center justify-center"
+                              >−</button>
+                              <input
+                                type="number" min={1} max={300} step={1}
+                                value={dispRows}
+                                onChange={e => setEditRows(clampRows(Number(e.target.value)))}
+                                className="flex-1 w-0 text-center text-sm font-extrabold text-gray-900 bg-white border border-gray-200 rounded-lg py-1 px-1 focus:outline-none focus:border-blue-400"
+                              />
+                              <button
+                                onClick={() => setEditRows(clampRows((editRows ?? curRows) + 5))}
+                                className="w-7 h-7 rounded-lg bg-white border border-gray-200 text-gray-600 font-bold text-sm hover:bg-gray-100 flex items-center justify-center"
+                              >+</button>
+                            </div>
+                            <div className="text-[9px] text-gray-400 mt-1 text-center">Proportional zum Bild</div>
+                          </div>
+                        </div>
+                        {/* Neu erstellen Button */}
+                        <button
+                          onClick={handleRerender}
+                          disabled={loading || !userPhotoImg}
+                          className={`w-full mt-3 py-2.5 rounded-xl text-sm font-bold transition-colors disabled:opacity-50 ${
+                            colsChanged
+                              ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                              : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+                          }`}
+                        >
+                          {colsChanged
+                            ? `Neu erstellen: ${clampCols(dispCols)} Sp. × ${clampRows(dispRows)} Z. = ${(clampCols(dispCols) * clampRows(dispRows)).toLocaleString('de-CH')} Kacheln`
+                            : `Neu erstellen (${curCols} × ${curRows} Kacheln)`
+                          }
+                        </button>
+                      </div>
                     </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Hi-Res Status */}
                   <div className="mb-5 bg-green-50 rounded-xl p-3 flex items-center justify-between">
