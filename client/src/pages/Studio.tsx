@@ -1222,17 +1222,23 @@ export default function Studio() {
               const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
               const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
 
-              // Compute tile average L for luminance scaling
+              // Compute tile average L using 8x8 subsample for consistency with preview/print.
+              // Full-resolution avgL differs from preview (64px thumbnails) — causes color mismatch.
               const yStart = row * actualTile;
-              const yEnd = Math.min(yStart + actualTile, hrH);
               const xStart = col * actualTile;
-              const xEnd = Math.min(xStart + actualTile, hrW);
+              const REF_N = 8;
+              const stepY = Math.max(1, Math.floor(actualTile / REF_N));
+              const stepX = Math.max(1, Math.floor(actualTile / REF_N));
               let sumL = 0, pCount = 0;
-              for (let py = yStart; py < yEnd; py++) {
-                for (let px = xStart; px < xEnd; px++) {
-                  const pi = (py * hrW + px) * 4;
-                  sumL += rgbToLab(hd[pi], hd[pi+1], hd[pi+2])[0];
-                  pCount++;
+              for (let sy = 0; sy < REF_N; sy++) {
+                for (let sx = 0; sx < REF_N; sx++) {
+                  const py = Math.min(yStart + sy * stepY, yStart + actualTile - 1);
+                  const px = Math.min(xStart + sx * stepX, xStart + actualTile - 1);
+                  if (py < hrH && px < hrW) {
+                    const pi = (py * hrW + px) * 4;
+                    sumL += rgbToLab(hd[pi], hd[pi+1], hd[pi+2])[0];
+                    pCount++;
+                  }
                 }
               }
               const avgL = pCount > 0 ? sumL / pCount : 50;
@@ -4152,13 +4158,19 @@ export default function Studio() {
         const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50); // stronger boost in shadows (was 0.40)
         const tilePixels = bCtx.getImageData(0, 0, TILE_PX, TILE_PX);
         const td = tilePixels.data;
-        // Step 1: Compute tile average L (for luminance scaling)
+        // Step 1: Compute tile average L from 8x8 downsample (consistent with print render)
+        const REF_SZ = 8;
+        const refC = document.createElement('canvas');
+        refC.width = REF_SZ; refC.height = REF_SZ;
+        const refCx = refC.getContext('2d')!;
+        refCx.drawImage(boostCanvas, 0, 0, REF_SZ, REF_SZ);
+        const refD = refCx.getImageData(0, 0, REF_SZ, REF_SZ).data;
         let sumL = 0;
-        const pCount = td.length / 4;
-        for (let pi = 0; pi < td.length; pi += 4) {
-          sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+        const refPC = refD.length / 4;
+        for (let pi = 0; pi < refD.length; pi += 4) {
+          sumL += rgbToLab(refD[pi], refD[pi+1], refD[pi+2])[0];
         }
-        const avgL = sumL / pCount;
+        const avgL = sumL / refPC;
         // Luminance scale factor: how much brighter/darker target is vs tile
         // Wide clamp 0.15-4.0 to allow strong darkening/brightening for portrait visibility
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
