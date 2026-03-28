@@ -326,10 +326,18 @@ async function renderMosaicClientSide(opts: {
   const MAX_COLOR_SHIFT = 18;  // matches preview
   const MAX_BLUE_SHIFT = 10;   // matches preview
 
-  // Offscreen buffer canvas for per-tile LAB processing
+  // Overlay parameters (needed inside tile loop for inline overlay application)
+  const BASE_OL = algoSettings.baseOverlay ?? 0.15;
+  const EDGE_B = algoSettings.edgeBoost ?? 0.20;
+  const olMode = algoSettings.overlayMode ?? 'none';
+
+  // Offscreen buffer canvas for per-tile LAB processing (reused across all tiles)
   const bCanvas = document.createElement('canvas');
   bCanvas.width = actualTile; bCanvas.height = actualTile;
   const bCtx = bCanvas.getContext('2d')!;
+  // Direct pixel subsampling for avgL (no extra canvas needed)
+  // Sample every Nth pixel from getImageData for consistent avgL with preview
+  const REF_SAMPLES = 64; // 8x8 equivalent sample count
 
   for (let ci = 0; ci < total; ci++) {
     const col = ci % cols, row = Math.floor(ci / cols);
@@ -362,27 +370,27 @@ async function renderMosaicClientSide(opts: {
 
         const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
         const td = tilePixels.data;
-        // Compute tile average L using 8x8 downsample for consistency with preview.
-        // The preview computes avgL on 64px thumbnails (already downsampled).
-        // Hi-res tiles (400-2048px) have more color variance, causing different avgL values.
-        // Solution: downsample to 8x8 first, then compute avgL — matches preview behavior.
-        const REF_SIZE = 8;
-        const refCanvas = document.createElement('canvas');
-        refCanvas.width = REF_SIZE; refCanvas.height = REF_SIZE;
-        const refCtx = refCanvas.getContext('2d')!;
-        refCtx.drawImage(bCanvas, 0, 0, REF_SIZE, REF_SIZE);
-        const refPixels = refCtx.getImageData(0, 0, REF_SIZE, REF_SIZE);
-        const rd = refPixels.data;
-        let sumL = 0;
-        const pCount = rd.length / 4;
-        for (let pi = 0; pi < rd.length; pi += 4) {
-          sumL += rgbToLab(rd[pi], rd[pi+1], rd[pi+2])[0];
+        // Compute tile average L by direct subsampling of getImageData (no extra canvas).
+        // Sample REF_SAMPLES evenly-spaced pixels — equivalent to 8x8 downsample.
+        const totalPx = td.length / 4;
+        const step = Math.max(1, Math.floor(totalPx / REF_SAMPLES));
+        let sumL = 0, sampleCount = 0;
+        for (let si = 0; si < totalPx; si += step) {
+          const spi = si * 4;
+          sumL += rgbToLab(td[spi], td[spi+1], td[spi+2])[0];
+          sampleCount++;
         }
-        const avgL = sumL / pCount;
+        const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
         const rawLumScale = avgL > 1 ? tL / avgL : 1;
         const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
         const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
         const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+        // Pre-compute overlay strength for this tile (avoid per-pixel recompute)
+        const edge = em.length > ci ? em[ci] : 0;
+        const fb = fm.length > ci && fm[ci] ? 0.04 : 0;
+        const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;
+        const applyOverlay = str > 0.01;
 
         const outData = new Uint8ClampedArray(td.length);
         for (let pi = 0; pi < td.length; pi += 4) {
@@ -409,7 +417,20 @@ async function renderMosaicClientSide(opts: {
           const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
           const bSatBoost = newBv < 0 ? Math.min(satBoost, 1.0) : satBoost;
           const boostedB = Math.max(-128, Math.min(127, newBv * bSatBoost));
-          const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+          let [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+          // Apply overlay inline (avoids second full-image pass)
+          if (applyOverlay) {
+            if (olMode === 'softlight') {
+              const sl2 = (base: number, blend: number) => { const b2=blend/255,s=base/255; return Math.round((b2<0.5?s-(1-2*b2)*s*(1-s):s+(2*b2-1)*(Math.sqrt(s)-s))*255); };
+              nr = Math.round(nr*(1-str)+sl2(nr,tR)*str);
+              ng = Math.round(ng*(1-str)+sl2(ng,tG)*str);
+              nb = Math.round(nb*(1-str)+sl2(nb,tBv)*str);
+            } else {
+              nr = Math.round(nr*(1-str)+tR*str);
+              ng = Math.round(ng*(1-str)+tG*str);
+              nb = Math.round(nb*(1-str)+tBv*str);
+            }
+          }
           outData[pi]   = nr;
           outData[pi+1] = ng;
           outData[pi+2] = nb;
@@ -438,41 +459,6 @@ async function renderMosaicClientSide(opts: {
     if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
   }
 
-  // Apply adaptive edge-based overlay (same as preview)
-  onProgress?.(72, 'Overlay anwenden...');
-  const BASE_OL = algoSettings.baseOverlay ?? 0.15;   // match renderMosaic default
-  const EDGE_B = algoSettings.edgeBoost ?? 0.20;      // match renderMosaic default
-  // CRITICAL: Default must match renderMosaic default ('none') to ensure print = preview
-  // If user has set overlayMode in settings, use that; otherwise 'none' (pure LAB-corrected tiles)
-  const olMode = algoSettings.overlayMode ?? 'none';
-  const sl = (base: number, blend: number) => {
-    const b2 = blend/255, s = base/255;
-    return Math.round((b2 < 0.5 ? s - (1-2*b2)*s*(1-s) : s + (2*b2-1)*(Math.sqrt(s)-s)) * 255);
-  };
-  const imgData = ctx.getImageData(0, 0, W, H);
-  const hd = imgData.data;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const ci2 = row*cols + col, ti = ci2*3;
-      const tr = tc.length > ti+2 ? tc[ti] : 128, tg = tc.length > ti+2 ? tc[ti+1] : 128, tb2 = tc.length > ti+2 ? tc[ti+2] : 128;
-      const edge = em.length > ci2 ? em[ci2] : 0;
-      const fb = fm.length > ci2 && fm[ci2] ? 0.04 : 0;  // reduced: 0.25→0.04 to prevent brownish face patches
-      const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;  // matches preview cap
-      const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
-      for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
-        const pi = (py*W + px)*4;
-        if (str > 0.01) {
-          let r = hd[pi], g = hd[pi+1], b = hd[pi+2];
-          if (olMode === 'softlight') { r = Math.round(r*(1-str)+sl(r,tr)*str); g = Math.round(g*(1-str)+sl(g,tg)*str); b = Math.round(b*(1-str)+sl(b,tb2)*str); }
-          else { r = Math.round(r*(1-str)+tr*str); g = Math.round(g*(1-str)+tg*str); b = Math.round(b*(1-str)+tb2*str); }
-          hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
-        }
-      }
-    }
-    if (row % 5 === 0) { onProgress?.(72 + Math.round((row/rows)*18), 'Overlay...'); await new Promise(r => setTimeout(r, 0)); }
-  }
-  ctx.putImageData(imgData, 0, 0);
-
   // Apply user photo overlay (Foto-Overlay slider) — same as preview
   if (userOverlay > 0 && userPhotoImg && userPhotoImg.complete && userPhotoImg.naturalWidth > 0) {
     onProgress?.(90, 'Foto-Overlay anwenden...');
@@ -496,7 +482,21 @@ async function renderMosaicClientSide(opts: {
   return { blob, width: W, height: H, filename };
 }
 
-// LAB -> (RGB) (inverse of rgbToLab)
+// ─── Linear→sRGB LUT (4096 steps over [0,1]) ─────────────────────────────
+// Eliminates Math.pow(1/2.4) in labToRgb hot path.
+const _LIN_STEPS = 4096;
+const _linearToSrgb = new Uint8Array(_LIN_STEPS + 1);
+for (let i = 0; i <= _LIN_STEPS; i++) {
+  const v = i / _LIN_STEPS;
+  _linearToSrgb[i] = Math.round((v > 0.0031308 ? 1.055 * Math.pow(v, 1/2.4) - 0.055 : 12.92 * v) * 255);
+}
+const _toSrgbFast = (v: number): number => {
+  if (v <= 0) return 0;
+  if (v >= 1) return 255;
+  return _linearToSrgb[(v * _LIN_STEPS + 0.5) | 0];
+};
+
+// LAB -> RGB (inverse of rgbToLab) — LUT-accelerated
 function labToRgb(L: number, a: number, b: number): [number, number, number] {
   const fy = (L + 16) / 116;
   const fx = a / 500 + fy;
@@ -507,8 +507,7 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
   const rLin =  x * 3.2404542 - y * 1.5371385 - z * 0.4985314;
   const gLin = -x * 0.9692660 + y * 1.8760108 + z * 0.0415560;
   const bLin =  x * 0.0556434 - y * 0.2040259 + z * 1.0572252;
-  const toSrgb = (v: number) => Math.max(0, Math.min(255, Math.round((v > 0.0031308 ? 1.055 * Math.pow(v, 1/2.4) - 0.055 : 12.92 * v) * 255)));
-  return [toSrgb(rLin), toSrgb(gLin), toSrgb(bLin)];
+  return [_toSrgbFast(rLin), _toSrgbFast(gLin), _toSrgbFast(bLin)];
 }
 
 // rgbToLab, toLinear, deltaE2000: importiert aus ../lib/colorUtils.ts (keine lokalen Duplikate)
