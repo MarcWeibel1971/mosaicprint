@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import ReactCrop, { type Crop, type PixelCrop, centerCrop, makeAspectCrop } from 'react-image-crop';
+import 'react-image-crop/dist/ReactCrop.css';
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 gsap.registerPlugin(useGSAP);
@@ -165,10 +167,13 @@ async function renderMosaicClientSide(opts: {
   validImgs: HTMLImageElement[]; hiResImgs: (HTMLImageElement | null)[];
   snapshot: ImageData | null; origTilePx: number;
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
+  userOverlay?: number; // 0-100: how much original photo shows through (from Foto-Overlay slider)
+  userPhotoImg?: HTMLImageElement | null; // original user photo for overlay
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
   const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
-    snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm, onProgress } = opts;
+    snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm,
+    userOverlay = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
   onProgress?.(2, 'Tiles prüfen...');
@@ -187,37 +192,103 @@ async function renderMosaicClientSide(opts: {
   }
   console.log(`[PrintRender] ${uniqueIdxs.length} unique tiles, ${missingCount} missing (GC'd)`);
 
-  // Re-load missing tiles from server (/api/tile/:id)
-  if (missingCount > 0) {
-    onProgress?.(3, `${missingCount} Tiles werden nachgeladen...`);
-    const reloadedImgs: Record<number, HTMLImageElement> = {};
-    const BATCH = 20;
-    const missingArr = [...missingIdxs];
+  // HI-RES RELOAD: For print quality, load ALL DB tiles via source_url (original ~940px from Pexels/Unsplash).
+  // Strategy: use /api/tile-urls?hires=1 to get direct source_url for each tile,
+  // then load images directly from source (bypasses server proxy, avoids 128px upscale).
+  // Fallback: /api/tile/:id?size=400 (server proxy) if direct load fails.
+  const hiResReloadMap: Record<number, HTMLImageElement> = {};
+  const hiResNeeded = uniqueIdxs.filter(idx => {
+    const dbId = tileIds[idx];
+    return dbId && dbId > 0; // reload all DB tiles, skip user tiles
+  });
+  console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles via source_url`);
+  if (hiResNeeded.length > 0) {
+    onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
+
+    // Step 1: Fetch source_url for all DB tiles via /api/tile-urls?hires=1
+    const dbIds = hiResNeeded.map(idx => tileIds[idx]).filter(id => id > 0);
+    let sourceUrlMap: Record<number, string> = {};
+    try {
+      const urlRes = await fetch(`/api/tile-urls?ids=${dbIds.join(',')}&hires=1`);
+      if (urlRes.ok) {
+        const data = await urlRes.json() as Record<string, string>;
+        // Convert string keys to number keys
+        for (const [k, v] of Object.entries(data)) { if (v) sourceUrlMap[Number(k)] = v; }
+        console.log(`[PrintRender] Got ${Object.keys(sourceUrlMap).length} source URLs`);
+      }
+    } catch (e) {
+      console.warn('[PrintRender] Failed to fetch source URLs, will use proxy fallback', e);
+    }
+
     let loaded = 0;
-    for (let i = 0; i < missingArr.length; i += BATCH) {
-      const batch = missingArr.slice(i, i + BATCH);
+    let failed = 0;
+    const BATCH = 6; // small batches for reliable mobile loading
+
+    // Helper: load image with retry, trying source_url first then proxy fallback
+    const loadTileHiRes = (idx: number): Promise<HTMLImageElement | null> => {
+      const dbId = tileIds[idx];
+      const sourceUrl = sourceUrlMap[dbId];
+      return new Promise(resolve => {
+        const tryLoad = (url: string, retries: number, isFallback: boolean) => {
+          const img = new Image();
+          // crossOrigin needed for canvas operations when loading from external URLs
+          if (!url.startsWith('/')) img.crossOrigin = 'anonymous';
+          const timeout = setTimeout(() => {
+            img.onload = img.onerror = null;
+            console.warn(`[PrintRender] Tile ${dbId} timeout (${url.substring(0, 60)})`);
+            if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+            else if (!isFallback && sourceUrl) {
+              // Try proxy fallback
+              console.warn(`[PrintRender] Tile ${dbId} source_url failed, trying proxy`);
+              tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true);
+            } else { resolve(null); }
+          }, 12000);
+          img.onload = () => {
+            clearTimeout(timeout);
+            if (img.naturalWidth < 10 || img.naturalHeight < 10) {
+              if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+              else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true); }
+              else { resolve(null); }
+            } else {
+              console.log(`[PrintRender] Tile ${dbId} loaded at ${img.naturalWidth}x${img.naturalHeight} (${isFallback ? 'proxy' : 'source'})`);
+              resolve(img);
+            }
+          };
+          img.onerror = () => {
+            clearTimeout(timeout);
+            if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+            else if (!isFallback && sourceUrl) {
+              console.warn(`[PrintRender] Tile ${dbId} source_url error, trying proxy`);
+              tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true);
+            } else { resolve(null); }
+          };
+          img.src = url;
+        };
+        // Start with source_url if available, otherwise use proxy directly
+        const startUrl = sourceUrl || `/api/tile/${dbId}?size=400&t=${Date.now()}`;
+        const isFallback = !sourceUrl;
+        tryLoad(startUrl, 2, isFallback);
+      });
+    };
+
+    for (let i = 0; i < hiResNeeded.length; i += BATCH) {
+      const batch = hiResNeeded.slice(i, i + BATCH);
       await Promise.all(batch.map(async (idx) => {
         const dbId = tileIds[idx];
-        if (!dbId || dbId <= 0) return; // user-uploaded tiles can't be reloaded
-        try {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          await new Promise<void>((resolve, reject) => {
-            img.onload = () => resolve();
-            img.onerror = () => reject(new Error('load failed'));
-            img.src = `/api/tile/${dbId}?size=${Math.min(256, tilePx)}`;
-          });
-          reloadedImgs[idx] = img;
+        if (!dbId || dbId <= 0) return;
+        const img = await loadTileHiRes(idx);
+        if (img && img.naturalWidth >= 10) {
+          hiResReloadMap[idx] = img;
           loaded++;
-        } catch { /* tile stays missing */ }
+        } else {
+          failed++;
+          console.error(`[PrintRender] FAILED to load tile ${dbId}`);
+        }
       }));
-      onProgress?.(3 + Math.round((loaded / missingCount) * 10), `Tiles nachladen: ${loaded}/${missingCount}`);
+      onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 12), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
+      await new Promise(r => setTimeout(r, 0));
     }
-    console.log(`[PrintRender] Reloaded ${loaded}/${missingCount} missing tiles from server`);
-    // Patch into validImgs array (mutates the ref — these tiles are now available)
-    for (const [idx, img] of Object.entries(reloadedImgs)) {
-      validImgs[Number(idx)] = img;
-    }
+    console.log(`[PrintRender] Hi-res done: ${loaded} loaded, ${failed} failed out of ${hiResNeeded.length}`);
   }
 
   onProgress?.(15, 'Canvas erstellen...');
@@ -240,33 +311,118 @@ async function renderMosaicClientSide(opts: {
   const snapCtx = snapCanvas.getContext('2d');
   if (snapshot && snapCtx) { snapCanvas.width = snapshot.width; snapCanvas.height = snapshot.height; snapCtx.putImageData(snapshot, 0, 0); }
 
-  // Draw tiles
+  // Draw tiles with per-tile LAB color transfer (matches preview quality)
   const total = cols * rows;
+  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  const histBlend = algoSettings.histogramBlend ?? 0.0;
+  const blendFactor = Math.min(1.0, histBlend / 0.10);
+  const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
+  const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
+  const MAX_COLOR_SHIFT = 18;
+  const MAX_BLUE_SHIFT = 10;
+
+  // Offscreen buffer canvas for per-tile LAB processing
+  const bCanvas = document.createElement('canvas');
+  bCanvas.width = actualTile; bCanvas.height = actualTile;
+  const bCtx = bCanvas.getContext('2d')!;
+
   for (let ci = 0; ci < total; ci++) {
     const col = ci % cols, row = Math.floor(ci / cols);
     const x = col * actualTile, y = row * actualTile;
     const idx = assignment[ci];
-    const hiImg = hiResImgs[idx];
+    // Priority: hi-res reloaded > existing hiResImgs > validImgs (thumbnail)
+    const reloadedImg = hiResReloadMap[idx];
+    const hiImg = reloadedImg || hiResImgs[idx];
     const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[idx];
     const rot = rotations[ci] || 0;
-    let drawn = false;
+    const tci = ci * 3;
+    const tR = tc.length > tci+2 ? tc[tci] : 128;
+    const tG = tc.length > tci+2 ? tc[tci+1] : 128;
+    const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
+    const [tL, tA, tB] = rgbToLab(tR, tG, tBv);
+
     if (img && img.complete && img.naturalWidth > 0) {
       try {
-        if (rot === 0) { ctx.drawImage(img, x, y, actualTile, actualTile); }
-        else { ctx.save(); ctx.translate(x + actualTile/2, y + actualTile/2); ctx.rotate(rot * Math.PI/2); ctx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); ctx.restore(); }
-        drawn = true;
-      } catch { /* fallback below */ }
+        // Draw tile to offscreen buffer for pixel manipulation
+        bCtx.clearRect(0, 0, actualTile, actualTile);
+        if (rot === 0) { bCtx.drawImage(img, 0, 0, actualTile, actualTile); }
+        else { bCtx.save(); bCtx.translate(actualTile/2, actualTile/2); bCtx.rotate(rot * Math.PI/2); bCtx.drawImage(img, -actualTile/2, -actualTile/2, actualTile, actualTile); bCtx.restore(); }
+
+        // Per-tile LAB color transfer (same as preview rendering)
+        const isShadowZone = tL < 40;
+        const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
+        const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+
+        const tilePixels = bCtx.getImageData(0, 0, actualTile, actualTile);
+        const td = tilePixels.data;
+        // Compute tile average L
+        let sumL = 0;
+        const pCount = td.length / 4;
+        for (let pi = 0; pi < td.length; pi += 4) {
+          sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+        }
+        const avgL = sumL / pCount;
+        const rawLumScale = avgL > 1 ? tL / avgL : 1;
+        const maxLumScale = isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale;
+        const clampedLumScale = Math.max(0.05, Math.min(4.0, maxLumScale));
+        const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+        const outData = new Uint8ClampedArray(td.length);
+        for (let pi = 0; pi < td.length; pi += 4) {
+          const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+          let newL = Math.max(0, Math.min(100, pl * lumScale));
+          if (isShadowZone && shadowBoost > 0.05) {
+            const deviation = pl - avgL;
+            const stretchFactor = 1.0 + shadowBoost * 0.4;
+            newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+          }
+          if (isShadowZone && newL > tL + 25) {
+            newL = tL + 25 + (newL - tL - 25) * 0.2;
+          }
+          const rawDeltaA = (tA - pa) * AB_BLEND;
+          const rawDeltaB = (tB - pb) * AB_BLEND;
+          const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+          const clampedDeltaB = rawDeltaB < 0
+            ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
+            : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+          const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+          const newBv = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+          const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+          const satBoost = 0.90 + cBoost * 0.15;
+          const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+          const bSatBoost = newBv < 0 ? Math.min(satBoost, 1.0) : satBoost;
+          const boostedB = Math.max(-128, Math.min(127, newBv * bSatBoost));
+          const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+          outData[pi]   = nr;
+          outData[pi+1] = ng;
+          outData[pi+2] = nb;
+          outData[pi+3] = td[pi+3];
+        }
+        const outImageData = bCtx.createImageData(actualTile, actualTile);
+        outImageData.data.set(outData);
+        bCtx.putImageData(outImageData, 0, 0);
+        ctx.drawImage(bCanvas, x, y, actualTile, actualTile);
+      } catch {
+        // Fallback: fill with target pixel color
+        ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
+        ctx.fillRect(x, y, actualTile, actualTile);
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} LAB transfer failed, using target color`);
+        }
+      }
+    } else {
+      // Fallback: use target color
+      ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
+      ctx.fillRect(x, y, actualTile, actualTile);
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
+      }
     }
-    if (!drawn) {
-      try { ctx.drawImage(snapCanvas, col*origTilePx, row*origTilePx, origTilePx, origTilePx, x, y, actualTile, actualTile); }
-      catch { const ti = ci*3; ctx.fillStyle = tc.length > ti+2 ? `rgb(${tc[ti]},${tc[ti+1]},${tc[ti+2]})` : '#ccc'; ctx.fillRect(x, y, actualTile, actualTile); }
-    }
-    if (ci % 500 === 0) { onProgress?.(15 + Math.round((ci/total)*40), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
+    if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
   }
 
-  // Apply contrast + soft-light overlay
-  onProgress?.(58, 'Farbkorrektur...');
-  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  // Apply adaptive edge-based overlay (same as preview)
+  onProgress?.(72, 'Overlay anwenden...');
   const BASE_OL = algoSettings.baseOverlay ?? 0.15;
   const EDGE_B = algoSettings.edgeBoost ?? 0.20;
   const olMode = algoSettings.overlayMode ?? 'softlight';
@@ -286,19 +442,28 @@ async function renderMosaicClientSide(opts: {
       const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
       for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
         const pi = (py*W + px)*4;
-        let r = Math.max(0, Math.min(255, Math.round(128 + (hd[pi]-128)*cBoost)));
-        let g = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+1]-128)*cBoost)));
-        let b = Math.max(0, Math.min(255, Math.round(128 + (hd[pi+2]-128)*cBoost)));
         if (str > 0.01) {
+          let r = hd[pi], g = hd[pi+1], b = hd[pi+2];
           if (olMode === 'softlight') { r = Math.round(r*(1-str)+sl(r,tr)*str); g = Math.round(g*(1-str)+sl(g,tg)*str); b = Math.round(b*(1-str)+sl(b,tb2)*str); }
           else { r = Math.round(r*(1-str)+tr*str); g = Math.round(g*(1-str)+tg*str); b = Math.round(b*(1-str)+tb2*str); }
+          hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
         }
-        hd[pi] = r; hd[pi+1] = g; hd[pi+2] = b;
       }
     }
-    if (row % 5 === 0) { onProgress?.(58 + Math.round((row/rows)*32), 'Farbkorrektur...'); await new Promise(r => setTimeout(r, 0)); }
+    if (row % 5 === 0) { onProgress?.(72 + Math.round((row/rows)*18), 'Overlay...'); await new Promise(r => setTimeout(r, 0)); }
   }
   ctx.putImageData(imgData, 0, 0);
+
+  // Apply user photo overlay (Foto-Overlay slider) — same as preview
+  if (userOverlay > 0 && userPhotoImg && userPhotoImg.complete && userPhotoImg.naturalWidth > 0) {
+    onProgress?.(90, 'Foto-Overlay anwenden...');
+    ctx.save();
+    ctx.globalAlpha = userOverlay / 100;
+    ctx.drawImage(userPhotoImg, 0, 0, W, H);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
   onProgress?.(92, 'Erstelle Datei...');
 
   const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
@@ -330,16 +495,14 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
 // rgbToLab, toLinear, deltaE2000: importiert aus ../lib/colorUtils.ts (keine lokalen Duplikate)
 
 // Printolino-konforme Druckformate
-// Pixelgroesse bei 300 dpi: px = cm x (300 / 2.54) = cm x 118.11
-// 300 DPI ist der Standard fuer hochwertige Fotoprodukte (Leinwand, Alu-Dibond)
-// Tile-Groesse fuer Druckqualitaet: 300px pro Tile (aus source_url geladen)
+// Pixelgroesse bei 400 dpi (Ultra HD Druckqualitaet): px = cm x (400 / 2.54) = cm x 157.48
+// 400 DPI = 1 Kachel pro cm bei 157px Kachelgroesse → optimale Druckschaerfe
+// Kleinste sinnvolle Kachelgroesse: 40x40cm (darunter sind einzelne Kacheln zu klein)
 const PRINT_FORMATS = [
-  { label: "20x20 cm",   widthCm: 20,  heightCm: 20,  price: 29,  dpi: 300, pxW: 2362, pxH: 2362 },
-  { label: "30x30 cm",   widthCm: 30,  heightCm: 30,  price: 49,  dpi: 300, pxW: 3543, pxH: 3543 },
-  { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 300, pxW: 4724, pxH: 4724 },
-  { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 300, pxW: 5906, pxH: 8268 },
-  { label: "70x70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 300, pxW: 8268, pxH: 8268 },
-  { label: "100x100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 300, pxW: 11811, pxH: 11811 },
+  { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 400, pxW: 6299, pxH: 6299 },
+  { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 400, pxW: 7874, pxH: 11024 },
+  { label: "70x70 cm",   widthCm: 70,  heightCm: 70,  price: 139, dpi: 400, pxW: 11024, pxH: 11024 },
+  { label: "100x100 cm", widthCm: 100, heightCm: 100, price: 199, dpi: 400, pxW: 15748, pxH: 15748 },
 ];
 
 const MATERIALS = [
@@ -357,7 +520,7 @@ const MATERIALS = [
 const DIGITAL_FORMATS = [
   { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
   { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 100, price: 19, format: 'jpg' as const },
-  { label: "Ultra HD", desc: "Maximale Auflösung", tilePx: 160, price: 29, format: 'jpg' as const },
+  { label: "Ultra HD", desc: "Maximale Auflösung (1cm@400PPI)", tilePx: 157, price: 29, format: 'jpg' as const },
   { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 128, price: 39, format: 'png' as const },
 ];
 
@@ -374,6 +537,9 @@ export default function Studio() {
   const [dlProgressMsg, setDlProgressMsg] = useState("");
   const [dlLoading, setDlLoading] = useState(false);
   const [ready, setReady] = useState(false);
+  const readyRef = useRef(false);
+  // Keep readyRef in sync for use in stable callbacks (timers, etc.)
+  readyRef.current = ready;
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -387,7 +553,7 @@ export default function Studio() {
   const [distancePreview, setDistancePreview] = useState(false); // Simulate 2-3m viewing distance
   const [comparePos, setComparePos] = useState(50);
   const [popOutMode, setPopOutMode] = useState(false);
-  const [selectedFormat, setSelectedFormat] = useState(1); // 30x30 default
+  const [selectedFormat, setSelectedFormat] = useState(0); // 40x40 default (smallest available)
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
 
   // Tile source mode: 'pool' = our DB only (default), 'own' = user photos only, 'mix' = user + DB
@@ -396,6 +562,7 @@ export default function Studio() {
   const [userTileImages, setUserTileImages] = useState<HTMLImageElement[]>([]);
   const userTileImagesRef = useRef<HTMLImageElement[]>([]);
   const userTileHiResRef = useRef<HTMLImageElement[]>([]); // hi-res versions (512px) for detail/zoom
+  const userTileOriginalRef = useRef<HTMLImageElement[]>([]); // full-resolution originals for print quality
   const validImgsHiResRef = useRef<(HTMLImageElement | null)[]>([]); // parallel to validImgsRef: hi-res for user tiles, null for DB tiles
   const tileSourceModeRef = useRef<'pool' | 'own' | 'mix'>('pool');
   const tileUploadRef = useRef<HTMLInputElement>(null);
@@ -404,6 +571,12 @@ export default function Studio() {
   const [orderMode, setOrderMode] = useState<'print' | 'digital'>('print');
   const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(1); // HD default
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
+  // Crop modal state
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [cropSrc, setCropSrc] = useState<string | null>(null); // original uploaded image URL for cropping
+  const [crop, setCrop] = useState<Crop>();
+  const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
+  const cropImgRef = useRef<HTMLImageElement | null>(null);
   const [cacheSize, setCacheSize] = useState(0);
   const [dbTileCount, setDbTileCount] = useState<number | null>(null);
   const [showPayModal, setShowPayModal] = useState(false);
@@ -502,6 +675,7 @@ export default function Studio() {
   const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
   // -- Project Save/Restore (localStorage) ------------------------------------
+  const savedProjectIdRef = useRef<number | null>(null); // ID of last saved project (for print upload)
   const [hasSavedProject, setHasSavedProject] = useState<boolean>(() => {
     try { return !!localStorage.getItem('mosaicprint_saved_project'); } catch { return false; }
   });
@@ -837,6 +1011,84 @@ export default function Studio() {
         return;
       }
       const rotations = assignmentRotRef.current;
+      const tileIds = tileIdsRef.current;
+
+      // HI-RES RELOAD for zoom: load DB tiles via source_url (original ~940px from Pexels/Unsplash).
+      // This avoids 128px→256px upscale (blurry). Direct source_url gives full-resolution tiles.
+      const zoomHiResMap: Record<number, HTMLImageElement> = {};
+      const uniqueZoomIdxs = [...new Set(assignment)];
+      const ZOOM_NEED_SIZE = 256; // minimum acceptable size for zoom
+      const zoomReloadNeeded = uniqueZoomIdxs.filter(idx => {
+        const dbId = tileIds[idx];
+        if (!dbId || dbId <= 0) return false;
+        const hi = hiResImgs[idx];
+        if (hi && hi.complete && hi.naturalWidth >= ZOOM_NEED_SIZE * 0.8) return false; // already hi-res
+        const img = validImgs[idx];
+        return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < ZOOM_NEED_SIZE * 0.8;
+      });
+      if (zoomReloadNeeded.length > 0) {
+        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles via source_url for zoom`);
+
+        // Fetch source_url for all needed tiles in one request
+        const zoomDbIds = zoomReloadNeeded.map(idx => tileIds[idx]).filter(id => id > 0);
+        let zoomSourceUrlMap: Record<number, string> = {};
+        try {
+          const urlRes = await fetch(`/api/tile-urls?ids=${zoomDbIds.join(',')}&hires=1`);
+          if (urlRes.ok) {
+            const data = await urlRes.json() as Record<string, string>;
+            for (const [k, v] of Object.entries(data)) { if (v) zoomSourceUrlMap[Number(k)] = v; }
+            console.log(`[ClientHiRes] Got ${Object.keys(zoomSourceUrlMap).length} source URLs for zoom`);
+          }
+        } catch (e) {
+          console.warn('[ClientHiRes] Failed to fetch zoom source URLs', e);
+        }
+
+        const ZBATCH = 8;
+        const loadZoomTile = (dbId: number): Promise<HTMLImageElement | null> => {
+          const sourceUrl = zoomSourceUrlMap[dbId];
+          return new Promise(resolve => {
+            const tryLoad = (url: string, retries: number, isFallback: boolean) => {
+              const img = new Image();
+              if (!url.startsWith('/')) img.crossOrigin = 'anonymous';
+              const timeout = setTimeout(() => {
+                img.onload = img.onerror = null;
+                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                else { resolve(null); }
+              }, 10000);
+              img.onload = () => {
+                clearTimeout(timeout);
+                if (img.naturalWidth < 10) {
+                  if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+                  else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                  else { resolve(null); }
+                } else { resolve(img); }
+              };
+              img.onerror = () => {
+                clearTimeout(timeout);
+                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                else { resolve(null); }
+              };
+              img.src = url;
+            };
+            const startUrl = sourceUrl || `/api/tile/${dbId}?size=256&t=${Date.now()}`;
+            tryLoad(startUrl, 1, !sourceUrl);
+          });
+        };
+
+        for (let i = 0; i < zoomReloadNeeded.length; i += ZBATCH) {
+          const batch = zoomReloadNeeded.slice(i, i + ZBATCH);
+          await Promise.all(batch.map(async (idx) => {
+            const dbId = tileIds[idx];
+            if (!dbId || dbId <= 0) return;
+            const img = await loadZoomTile(dbId);
+            if (img && img.naturalWidth > 0) zoomHiResMap[idx] = img;
+          }));
+          await new Promise(r => setTimeout(r, 0));
+        }
+        console.log(`[ClientHiRes] Zoom hi-res loaded: ${Object.keys(zoomHiResMap).length}/${zoomReloadNeeded.length}`);
+      }
 
       // Helper: extract tile region from original rendered canvas (snapshot) as fallback
       // This prevents gray patches when tile images are GC'd or broken
@@ -863,8 +1115,11 @@ export default function Studio() {
         const x = col * actualTile;
         const y = row * actualTile;
         const tileIdx = assignment[ci];
-        // Prefer hi-res (512px) over thumbnail (64px) for sharper zoom
-        const hiImg = hiResImgs[tileIdx];
+        // Priority: zoom-reloaded hi-res (DB tiles) > hiResImgs (user tiles 256/512px) > validImgs (64px thumbnail)
+        // IMPORTANT: For user tiles (negative IDs), hiResImgs[tileIdx] contains the 256/512px hi-res version.
+        // Never use validImgs (64px) for zoom rendering – it would be massively upscaled and blurry.
+        const zoomReloaded = zoomHiResMap[tileIdx];
+        const hiImg = (zoomReloaded && zoomReloaded.complete && zoomReloaded.naturalWidth > 0) ? zoomReloaded : hiResImgs[tileIdx];
         const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
         const rot = rotations[ci] || 0;
 
@@ -1022,15 +1277,55 @@ export default function Studio() {
 
   const tilesRef = useRef<Array<{ x: number; y: number; px: number; url?: string }>>([]);
 
+  // Apply a crop to the uploaded image and set it as the user photo
+  const applyCropAndSetPhoto = useCallback((dataUrl: string, pixelCrop?: PixelCrop | null) => {
+    if (!pixelCrop || pixelCrop.width === 0 || pixelCrop.height === 0) {
+      // No crop: use full image
+      const img = new Image();
+      img.onload = async () => {
+        setUserPhoto(dataUrl);
+        setUserPhotoImg(img);
+        setReady(false); setError(null); setZoom(1); setPan({ x: 0, y: 0 }); setCompareMode(false);
+      };
+      img.src = dataUrl;
+      return;
+    }
+    // Crop: draw cropped region onto a new canvas
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = pixelCrop.width;
+      canvas.height = pixelCrop.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height, 0, 0, pixelCrop.width, pixelCrop.height);
+      const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+      const croppedImg = new Image();
+      croppedImg.onload = async () => {
+        setUserPhoto(croppedDataUrl);
+        setUserPhotoImg(croppedImg);
+        setReady(false); setError(null); setZoom(1); setPan({ x: 0, y: 0 }); setCompareMode(false);
+      };
+      croppedImg.src = croppedDataUrl;
+    };
+    img.src = dataUrl;
+  }, []);
+
   const handleUpload = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) return;
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUrl = e.target?.result as string;
-      setUserPhoto(dataUrl);
+      // Open crop modal instead of directly setting photo
+      setCropSrc(dataUrl);
+      setCrop(undefined);
+      setCompletedCrop(null);
+      setCropModalOpen(true);
       const img = new Image();
       img.onload = async () => {
-        setUserPhotoImg(img);
+        // NOTE: Do NOT call setUserPhotoImg here – that would trigger the auto-render useEffect
+        // before the crop modal is confirmed. setUserPhotoImg is called in applyCropAndSetPhoto
+        // after the user confirms the crop, which is the correct single trigger point.
+        // Calling it here caused a double renderMosaic (first with uncropped, then with cropped image).
         setReady(false);
         setError(null);
         setZoom(1);
@@ -1525,11 +1820,13 @@ export default function Studio() {
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (imageFiles.length === 0) return;
     setUserTileFiles(prev => [...prev, ...imageFiles]);
-    // Load all images: 64px thumbnail for matching + hi-res for detail/zoom
-    // Mobile: smaller hi-res to avoid memory issues (203 × 512² = 53MB in memory)
+    // Load all images:
+    // - 64px thumbnail for tile matching (fast, low memory)
+    // - 512/256px hi-res for zoom/detail (medium quality)
+    // - ORIGINAL full-resolution for print quality (center-cropped, max quality)
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const HR_SIZE = isMobile ? 256 : 512;
-    const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement} | null>(resolve => {
+    const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement; original: HTMLImageElement} | null>(resolve => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
@@ -1553,26 +1850,42 @@ export default function Studio() {
           if (hiresCtx) {
             hiresCtx.drawImage(img, sx, sy, s, s, 0, 0, hiresSize, hiresSize);
           } else {
-            // Fallback: use thumbnail as hi-res (better than nothing)
             console.warn('[TileUpload] hi-res canvas context failed, using thumbnail');
+          }
+
+          // ORIGINAL: full-resolution center-cropped square for print quality
+          // Cap at 2048px to avoid memory issues, but keep as large as possible
+          const MAX_ORIG = isMobile ? 1024 : 2048;
+          const origSize = Math.min(MAX_ORIG, s);
+          const origCanvas = document.createElement('canvas');
+          origCanvas.width = origSize; origCanvas.height = origSize;
+          const origCtx = origCanvas.getContext('2d');
+          if (origCtx) {
+            origCtx.drawImage(img, sx, sy, s, s, 0, 0, origSize, origSize);
           }
 
           const thumbDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.85);
           const hiresDataUrl = hiresCtx ? hiresCanvas.toDataURL('image/jpeg', 0.92) : thumbDataUrl;
+          const origDataUrl = origCtx ? origCanvas.toDataURL('image/jpeg', 0.95) : hiresDataUrl;
 
           let loaded = 0;
           const thumbImg = new Image();
           const hiresImg = new Image();
+          const origImg = new Image();
           const checkDone = () => {
             loaded++;
-            if (loaded === 2) resolve({ thumb: thumbImg, hires: hiresImg });
+            if (loaded === 3) resolve({ thumb: thumbImg, hires: hiresImg, original: origImg });
           };
           thumbImg.onload = checkDone;
           thumbImg.onerror = () => resolve(null);
           hiresImg.onload = checkDone;
-          hiresImg.onerror = () => { console.warn('[TileUpload] hires image load failed'); resolve({ thumb: thumbImg, hires: thumbImg }); };
+          hiresImg.onerror = () => { console.warn('[TileUpload] hires image load failed'); loaded++; if (loaded === 3) resolve({ thumb: thumbImg, hires: thumbImg, original: thumbImg }); };
+          origImg.onload = checkDone;
+          origImg.onerror = () => { console.warn('[TileUpload] original image load failed'); loaded++; if (loaded === 3) resolve({ thumb: thumbImg, hires: hiresImg, original: hiresImg }); };
           thumbImg.src = thumbDataUrl;
           hiresImg.src = hiresDataUrl;
+          origImg.src = origDataUrl;
+          console.log(`[TileUpload] ${file.name}: original=${img.naturalWidth}x${img.naturalHeight} → thumb=64, hires=${hiresSize}, print=${origSize}px`);
         };
         img.onerror = () => resolve(null);
         img.src = e.target?.result as string;
@@ -1581,15 +1894,17 @@ export default function Studio() {
       reader.readAsDataURL(file);
     }));
     Promise.all(loadPromises).then(results => {
-      const valid = results.filter(Boolean) as {thumb: HTMLImageElement; hires: HTMLImageElement}[];
+      const valid = results.filter(Boolean) as {thumb: HTMLImageElement; hires: HTMLImageElement; original: HTMLImageElement}[];
       const thumbs = valid.map(v => v.thumb);
       const hires = valid.map(v => v.hires);
+      const originals = valid.map(v => v.original);
       setUserTileImages(prev => {
         const next = [...prev, ...thumbs];
         userTileImagesRef.current = next;
         return next;
       });
       userTileHiResRef.current = [...userTileHiResRef.current, ...hires];
+      userTileOriginalRef.current = [...userTileOriginalRef.current, ...originals];
     });
   }, []);
 
@@ -1601,6 +1916,7 @@ export default function Studio() {
       return next;
     });
     userTileHiResRef.current = userTileHiResRef.current.filter((_, i) => i !== index);
+    userTileOriginalRef.current = userTileOriginalRef.current.filter((_, i) => i !== index);
   }, []);
 
   // Auto-render when photo is loaded
@@ -2277,7 +2593,7 @@ export default function Studio() {
       downscaleCtx.drawImage(img, 0, 0, MOBILE_TILE_DOWNSCALE, MOBILE_TILE_DOWNSCALE);
       const smallImg = new Image();
       smallImg.src = downscaleCanvas.toDataURL('image/jpeg', 0.8);
-      smallImg.dataset.originalSrc = img.dataset.originalSrc || '';
+      smallImg.dataset.originalSrc = (img.dataset && img.dataset.originalSrc) ? img.dataset.originalSrc : '';
       return smallImg;
     }
 
@@ -2553,20 +2869,25 @@ export default function Studio() {
     const currentTileMode = tileSourceModeRef.current;
     const currentUserTiles = userTileImagesRef.current;
     const currentUserHiRes = userTileHiResRef.current;
+    // PRINT QUALITY: use original full-resolution images (2048px mobile / 2048px desktop)
+    // instead of 512px hi-res copies. Falls back to hi-res if original not available.
+    const currentUserOriginals = userTileOriginalRef.current;
+    const getHiResForIdx = (i: number): HTMLImageElement | null =>
+      currentUserOriginals[i] || currentUserHiRes[i] || null;
     let validImgsHiRes: (HTMLImageElement | null)[] = new Array(validImgs.length).fill(null);
 
     if (currentTileMode === 'own' && currentUserTiles.length > 0) {
       // Only user tiles – replace entire pool
       validImgs = [...currentUserTiles];
       validTileIds = currentUserTiles.map((_, i) => -(i + 1)); // negative IDs for user tiles
-      validImgsHiRes = currentUserTiles.map((_, i) => currentUserHiRes[i] || null);
+      validImgsHiRes = currentUserTiles.map((_, i) => getHiResForIdx(i));
       // Duplicate tiles to fill pool if too few (repeat to reach ~200 minimum for variety)
       while (validImgs.length < 200 && currentUserTiles.length > 0) {
         validImgs.push(...currentUserTiles);
         validTileIds.push(...currentUserTiles.map((_, i) => -(i + 1)));
-        validImgsHiRes.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
+        validImgsHiRes.push(...currentUserTiles.map((_, i) => getHiResForIdx(i)));
       }
-      console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length})`);
+      console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length}), originals: ${currentUserOriginals.length}`);
     } else if (currentTileMode === 'mix' && currentUserTiles.length > 0) {
       // Mix: user tiles + DB pool – expand user tiles to ~30% of pool for strong presence
       const dbPoolSize = validImgs.length;
@@ -2577,7 +2898,8 @@ export default function Studio() {
       const userHiResExpanded: (HTMLImageElement | null)[] = [];
       for (let rep = 0; rep < reps; rep++) {
         userExpanded.push(...currentUserTiles);
-        userHiResExpanded.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
+        // Use original full-resolution for print quality (falls back to hi-res if not available)
+        userHiResExpanded.push(...currentUserTiles.map((_, i) => getHiResForIdx(i)));
       }
       const userIds = userExpanded.map((_, i) => -(i + 1));
       validImgs = [...userExpanded, ...validImgs];
@@ -3746,7 +4068,8 @@ export default function Studio() {
         const bCtx = boostCanvas.getContext('2d')!;
         try { bCtx.drawImage(tileOffscreen, 0, 0); } catch { bCtx.drawImage(tileOffscreen, 0, 0, TILE_PX, TILE_PX); }
         // Store original URL for hi-res re-render
-        tilesRef.current[ci].url = img.dataset.originalSrc || img.src;
+        // Note: user-uploaded tiles (from canvas.toDataURL) may not have dataset.originalSrc
+        tilesRef.current[ci].url = (img.dataset && img.dataset.originalSrc) ? img.dataset.originalSrc : img.src;
         // -- Professional Luminance-Scale + Moderate AB-Transfer (Reinhard-style) --------
         // Based on best-practice mosaic engine pipeline:
         //   1. Luminance scaling: pixel.L *= (targetL / tileAvgL)   -> clamp 0.6-1.5
@@ -4128,8 +4451,10 @@ export default function Studio() {
   useEffect(() => {
     if (!ready) return;
     if (hiResReadyRef.current || hiResLoadingRef.current) return;
-    // Short delay so UI renders first
+    // Short delay so UI renders first, then verify ready is still true
+    // (a second renderMosaic call could have reset ready=false in the meantime)
     const timer = setTimeout(() => {
+      if (!readyRef.current) return; // mosaic was re-rendered, skip stale hi-res
       if (hiResReadyRef.current || hiResLoadingRef.current) return;
       triggerClientHiResRender();
     }, 1500);
@@ -4145,7 +4470,7 @@ export default function Studio() {
 
     // Always use client-side hi-res render for zoom preview (fast, no downloads needed).
     // Server render is reserved for actual print downloads to avoid gray tiles from failed URL fetches.
-    if (newZ > 1.8 && !hiResReadyRef.current && !hiResLoadingRef.current) {
+    if (newZ > 1.5 && !hiResReadyRef.current && !hiResLoadingRef.current) {
       triggerClientHiResRender();
     }
 
@@ -4202,8 +4527,8 @@ export default function Studio() {
     let tileUrl = '';
     const tileId = tileIdsRef.current[tileIdx];
     if (tileId && tileId > 0) {
-      // DB tile – load from server at high resolution
-      tileUrl = `/api/tile/${tileId}?size=256`;
+      // DB tile – load from server at high resolution (400px = 1cm @ 400 PPI, scharf im Detail-Modal)
+      tileUrl = `/api/tile/${tileId}?size=400`;
     } else {
       // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
@@ -4323,6 +4648,7 @@ export default function Studio() {
         }
         const result = await res.json();
         if (result.ok) {
+          if (result.project?.id) savedProjectIdRef.current = result.project.id;
           setHasSavedProject(true);
           setShowSaveModal(false);
         } else {
@@ -4418,6 +4744,7 @@ export default function Studio() {
     const projectId = searchParams.get('project');
     console.log(`[ProjectLoad] Effect fired: projectId=${projectId}, user=${user?.email ?? 'null'}`);
     if (!projectId || !user) return;
+    if (projectId) savedProjectIdRef.current = parseInt(projectId, 10);
     (async () => {
       try {
         setProjectLoading(true);
@@ -4605,10 +4932,10 @@ export default function Studio() {
 
     if (paid && assignmentRef.current.length && tileIdsRef.current.length && mosaicParamsRef.current) {
       const { cols, rows } = mosaicParamsRef.current;
-      const PX_PER_CM = 300 / 2.54; // = 118.11 px/cm at 300 DPI
+      const PX_PER_CM = 400 / 2.54; // = 157.48 px/cm at 400 DPI (Ultra HD: 1 Kachel = 1cm @ 400 PPI)
       const tileSizeCm = fmt.widthCm / cols;
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max available from API)
       const printOutW = cols * PRINT_TILE_PX;
       const printOutH = rows * PRINT_TILE_PX;
       console.log(`[Print] Format: ${fmt.label}, cols=${cols}, rows=${rows}, naturalTilePx=${naturalTilePx}, PRINT_TILE_PX=${PRINT_TILE_PX}, output=${printOutW}x${printOutH}px`);
@@ -4748,6 +5075,7 @@ export default function Studio() {
           validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+          userOverlay, userPhotoImg,
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
@@ -4758,6 +5086,25 @@ export default function Studio() {
         setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
         setDlProgressMsg(`✓ Download: ${printFilename} (${(printBlob.size / 1024 / 1024).toFixed(1)} MB)`);
         setDlProgress(100);
+        // Upload print file to R2 and save URL in project (background, non-blocking)
+        if (savedProjectIdRef.current && user) {
+          (async () => {
+            try {
+              setDlProgressMsg(`Druckdatei wird gespeichert...`);
+              const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+                body: printBlob,
+              });
+              const uploadResult = await uploadRes.json();
+              if (uploadResult.ok) {
+                setDlProgressMsg(`✓ Druckdatei gespeichert – abrufbar unter Projekte`);
+              }
+            } catch (uploadErr) {
+              console.warn('[PrintUpload] Failed to save print URL:', uploadErr);
+            }
+          })();
+        }
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setDlProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
@@ -4925,10 +5272,10 @@ export default function Studio() {
     setPrintolinoLoading(true);
     try {
       // 1. Calculate tilePx for the print format (matching handleDownload logic)
-      const PX_PER_CM = 300 / 2.54;
+      const PX_PER_CM = 400 / 2.54; // 400 DPI = 1 Kachel pro cm bei 157px
       const tileSizeCm = fmt.widthCm / cols;
       const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx));
+      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max API)
       const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
       // 2. Create order in DB with render params
@@ -5354,7 +5701,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.8 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.5 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -5418,18 +5765,23 @@ export default function Studio() {
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 {/* Wrapper: all layers share position via this relative container */}
+                {/* FIX: use explicit width/height from canvas CSS size so transformOrigin:center center
+                     is computed correctly on mobile (avoids jump-to-right at zoom > 1) */}
                 <div style={{
                   position: "relative",
-                  display: "inline-block",
+                  display: "block",
+                  flexShrink: 0,
                   transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                   transformOrigin: "center center",
                   transition: isDragging.current ? "none" : "transform 0.1s ease",
+                  width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : undefined,
+                  height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : undefined,
                 }}>
                   <canvas
                     ref={canvasRef}
                     style={{
                       display: (ready || loading || projectLoading) && !popOutMode ? "block" : "none",
-                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 2.0) ? "pixelated" : "auto",
+                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 1.5) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
@@ -5443,15 +5795,17 @@ export default function Studio() {
                       maxWidth: "none",
                     }}
                   />
-                  {/* Hi-Res image overlay - sharp zoom (only at high zoom where CSS scaling is noticeably blurry) */}
-                  {hiResImgUrl && hiResReady && zoom > 2.0 && (
+                  {/* Hi-Res image overlay - sharp zoom (show from zoom > 1.5 for better quality on mobile) */}
+                  {hiResImgUrl && hiResReady && zoom > 1.5 && (
                     <img
                       src={hiResImgUrl}
                       alt=""
                       style={{
                         display: "block",
                         position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
+                        top: 0, left: 0,
+                        width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                        height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                         pointerEvents: "none",
                         imageRendering: "auto" as const,
                       }}
@@ -5472,7 +5826,9 @@ export default function Studio() {
                         style={{
                           display: "block",
                           position: "absolute",
-                          top: 0, left: 0, width: "100%", height: "100%",
+                          top: 0, left: 0,
+                          width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                          height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                           pointerEvents: "none",
                           imageRendering: "pixelated" as const,
                           mixBlendMode: "color" as const,
@@ -5489,8 +5845,9 @@ export default function Studio() {
                       style={{
                         display: "block",
                         position: "absolute",
-                        top: 0, left: 0, width: "100%", height: "100%",
-                        objectFit: "fill",
+                        top: 0, left: 0,
+                        width: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
+                        height: mosaicParamsRef.current ? `${Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5))}px` : "100%",
                         opacity: userOverlay / 100,
                         pointerEvents: "none",
                         mixBlendMode: "normal",
@@ -6015,7 +6372,7 @@ export default function Studio() {
                   const fmt = PRINT_FORMATS[selectedFormat];
                   const cols = mosaicParamsRef.current?.cols ?? 60;
                   const rows = mosaicParamsRef.current?.rows ?? 80;
-                  const PX_PER_CM = 300 / 2.54;
+                  const PX_PER_CM = 400 / 2.54; // 400 DPI Ultra HD
                   const tileSizeCm = fmt.widthCm / cols;
                   const tileMm = Math.round(tileSizeCm * 10);
                   const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
@@ -6485,6 +6842,116 @@ export default function Studio() {
             </div>
 
             <p className="text-[10px] text-gray-400 mt-3 text-center">Klick auf eine Kachel im Mosaik um Details zu sehen</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Crop Modal ── */}
+      {cropModalOpen && cropSrc && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.85)' }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col"
+            style={{ maxHeight: '90vh' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-100">
+              <div>
+                <p className="font-bold text-gray-900 text-base">Bildausschnitt wählen</p>
+                <p className="text-xs text-gray-500 mt-0.5">Ziehe einen Rahmen um den gewünschten Bereich — z.B. Gesicht vergrößern</p>
+              </div>
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  // Use full image if user closes without cropping
+                  if (cropSrc) applyCropAndSetPhoto(cropSrc, null);
+                }}
+                className="text-gray-400 hover:text-gray-700 ml-3 flex-shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Crop area */}
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-gray-50">
+              <ReactCrop
+                crop={crop}
+                onChange={(c) => setCrop(c)}
+                onComplete={(c) => setCompletedCrop(c)}
+                minWidth={50}
+                minHeight={50}
+                keepSelection
+              >
+                <img
+                  ref={cropImgRef}
+                  src={cropSrc}
+                  alt="Zu croppende Bild"
+                  style={{ maxWidth: '100%', maxHeight: '55vh', objectFit: 'contain', display: 'block' }}
+                  onLoad={(e) => {
+                    // Default: center crop covering 80% of the image
+                    const { naturalWidth, naturalHeight } = e.currentTarget;
+                    const defaultCrop = centerCrop(
+                      makeAspectCrop({ unit: '%', width: 80 }, naturalWidth / naturalHeight, naturalWidth, naturalHeight),
+                      naturalWidth, naturalHeight
+                    );
+                    setCrop(defaultCrop);
+                  }}
+                />
+              </ReactCrop>
+            </div>
+
+            {/* Footer buttons */}
+            <div className="px-5 pb-5 pt-3 flex gap-3 border-t border-gray-100">
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  if (cropSrc) applyCropAndSetPhoto(cropSrc, null);
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                Ganzes Bild verwenden
+              </button>
+              <button
+                onClick={() => {
+                  setCropModalOpen(false);
+                  if (!cropSrc) return;
+                  // Convert current crop (may be % or px) to pixel coordinates
+                  const imgEl = cropImgRef.current;
+                  if (imgEl && crop && crop.width && crop.height) {
+                    const scaleX = imgEl.naturalWidth / imgEl.width;
+                    const scaleY = imgEl.naturalHeight / imgEl.height;
+                    let pixCrop: PixelCrop;
+                    if (crop.unit === '%') {
+                      pixCrop = {
+                        unit: 'px',
+                        x: Math.round((crop.x / 100) * imgEl.naturalWidth),
+                        y: Math.round((crop.y / 100) * imgEl.naturalHeight),
+                        width: Math.round((crop.width / 100) * imgEl.naturalWidth),
+                        height: Math.round((crop.height / 100) * imgEl.naturalHeight),
+                      };
+                    } else {
+                      pixCrop = {
+                        unit: 'px',
+                        x: Math.round(crop.x * scaleX),
+                        y: Math.round(crop.y * scaleY),
+                        width: Math.round(crop.width * scaleX),
+                        height: Math.round(crop.height * scaleY),
+                      };
+                    }
+                    applyCropAndSetPhoto(cropSrc, pixCrop);
+                  } else {
+                    applyCropAndSetPhoto(cropSrc, completedCrop);
+                  }
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-coral-500 text-white text-sm font-semibold hover:bg-coral-600 transition-colors"
+                style={{ backgroundColor: '#e05c4b' }}
+              >
+                Ausschnitt verwenden
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -40,6 +40,7 @@
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-image-crop": "^11.0.10",
     "react-router-dom": "^6.23.0",
     "sharp": "^0.33.4",
     "stripe": "^16.0.0",

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { FolderOpen, Trash2, RefreshCw, Calendar, Plus, ArrowLeft, Upload, Image, X, Play, Camera, QrCode, Link as LinkIcon, ChevronDown, ChevronUp, Users, Mail, Send } from 'lucide-react'
+import { FolderOpen, Trash2, RefreshCw, Calendar, Plus, ArrowLeft, Upload, Image, X, Play, Camera, QrCode, Link as LinkIcon, ChevronDown, ChevronUp, Users, Mail, Send, Download } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface Project {
@@ -11,6 +11,7 @@ interface Project {
   project_type: string | null
   created_at: string
   updated_at: string
+  print_url?: string | null
 }
 
 interface ProjectDetail extends Project {
@@ -39,6 +40,7 @@ interface GridItem {
   tile_source_mode: string | null
   created_at: string
   updated_at: string
+  print_url?: string | null
   // Event-specific
   event?: EventItem
 }
@@ -113,6 +115,7 @@ export default function Projects() {
       id: p.id,
       name: p.name,
       thumbnail_url: p.thumbnail_url,
+        print_url: p.print_url,
       tile_source_mode: p.tile_source_mode,
       created_at: p.created_at,
       updated_at: p.updated_at,
@@ -646,6 +649,13 @@ export default function Projects() {
                         <>
                           <button onClick={(e) => { e.stopPropagation(); handleLoadMosaic(item.id) }}
                             className="text-xs text-coral-600 hover:text-coral-700 font-medium px-2 py-1 rounded-lg hover:bg-coral-50 transition-colors">Studio</button>
+                          {item.print_url && (
+                            <a href={item.print_url} download onClick={e => e.stopPropagation()}
+                              title="Druckdatei herunterladen"
+                              className="p-1.5 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 transition-colors">
+                              <Download className="w-3.5 h-3.5" />
+                            </a>
+                          )}
                           <button onClick={(e) => handleDeleteMosaic(item.id, e)} disabled={deleting === `mosaic-${item.id}`}
                             className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors">
                             {deleting === `mosaic-${item.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
