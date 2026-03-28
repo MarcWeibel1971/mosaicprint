@@ -5163,11 +5163,11 @@ export default function Studio() {
         fbCtx.fillStyle = '#ffffff'; fbCtx.fillRect(0, 0, outW, outH);
         fbCtx.drawImage(canvas, 0, 0, outW, outH);
         const fallbackBlob = await new Promise<Blob>((resolve) => {
-          fallbackCanvas.toBlob((b) => resolve(b!), 'image/png');
+          fallbackCanvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.95);
         });
         const url2 = URL.createObjectURL(fallbackBlob);
         const link2 = document.createElement('a');
-        link2.download = `mosaicprint-${outW}x${outH}-druckbereit.png`;
+        link2.download = `mosaicprint-${outW}x${outH}-druckbereit.jpg`;
         link2.href = url2;
         document.body.appendChild(link2);
         link2.click();
@@ -5204,10 +5204,10 @@ export default function Studio() {
     }
     outCtx.restore();
 
-    // Download as PNG (lossless quality, no compression artifacts)
+    // Download as JPG (high quality, compatible with Printolino)
     const link = document.createElement('a');
-    link.download = `mosaicprint-${outW}x${outH}-vorschau.png`;
-    link.href = outCanvas.toDataURL('image/png');
+    link.download = `mosaicprint-${outW}x${outH}-vorschau.jpg`;
+    link.href = outCanvas.toDataURL('image/jpeg', 0.95);
     link.click();
   }, [selectedFormat]);
 
@@ -5279,12 +5279,12 @@ export default function Studio() {
 
     try {
       setDlLoading(true);
-      setDlProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px PNG)...`);
+      setDlProgressMsg(`Admin: Rendere max. Qualitaet (${outW.toLocaleString()}x${outH.toLocaleString()}px JPG)...`);
       setDlProgress(5);
 
-      // CLIENT-SIDE RENDERING (admin max quality)
+      // CLIENT-SIDE RENDERING (admin max quality) - JPG for Printolino compatibility
       const { blob: adminBlob, filename: adminFilename } = await renderMosaicClientSide({
-        cols, rows, tilePx: TILE_PX, format: 'png',
+        cols, rows, tilePx: TILE_PX, format: 'jpg',
         assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
