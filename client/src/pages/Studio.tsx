@@ -1186,9 +1186,13 @@ export default function Studio() {
         const cellLabData = cellLabRef.current;  // LAB target per cell
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
         const blendFactor = Math.min(1.0, (algoSettings.histogramBlend ?? 0.0) / 0.10);
+        // colorEnhance slider (0-100) scales the AB color transfer strength
+        // 0% = minimum LAB correction (base only), 100% = full correction
+        const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // Use same parameters as renderMosaic for visual consistency
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
-        const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
+        const AB_BLEND = AB_BLEND_BASE * (0.5 + 0.5 * colorEnhanceVal); // scale by colorEnhance (50%-100% of base)
         const MAX_COLOR_SHIFT = 18;
         const MAX_BLUE_SHIFT = 10;
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
@@ -5968,7 +5972,16 @@ export default function Studio() {
                   </div>
                   <input
                     type="range" min={0} max={100} step={5} value={colorEnhance}
-                    onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
+                    onChange={e => {
+                      const v = Number(e.target.value);
+                      setColorEnhance(v); colorEnhanceRef.current = v;
+                      // If hi-res is active and zoom > 1.5, reset and re-trigger hi-res render
+                      // so the new colorEnhance value is baked into the hi-res image
+                      if (hiResReadyRef.current && zoom > 1.5) {
+                        resetHiRes();
+                        setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
+                      }
+                    }}
                     className="w-full h-1.5 rounded-full cursor-pointer"
                     style={{ accentColor: '#8B5CF6' }}
                   />
@@ -6166,7 +6179,14 @@ export default function Studio() {
                     </div>
                     <input
                       type="range" min={0} max={100} step={5} value={colorEnhance}
-                      onChange={e => { const v = Number(e.target.value); setColorEnhance(v); colorEnhanceRef.current = v; }}
+                      onChange={e => {
+                        const v = Number(e.target.value);
+                        setColorEnhance(v); colorEnhanceRef.current = v;
+                        if (hiResReadyRef.current && zoom > 1.5) {
+                          resetHiRes();
+                          setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
+                        }
+                      }}
                       className="w-full h-2 rounded-full cursor-pointer"
                       style={{ accentColor: '#8B5CF6' }}
                     />
