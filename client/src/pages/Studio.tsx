@@ -1101,7 +1101,9 @@ export default function Studio() {
         const x = col * actualTile;
         const y = row * actualTile;
         const tileIdx = assignment[ci];
-        // Priority: zoom-reloaded hi-res > existing hiResImgs > validImgs (thumbnail)
+        // Priority: zoom-reloaded hi-res (DB tiles) > hiResImgs (user tiles 256/512px) > validImgs (64px thumbnail)
+        // IMPORTANT: For user tiles (negative IDs), hiResImgs[tileIdx] contains the 256/512px hi-res version.
+        // Never use validImgs (64px) for zoom rendering – it would be massively upscaled and blurry.
         const zoomReloaded = zoomHiResMap[tileIdx];
         const hiImg = (zoomReloaded && zoomReloaded.complete && zoomReloaded.naturalWidth > 0) ? zoomReloaded : hiResImgs[tileIdx];
         const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
