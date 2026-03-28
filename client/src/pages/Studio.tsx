@@ -192,65 +192,97 @@ async function renderMosaicClientSide(opts: {
   }
   console.log(`[PrintRender] ${uniqueIdxs.length} unique tiles, ${missingCount} missing (GC'd)`);
 
-  // HI-RES RELOAD: For print quality, always reload ALL DB tiles at 400px.
-  // The validImgs array contains 64px thumbnails → must reload for sharp print output.
-  // Only skip user-uploaded tiles (negative IDs).
-  const RELOAD_SIZE = 400;
+  // HI-RES RELOAD: For print quality, load ALL DB tiles via source_url (original ~940px from Pexels/Unsplash).
+  // Strategy: use /api/tile-urls?hires=1 to get direct source_url for each tile,
+  // then load images directly from source (bypasses server proxy, avoids 128px upscale).
+  // Fallback: /api/tile/:id?size=400 (server proxy) if direct load fails.
   const hiResReloadMap: Record<number, HTMLImageElement> = {};
-  // Always reload all DB tiles – do not skip based on existing img size
-  // (cached 64px thumbnails look fine in memory but produce blurry print output)
   const hiResNeeded = uniqueIdxs.filter(idx => {
     const dbId = tileIds[idx];
     return dbId && dbId > 0; // reload all DB tiles, skip user tiles
   });
-  console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles at ${RELOAD_SIZE}px`);
+  console.log(`[PrintRender] Hi-res reload: ${hiResNeeded.length}/${uniqueIdxs.length} DB tiles via source_url`);
   if (hiResNeeded.length > 0) {
     onProgress?.(3, `${hiResNeeded.length} Tiles in Druckqualität laden...`);
-    const BATCH = 8; // small batches for reliable mobile loading
+
+    // Step 1: Fetch source_url for all DB tiles via /api/tile-urls?hires=1
+    const dbIds = hiResNeeded.map(idx => tileIds[idx]).filter(id => id > 0);
+    let sourceUrlMap: Record<number, string> = {};
+    try {
+      const urlRes = await fetch(`/api/tile-urls?ids=${dbIds.join(',')}&hires=1`);
+      if (urlRes.ok) {
+        const data = await urlRes.json() as Record<string, string>;
+        // Convert string keys to number keys
+        for (const [k, v] of Object.entries(data)) { if (v) sourceUrlMap[Number(k)] = v; }
+        console.log(`[PrintRender] Got ${Object.keys(sourceUrlMap).length} source URLs`);
+      }
+    } catch (e) {
+      console.warn('[PrintRender] Failed to fetch source URLs, will use proxy fallback', e);
+    }
+
     let loaded = 0;
     let failed = 0;
-    // Helper: load a single tile with up to 3 retries and 10s timeout each
-    const loadTileWithRetry = (dbId: number, size: number): Promise<HTMLImageElement | null> =>
-      new Promise(resolve => {
-        const attempt = (retries: number) => {
+    const BATCH = 6; // small batches for reliable mobile loading
+
+    // Helper: load image with retry, trying source_url first then proxy fallback
+    const loadTileHiRes = (idx: number): Promise<HTMLImageElement | null> => {
+      const dbId = tileIds[idx];
+      const sourceUrl = sourceUrlMap[dbId];
+      return new Promise(resolve => {
+        const tryLoad = (url: string, retries: number, isFallback: boolean) => {
           const img = new Image();
+          // crossOrigin needed for canvas operations when loading from external URLs
+          if (!url.startsWith('/')) img.crossOrigin = 'anonymous';
           const timeout = setTimeout(() => {
             img.onload = img.onerror = null;
-            console.warn(`[PrintRender] Tile ${dbId} timeout (${3 - retries + 1}/3)`);
-            if (retries > 0) { setTimeout(() => attempt(retries - 1), 300); } else { resolve(null); }
-          }, 10000);
+            console.warn(`[PrintRender] Tile ${dbId} timeout (${url.substring(0, 60)})`);
+            if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+            else if (!isFallback && sourceUrl) {
+              // Try proxy fallback
+              console.warn(`[PrintRender] Tile ${dbId} source_url failed, trying proxy`);
+              tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true);
+            } else { resolve(null); }
+          }, 12000);
           img.onload = () => {
             clearTimeout(timeout);
-            // Validate: reject suspiciously small images (failed loads sometimes return 1x1 error imgs)
             if (img.naturalWidth < 10 || img.naturalHeight < 10) {
-              console.warn(`[PrintRender] Tile ${dbId} returned tiny image ${img.naturalWidth}x${img.naturalHeight}`);
-              if (retries > 0) { setTimeout(() => attempt(retries - 1), 300); } else { resolve(null); }
+              if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+              else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true); }
+              else { resolve(null); }
             } else {
+              console.log(`[PrintRender] Tile ${dbId} loaded at ${img.naturalWidth}x${img.naturalHeight} (${isFallback ? 'proxy' : 'source'})`);
               resolve(img);
             }
           };
           img.onerror = () => {
             clearTimeout(timeout);
-            console.warn(`[PrintRender] Tile ${dbId} error (${3 - retries + 1}/3)`);
-            if (retries > 0) { setTimeout(() => attempt(retries - 1), 500); } else { resolve(null); }
+            if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+            else if (!isFallback && sourceUrl) {
+              console.warn(`[PrintRender] Tile ${dbId} source_url error, trying proxy`);
+              tryLoad(`/api/tile/${dbId}?size=400&t=${Date.now()}`, 2, true);
+            } else { resolve(null); }
           };
-          // cache-bust: force fresh load at correct size, avoid stale 64px cached version
-          img.src = `/api/tile/${dbId}?size=${size}&t=${Date.now()}`;
+          img.src = url;
         };
-        attempt(2); // up to 3 attempts total
+        // Start with source_url if available, otherwise use proxy directly
+        const startUrl = sourceUrl || `/api/tile/${dbId}?size=400&t=${Date.now()}`;
+        const isFallback = !sourceUrl;
+        tryLoad(startUrl, 2, isFallback);
       });
+    };
+
     for (let i = 0; i < hiResNeeded.length; i += BATCH) {
       const batch = hiResNeeded.slice(i, i + BATCH);
       await Promise.all(batch.map(async (idx) => {
         const dbId = tileIds[idx];
         if (!dbId || dbId <= 0) return;
-        const img = await loadTileWithRetry(dbId, RELOAD_SIZE);
+        const img = await loadTileHiRes(idx);
         if (img && img.naturalWidth >= 10) {
           hiResReloadMap[idx] = img;
           loaded++;
         } else {
           failed++;
-          console.error(`[PrintRender] FAILED to load tile ${dbId} after 3 retries`);
+          console.error(`[PrintRender] FAILED to load tile ${dbId}`);
         }
       }));
       onProgress?.(3 + Math.round((loaded / hiResNeeded.length) * 12), `Hi-Res laden: ${loaded}/${hiResNeeded.length}`);
@@ -976,42 +1008,70 @@ export default function Studio() {
       const rotations = assignmentRotRef.current;
       const tileIds = tileIdsRef.current;
 
-      // HI-RES RELOAD for zoom: reload DB tiles at actualTile resolution (CDN tiles are 128px,
-      // validImgs are 64px thumbnails — upscaling causes blur/gray)
+      // HI-RES RELOAD for zoom: load DB tiles via source_url (original ~940px from Pexels/Unsplash).
+      // This avoids 128px→256px upscale (blurry). Direct source_url gives full-resolution tiles.
       const zoomHiResMap: Record<number, HTMLImageElement> = {};
       const uniqueZoomIdxs = [...new Set(assignment)];
-      const ZOOM_NEED_SIZE = 256; // we want 256px tiles for zoom
+      const ZOOM_NEED_SIZE = 256; // minimum acceptable size for zoom
       const zoomReloadNeeded = uniqueZoomIdxs.filter(idx => {
         const dbId = tileIds[idx];
         if (!dbId || dbId <= 0) return false;
         const hi = hiResImgs[idx];
         if (hi && hi.complete && hi.naturalWidth >= ZOOM_NEED_SIZE * 0.8) return false; // already hi-res
         const img = validImgs[idx];
-        // Reload if missing or smaller than 80% of desired zoom size (256px)
         return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < ZOOM_NEED_SIZE * 0.8;
       });
       if (zoomReloadNeeded.length > 0) {
-        const ZOOM_SIZE = 256; // fixed 256px for zoom — sharp enough for 128px display tiles
-        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles at ${ZOOM_SIZE}px for zoom`);
-        const ZBATCH = 10;
-        // Load with retry + timeout (no crossOrigin: same-origin, avoids iOS CORS cache issues)
-        const loadZoomTile = (dbId: number): Promise<HTMLImageElement | null> =>
-          new Promise(resolve => {
-            const attempt = (retries: number) => {
+        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles via source_url for zoom`);
+
+        // Fetch source_url for all needed tiles in one request
+        const zoomDbIds = zoomReloadNeeded.map(idx => tileIds[idx]).filter(id => id > 0);
+        let zoomSourceUrlMap: Record<number, string> = {};
+        try {
+          const urlRes = await fetch(`/api/tile-urls?ids=${zoomDbIds.join(',')}&hires=1`);
+          if (urlRes.ok) {
+            const data = await urlRes.json() as Record<string, string>;
+            for (const [k, v] of Object.entries(data)) { if (v) zoomSourceUrlMap[Number(k)] = v; }
+            console.log(`[ClientHiRes] Got ${Object.keys(zoomSourceUrlMap).length} source URLs for zoom`);
+          }
+        } catch (e) {
+          console.warn('[ClientHiRes] Failed to fetch zoom source URLs', e);
+        }
+
+        const ZBATCH = 8;
+        const loadZoomTile = (dbId: number): Promise<HTMLImageElement | null> => {
+          const sourceUrl = zoomSourceUrlMap[dbId];
+          return new Promise(resolve => {
+            const tryLoad = (url: string, retries: number, isFallback: boolean) => {
               const img = new Image();
+              if (!url.startsWith('/')) img.crossOrigin = 'anonymous';
               const timeout = setTimeout(() => {
                 img.onload = img.onerror = null;
-                if (retries > 0) attempt(retries - 1); else resolve(null);
-              }, 8000);
-              img.onload = () => { clearTimeout(timeout); resolve(img); };
+                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                else { resolve(null); }
+              }, 10000);
+              img.onload = () => {
+                clearTimeout(timeout);
+                if (img.naturalWidth < 10) {
+                  if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
+                  else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                  else { resolve(null); }
+                } else { resolve(img); }
+              };
               img.onerror = () => {
                 clearTimeout(timeout);
-                if (retries > 0) setTimeout(() => attempt(retries - 1), 500); else resolve(null);
+                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
+                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                else { resolve(null); }
               };
-              img.src = `/api/tile/${dbId}?size=${ZOOM_SIZE}&t=${Date.now()}`;
+              img.src = url;
             };
-            attempt(1);
+            const startUrl = sourceUrl || `/api/tile/${dbId}?size=256&t=${Date.now()}`;
+            tryLoad(startUrl, 1, !sourceUrl);
           });
+        };
+
         for (let i = 0; i < zoomReloadNeeded.length; i += ZBATCH) {
           const batch = zoomReloadNeeded.slice(i, i + ZBATCH);
           await Promise.all(batch.map(async (idx) => {

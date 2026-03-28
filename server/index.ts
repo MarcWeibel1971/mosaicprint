@@ -75,10 +75,20 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
   if (cached) return cached.buf;
 
   // 1b. Check nearby sizes and resize
-  for (const trySize of [128, 64, 256]) {
+  // IMPORTANT: Only use cached smaller sizes if the size difference is small (max 2x upscale).
+  // Never upscale 128px → 400px (3x) as it produces blurry print output.
+  // For print sizes (>= 256px), only allow downscaling or ≤ 2x upscale from nearby cache.
+  const MAX_UPSCALE_RATIO = size >= 256 ? 1.5 : 3.0; // strict for print, lenient for thumbnails
+  for (const trySize of [256, 400, 128, 64]) {
     if (trySize === size) continue;
     const nearby = tileCacheMap.get(`${id}-${trySize}`);
     if (nearby) {
+      // Skip if upscaling too aggressively (would produce blurry output)
+      const ratio = size / trySize;
+      if (ratio > MAX_UPSCALE_RATIO) {
+        console.log(`[tile] Skip cache resize ${trySize}→${size} (ratio ${ratio.toFixed(1)}x > ${MAX_UPSCALE_RATIO}x limit)`);
+        continue;
+      }
       try {
         const resized = await sharp(nearby.buf)
           .resize(size, size, { fit: 'cover', position: 'centre' })
@@ -110,10 +120,12 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     } catch { return null; }
   }
 
-  // Prefer source_url for larger sizes (better quality), R2 for small
-  // For print: R2 128px upscaled is far better than gray/missing
-  const url = size <= 128 && tileUrls.tile128Url
-    ? tileUrls.tile128Url
+  // URL selection strategy:
+  // - size <= 128: use R2/tile128 (fast CDN, already 128px)
+  // - size > 128 (zoom/print): ALWAYS use source_url first for full resolution
+  //   Never fall back to tile128 for large sizes (would cause 128→400 upscale = blurry)
+  const url = size <= 128
+    ? (tileUrls.tile128Url || tileUrls.sourceUrl)
     : (tileUrls.sourceUrl || tileUrls.tile128Url);
   if (!url) return null;
 
