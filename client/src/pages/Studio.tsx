@@ -167,12 +167,14 @@ async function renderMosaicClientSide(opts: {
   validImgs: HTMLImageElement[]; hiResImgs: (HTMLImageElement | null)[];
   snapshot: ImageData | null; origTilePx: number;
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
+  cellLab?: [number, number, number][]; // LAB target per cell (blurred+original mix) for accurate color correction
   userOverlay?: number; // 0-100: how much original photo shows through (from Foto-Overlay slider)
   userPhotoImg?: HTMLImageElement | null; // original user photo for overlay
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
   const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
     snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm,
+    cellLab: cellLabData,
     userOverlay = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
@@ -339,7 +341,9 @@ async function renderMosaicClientSide(opts: {
     const tR = tc.length > tci+2 ? tc[tci] : 128;
     const tG = tc.length > tci+2 ? tc[tci+1] : 128;
     const tBv = tc.length > tci+2 ? tc[tci+2] : 128;
-    const [tL, tA, tB] = rgbToLab(tR, tG, tBv);
+    // Use cellLab if available (blurred+original mix, same as renderMosaic) for accurate color correction
+    // Fallback: compute from raw targetColors (100% original, slightly different)
+    const [tL, tA, tB] = (cellLabData && cellLabData.length > ci) ? cellLabData[ci] : rgbToLab(tR, tG, tBv);
 
     if (img && img.complete && img.naturalWidth > 0) {
       try {
@@ -423,9 +427,11 @@ async function renderMosaicClientSide(opts: {
 
   // Apply adaptive edge-based overlay (same as preview)
   onProgress?.(72, 'Overlay anwenden...');
-  const BASE_OL = algoSettings.baseOverlay ?? 0.08;   // reduced: 0.15→0.08 to prevent color patches in print
-  const EDGE_B = algoSettings.edgeBoost ?? 0.10;      // reduced: 0.20→0.10
-  const olMode = algoSettings.overlayMode ?? 'softlight';
+  const BASE_OL = algoSettings.baseOverlay ?? 0.15;   // match renderMosaic default
+  const EDGE_B = algoSettings.edgeBoost ?? 0.20;      // match renderMosaic default
+  // CRITICAL: Default must match renderMosaic default ('none') to ensure print = preview
+  // If user has set overlayMode in settings, use that; otherwise 'none' (pure LAB-corrected tiles)
+  const olMode = algoSettings.overlayMode ?? 'none';
   const sl = (base: number, blend: number) => {
     const b2 = blend/255, s = base/255;
     return Math.round((b2 < 0.5 ? s - (1-2*b2)*s*(1-s) : s + (2*b2-1)*(Math.sqrt(s)-s)) * 255);
@@ -5170,6 +5176,7 @@ export default function Studio() {
           validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+          cellLab: cellLabRef.current, // Pass cellLab for accurate color correction (blurred+original mix)
           userOverlay, userPhotoImg,
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
@@ -6495,14 +6502,18 @@ export default function Studio() {
                   // Quality assessment
                   const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
                   // Compute optimal baseTiles for ~9mm tiles in this format
-                  const targetTileMm = 9; // ideal: 9mm per tile
-                  const targetCols = Math.round(fmt.widthCm * 10 / targetTileMm);
+                  // 1cm/Kachel Regel: für 70x70cm = 70x70 Kacheln, für 40x40cm = 40x40 Kacheln
+                  const TARGET_TILE_CM = 1.0; // 1 Kachel pro cm (optimal für 20-30cm Betrachtungsabstand)
+                  const targetTileMm = Math.round(TARGET_TILE_CM * 10); // = 10mm
+                  const targetCols = Math.round(fmt.widthCm / TARGET_TILE_CM); // z.B. 70cm → 70 Kacheln
                   // Reverse-compute baseTiles from targetCols based on aspect ratio
                   const imgAspect = cols / rows; // approximate from current grid
                   const optimalBaseTiles = imgAspect >= 1
                     ? targetCols                                    // landscape: baseTiles = cols
                     : Math.round(targetCols / imgAspect);           // portrait: baseTiles = cols / aspect
-                  const needsOptimize = quality !== 'ideal' && quality !== 'ok';
+                  const targetRows = imgAspect >= 1 ? Math.round(targetCols / imgAspect) : targetCols;
+                  const isAlreadyOptimal = cols === targetCols && rows === targetRows;
+                  const needsOptimize = !isAlreadyOptimal;
                   // Re-render handler: update baseTiles and trigger renderMosaic
                   const handleOptimizeForFormat = () => {
                     if (!userPhotoImg) return;
@@ -6527,42 +6538,28 @@ export default function Studio() {
                         <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
                         <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
                       </div>
-                      {quality === 'small' && (
-                        <div className="mt-2">
-                          <p className="text-amber-700 font-medium mb-2">
-                            Bei {tileMm}mm sind die einzelnen Fotos kaum erkennbar.
-                            Fuer {fmt.label} empfehlen wir ca. {targetCols} Kacheln (≈{targetTileMm}mm pro Kachel).
+                      {/* 1cm/Kachel Optimieren-Button: immer anzeigen */}
+                      <div className="mt-2">
+                        {isAlreadyOptimal ? (
+                          <p className="text-green-700 font-medium">
+                            ✓ Optimal für {fmt.label}: {cols}×{rows} Kacheln (1 cm/Kachel, ideal für 20–30 cm Abstand)
                           </p>
-                          <button
-                            onClick={handleOptimizeForFormat}
-                            disabled={loading}
-                            className="w-full py-2 px-3 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50"
-                          >
-                            Fuer {fmt.label} optimieren ({targetCols} Kacheln, ≈{targetTileMm}mm)
-                          </button>
-                        </div>
-                      )}
-                      {quality === 'large' && (
-                        <div className="mt-2">
-                          <p className="text-amber-700 font-medium mb-2">
-                            Bei {tileMm}mm sind die Kacheln sehr gross — das Gesamtbild wird grob.
-                            Fuer {fmt.label} empfehlen wir ca. {targetCols} Kacheln (≈{targetTileMm}mm pro Kachel).
-                          </p>
-                          <button
-                            onClick={handleOptimizeForFormat}
-                            disabled={loading}
-                            className="w-full py-2 px-3 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50"
-                          >
-                            Fuer {fmt.label} optimieren ({targetCols} Kacheln, ≈{targetTileMm}mm)
-                          </button>
-                        </div>
-                      )}
-                      {quality === 'ideal' && (
-                        <p className="mt-1.5 text-green-700 font-medium">Optimale Kachelgroesse: Fernwirkung und Einzelfotos gut erkennbar.</p>
-                      )}
-                      {quality === 'ok' && (
-                        <p className="mt-1.5 text-blue-600">Gute Qualitaet fuer Printolino {fmt.label} Druck.</p>
-                      )}
+                        ) : (
+                          <>
+                            <p className="text-blue-700 font-medium mb-2">
+                              Für {fmt.label} empfehlen wir <strong>{targetCols}×{targetRows} Kacheln</strong> (1 cm/Kachel, optimal für 20–30 cm Abstand).
+                              Aktuell: {cols}×{rows} Kacheln ({tileMm}mm/Kachel).
+                            </p>
+                            <button
+                              onClick={handleOptimizeForFormat}
+                              disabled={loading}
+                              className="w-full py-2 px-3 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                            >
+                              Neu rendern für {fmt.label} → {targetCols}×{targetRows} Kacheln (1 cm/Kachel)
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   );
                 })()}
