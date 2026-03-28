@@ -1176,10 +1176,20 @@ export default function Studio() {
         const em = edgeMapRef.current;
         const fm = faceMaskRef.current;
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
-        const cBoost = algoSettings.contrastBoost ?? 1.15;  // reduced: 1.30→1.15 to avoid over-saturating skin tones
-        const BASE_OL = algoSettings.baseOverlay ?? 0.08;   // reduced: 0.15→0.08 to reduce color patches
-        const EDGE_B = algoSettings.edgeBoost ?? 0.10;      // reduced: 0.20→0.10 to reduce edge color bleeding
-        const olMode = algoSettings.overlayMode ?? 'softlight';
+        // IMPORTANT: Use same defaults as main renderMosaic to ensure visual consistency.
+        // Main render defaults: overlayMode='none', no contrastBoost.
+        // Hi-res must match exactly – any divergence causes visible color difference when zooming.
+        const cBoost = algoSettings.contrastBoost ?? 1.0;   // 1.0 = no boost (match main render)
+        const BASE_OL = algoSettings.baseOverlay ?? 0.08;
+        const EDGE_B = algoSettings.edgeBoost ?? 0.10;
+        const olMode = algoSettings.overlayMode ?? 'none';  // match main render default ('none', not 'softlight')
+
+        // Skip pixel processing entirely when there's nothing to do (default case).
+        // This avoids any color distortion and matches the main render output exactly.
+        if (cBoost === 1.0 && olMode === 'none') {
+          // No contrast boost, no overlay → hi-res tiles are already correct colors
+          console.log('[ClientHiRes] Skipping pixel post-processing (cBoost=1.0, olMode=none)');
+        } else {
 
         // Soft-light blend function (Photoshop formula)
         const softLight = (base: number, blend: number) => {
@@ -1238,6 +1248,7 @@ export default function Studio() {
           if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
         }
         hrCtx!.putImageData(hrImageData, 0, 0);
+        } // end else (cBoost !== 1.0 || olMode !== 'none')
       }
 
       // 3. Convert to blob URL (with timeout for mobile)
