@@ -4463,7 +4463,9 @@ export default function Studio() {
 
     // Hi-res canvas resolution: must be large enough to look sharp at ~150px CSS display
     // Use at least 512px so the zoomed tile is crisp even on retina screens
-    const canvasResPx = 512;
+    // MOBILE: 256px is enough for ~150px display, and saves memory (30 canvases)
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const canvasResPx = isMob ? 256 : 512;
 
     // Create snapshot fallback canvas
     const snapshot = snapshotRef.current;
@@ -4485,7 +4487,7 @@ export default function Studio() {
     popContainer.innerHTML = '';
 
     // Create one hi-res canvas overlay per animated tile, positioned exactly over its spot
-    const numTiles = Math.min(30, totalCells); // animate up to 30 tiles per cycle
+    const numTiles = Math.min(isMob ? 15 : 30, totalCells); // fewer tiles on mobile to save memory
     const tileEls: HTMLCanvasElement[] = [];
 
     for (let t = 0; t < numTiles; t++) {
@@ -4500,24 +4502,28 @@ export default function Studio() {
       tCtx.imageSmoothingEnabled = true;
       tCtx.imageSmoothingQuality = 'high';
 
-      // Draw from best available tile image: hi-res > original > snapshot
+      // Draw from best available tile image: originals > hi-res > thumbnail > snapshot
       let drawn = false;
       if (assignment && validImgs) {
         const tileIdx = assignment[ci];
-        // Prefer hi-res image (full resolution, not downscaled)
+        // Priority chain: user originals (full-res) > hi-res > thumbnail
+        const userOriginals = userTileOriginalRef.current;
         const hiResImgs = validImgsHiResRef.current;
+        const origImg = userOriginals?.[tileIdx >= 0 ? -1 : -(tileIdx + 1)]; // user tiles have negative IDs
         const hiImg = hiResImgs?.[tileIdx];
-        const img = (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg : validImgs[tileIdx];
-        if (img && img.complete && img.naturalWidth > 0) {
+        const bestImg = (origImg && origImg.complete && origImg.naturalWidth > 0) ? origImg
+          : (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg
+          : validImgs[tileIdx];
+        if (bestImg && bestImg.complete && bestImg.naturalWidth > 0) {
           try {
             const rot = rotations?.[ci] || 0;
             if (rot === 0) {
-              tCtx.drawImage(img, 0, 0, canvasResPx, canvasResPx);
+              tCtx.drawImage(bestImg, 0, 0, canvasResPx, canvasResPx);
             } else {
               tCtx.save();
               tCtx.translate(canvasResPx / 2, canvasResPx / 2);
               tCtx.rotate(rot * Math.PI / 2);
-              tCtx.drawImage(img, -canvasResPx / 2, -canvasResPx / 2, canvasResPx, canvasResPx);
+              tCtx.drawImage(bestImg, -canvasResPx / 2, -canvasResPx / 2, canvasResPx, canvasResPx);
               tCtx.restore();
             }
             drawn = true;
