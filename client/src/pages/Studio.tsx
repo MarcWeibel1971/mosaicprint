@@ -5860,9 +5860,12 @@ export default function Studio() {
                   {/* Color Enhance overlay - target colors per tile with color blend */}
                   {/* Auto-reduce at high zoom: individual tiles are visible, color overlay looks artificial */}
                   {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
-                    // Gentle zoom fade: full strength at <=100%, fades to 40% minimum at high zoom
-                    // This keeps the portrait recognizable while still showing individual tiles
-                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0.4, 1.0 - (zoom - 1.0) / 4.0);
+                    // Disable color enhance overlay when hi-res is active: hi-res render already
+                    // has per-pixel color correction built in. Overlay on top causes color patches.
+                    if (hiResReady && zoom > 1.5) return null;
+                    // Gentle zoom fade: full strength at <=100%, fades out quickly at zoom >1.2
+                    // At zoom=1.5 without hi-res: 25% strength; at zoom=2.0: 0%
+                    const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0.0, 1.0 - (zoom - 1.0) / 2.0);
                     const effectiveOpacity = (colorEnhance / 100) * zoomFade;
                     if (effectiveOpacity < 0.01) return null;
                     return (
