@@ -1313,6 +1313,24 @@ export default function Studio() {
       console.error('[ClientHiRes] Failed:', e);
     } finally {
       setHiResLoading(false);
+      // MOBILE FIX: Restore main canvas from snapshot after hi-res render.
+      // Mobile browsers may evict main canvas pixels when large hi-res canvases
+      // are created (canvas memory pressure). This restores the mosaic appearance.
+      const mainCanvas = canvasRef.current;
+      const snap = snapshotRef.current;
+      if (mainCanvas && snap) {
+        const mainCtx = mainCanvas.getContext('2d');
+        if (mainCtx) {
+          try {
+            // Check if canvas was evicted (first pixel is 0,0,0,0 = transparent)
+            const probe = mainCtx.getImageData(0, 0, 1, 1).data;
+            if (probe[3] === 0 && snap.data[3] !== 0) {
+              console.warn('[ClientHiRes] Main canvas was evicted, restoring from snapshot');
+              mainCtx.putImageData(snap, 0, 0);
+            }
+          } catch { /* ignore */ }
+        }
+      }
     }
   }, []);
   // Keep ref in sync so triggerHiResRender can call it as fallback
@@ -4547,9 +4565,13 @@ export default function Studio() {
 
   // Auto-start Hi-Res rendering in background once mosaic is ready
   // Always use client-side render (images already loaded, no download failures)
+  // MOBILE: Skip auto-trigger to prevent canvas memory eviction (mosaic disappears).
+  // On mobile, hi-res render is only triggered when user actively zooms > 1.5x.
   useEffect(() => {
     if (!ready) return;
     if (hiResReadyRef.current || hiResLoadingRef.current) return;
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    if (isMob) return; // mobile: only render hi-res on zoom (saves memory, prevents canvas eviction)
     // Short delay so UI renders first, then verify ready is still true
     // (a second renderMosaic call could have reset ready=false in the meantime)
     const timer = setTimeout(() => {
