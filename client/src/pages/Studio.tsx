@@ -4801,6 +4801,21 @@ export default function Studio() {
               setUserTileImages(thumbImgs);
               userTileImagesRef.current = thumbImgs;
               userTileHiResRef.current = hiResImgs;
+              // Rebuild validImgsRef so triggerClientHiResRender can work (HD-Button).
+              // Mirror what renderMosaic does for tileMode='own': expand to >=200 entries.
+              const expandedThumbs: HTMLImageElement[] = [...thumbImgs];
+              const expandedHiRes: (HTMLImageElement | null)[] = [...hiResImgs];
+              const expandedIds: number[] = thumbImgs.map((_, i) => -(i + 1));
+              while (expandedThumbs.length < 200 && thumbImgs.length > 0) {
+                expandedThumbs.push(...thumbImgs);
+                expandedHiRes.push(...hiResImgs);
+                expandedIds.push(...thumbImgs.map((_, i) => -(i + 1)));
+              }
+              validImgsRef.current = expandedThumbs;
+              validImgsHiResRef.current = expandedHiRes;
+              // Only overwrite tileIds if not already restored from saved data
+              if (!data.tileIds) tileIdsRef.current = expandedIds;
+              console.log(`[ProjectLoad] validImgsRef rebuilt: ${expandedThumbs.length} entries from ${thumbImgs.length} user tiles`);
             }
           }
 
