@@ -19,6 +19,7 @@ if (!isRailway) {
 
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -172,8 +173,54 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
 const app = express();
 
-app.use(cors({ origin: true, credentials: true }));
+// CORS: allow production domain, local dev, and Railway preview URLs
+const ALLOWED_ORIGINS = [
+  "https://www.mosaicprint.ch",
+  "https://mosaicprint.ch",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://localhost:4173",
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    // Allow Railway preview URLs (*.up.railway.app)
+    if (origin.endsWith(".up.railway.app") || origin.endsWith(".railway.app")) {
+      return callback(null, true);
+    }
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    // In development, allow all origins
+    if (process.env.NODE_ENV !== "production") {
+      return callback(null, true);
+    }
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "50mb" }));
+// ── Rate Limiting ─────────────────────────────────────────────────────────────
+// Auth endpoints: 10 requests per 15 minutes per IP
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Zu viele Anfragen. Bitte warte 15 Minuten." },
+  skip: () => process.env.NODE_ENV !== "production",
+});
+// Import/AI endpoints: 20 requests per hour per IP
+const importLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Import-Limit erreicht. Bitte warte eine Stunde." },
+  skip: () => process.env.NODE_ENV !== "production",
+});
+
 
 // Request logging middleware
 app.use((req, _res, next) => {
@@ -2655,6 +2702,10 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  console.error("[FATAL] JWT_SECRET environment variable is not set in production. Refusing to start.");
+  process.exit(1);
+}
 const JWT_SECRET = process.env.JWT_SECRET || "mosaicprint-dev-secret-change-in-production";
 const JWT_EXPIRES_IN = "30d";
 
@@ -2675,9 +2726,20 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   (req as any).user = user;
   next();
 }
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const user = extractUser(req);
+  if (!user) return res.status(401).json({ ok: false, error: "Nicht eingeloggt" });
+  const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? "marc.weibel@weibel-mueller.ch").toLowerCase().trim();
+  if (user.email.toLowerCase().trim() !== ADMIN_EMAIL) {
+    return res.status(403).json({ ok: false, error: "Kein Admin-Zugriff" });
+  }
+  (req as any).user = user;
+  next();
+}
+
 
 // Register
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", authLimiter, async (req, res) => {
   try {
     const pool = db.getPool();
     const { email, password, displayName } = req.body;
@@ -2700,7 +2762,7 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // Login
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
     const pool = db.getPool();
     const { email, password } = req.body;
@@ -2924,8 +2986,8 @@ app.get("/api/events/:slug/qr-data", async (req, res) => {
 // ── Event Mosaic API ────────────────────────────────────────────────────────
 
 // Create event (admin or authenticated user)
-app.post("/api/events", async (req, res) => {
-  const user = extractUser(req); // optional auth
+app.post("/api/events", requireAdmin, async (req, res) => {
+  const user = (req as any).user as AuthUser; // admin only
   try {
     const pool = db.getPool();
     const { name, targetImageBase64, maxPhotos } = req.body;
@@ -3085,7 +3147,7 @@ app.delete("/api/events/:slug/photos/:photoId", async (req, res) => {
 });
 
 // Delete event (admin)
-app.delete("/api/events/:slug", async (req, res) => {
+app.delete("/api/events/:slug", requireAdmin, async (req, res) => {
   try {
     const pool = db.getPool();
     await pool.query(`DELETE FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
@@ -3117,7 +3179,7 @@ app.post("/api/events/:slug/participants", async (req, res) => {
   }
 });
 
-app.get("/api/events/:slug/participants", async (req, res) => {
+app.get("/api/events/:slug/participants", requireAdmin, async (req, res) => {
   try {
     const pool = db.getPool();
     const eventRes = await pool.query(`SELECT id FROM mosaic_events WHERE slug = $1`, [req.params.slug]);
@@ -3135,7 +3197,7 @@ app.get("/api/events/:slug/participants", async (req, res) => {
 });
 
 // ── Update event target image ──────────────────────────────────────────────
-app.put("/api/events/:slug/target-image", express.json({ limit: '20mb' }), async (req, res) => {
+app.put("/api/events/:slug/target-image", requireAdmin, express.json({ limit: '20mb' }), async (req, res) => {
   try {
     const pool = db.getPool();
     const { targetImageBase64 } = req.body;
@@ -3416,7 +3478,7 @@ app.post("/api/events/:slug/render", async (req, res) => {
 });
 
 // ── Send mosaic to all participants ────────────────────────────────────────
-app.post("/api/events/:slug/send-mosaic", async (req, res) => {
+app.post("/api/events/:slug/send-mosaic", requireAdmin, async (req, res) => {
   try {
     const pool = db.getPool();
 

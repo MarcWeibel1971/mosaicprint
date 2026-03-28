@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { randomUUID } from "crypto";
-import { router, publicProcedure } from "./trpc.js";
+import { router, publicProcedure, adminProcedure } from "./trpc.js";
 import * as db from "./db.js";
 import { renderMosaicOnServer, type TileData } from "./mosaicExport.js";
 import Stripe from "stripe";
@@ -1660,7 +1660,7 @@ export const appRouter = router({
   }),
 
   // Admin: Import from source (Pexels/Unsplash/Pixabay)
-  importFromSource: publicProcedure
+  importFromSource: adminProcedure
     .input(z.object({ source: z.enum(["pexels", "unsplash", "pixabay", "flickr"]), count: z.number().min(1).max(5000).default(500), category: z.string().optional() }))
     .mutation(async ({ input }) => {
       const status = getImportStatus(input.source);
@@ -1839,7 +1839,7 @@ export const appRouter = router({
       return { tiles: res.rows as Array<{ id: number; tile128_url: string; r2_url: string | null; source_url: string; avg_l: number; avg_a: number; avg_b: number; subject: string; import_query: string; source_provider: string }> };
     }),
   // Admin: Confirm Import – activates selected tiles, deletes rejected ones
-  confirmImport: publicProcedure
+  confirmImport: adminProcedure
     .input(z.object({
       sessionId: z.string(),
       rejectedIds: z.array(z.number()), // IDs to delete
@@ -1865,7 +1865,7 @@ export const appRouter = router({
       return { activated, deleted };
     }),
   // Admin: Smart Import (DB-gap analysis → fills most needed color×brightness buckets first)
-  smartImport: publicProcedure
+  smartImport: adminProcedure
     .input(z.object({
       sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"),
       count: z.number().min(1).max(5000).default(500),
@@ -2174,7 +2174,7 @@ export const appRouter = router({
     }),
 
   // Admin: Smart Import status
-  getSmartImportStatus: publicProcedure
+  getSmartImportStatus: adminProcedure
     .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
       const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
@@ -2183,7 +2183,7 @@ export const appRouter = router({
     }),
 
   // Admin: Get last import report (JSON download)
-  getLastImportReport: publicProcedure
+  getLastImportReport: adminProcedure
     .input(z.object({ sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"), isAnalysis: z.boolean().optional() }))
     .query(({ input }) => {
       const jobKey = input.isAnalysis ? `smart_analysis_${input.sourceId}` : `smart_${input.sourceId}`;
@@ -2194,7 +2194,7 @@ export const appRouter = router({
 
   // Admin: Get import recommendations from analyzeDbGaps
   // Returns the top-N tasks sorted by priority for display in the UI
-  getImportRecommendations: publicProcedure
+  getImportRecommendations: adminProcedure
     .input(z.object({ limit: z.number().min(5).max(50).default(20) }))
     .query(async ({ input }) => {
       const tasks = await analyzeDbGaps(200);
@@ -2217,7 +2217,7 @@ export const appRouter = router({
 
   // Admin: Get top import keywords from excellent-rated images
   // Groups by import_query, counts occurrences, returns sorted by frequency
-  getExcellentKeywords: publicProcedure
+  getExcellentKeywords: adminProcedure
     .input(z.object({
       limit: z.number().min(5).max(100).default(30),
       minCount: z.number().min(1).max(50).default(2), // minimum images per keyword
@@ -2252,7 +2252,7 @@ export const appRouter = router({
 
   // Admin: Import All Sources simultaneously (Pexels + Unsplash in parallel)
   // This starts both importFromSource jobs at the same time for maximum throughput
-  importAll: publicProcedure
+  importAll: adminProcedure
     .input(z.object({ count: z.number().min(50).max(5000).default(500) }))
     .mutation(async ({ input }) => {
       const results: Record<string, boolean> = {};
@@ -2388,7 +2388,7 @@ export const appRouter = router({
     }),
 
   // Admin: Rebuild tile index (LAB reindex) – now also computes quadrant LAB
-  rebuildTileIndex: publicProcedure.mutation(async () => {
+  rebuildTileIndex: adminProcedure.mutation(async () => {
     if (rebuildJobStatus.running) return { started: false, message: "Rebuild läuft bereits" };
     rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
     const log = (msg: string) => { rebuildJobStatus.log.push(msg); if (rebuildJobStatus.log.length > 300) rebuildJobStatus.log = rebuildJobStatus.log.slice(-300); };
@@ -2438,11 +2438,11 @@ export const appRouter = router({
   }),
 
   // Admin: Rebuild status
-  getRebuildStatus: publicProcedure.query(() => rebuildJobStatus),
+  getRebuildStatus: adminProcedure.query(() => rebuildJobStatus),
 
   // Admin: indexLabColors – alias for rebuildTileIndex (called by Admin panel "LAB indexieren" button)
   // Backfills quadrant LAB for ALL tiles (critical for 15D matching quality)
-  indexLabColors: publicProcedure.mutation(async () => {
+  indexLabColors: adminProcedure.mutation(async () => {
     if (rebuildJobStatus.running) return { started: false, indexed: 0, message: "Backfill läuft bereits" };
     rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
     const log = (msg: string) => { rebuildJobStatus.log.push(msg); if (rebuildJobStatus.log.length > 300) rebuildJobStatus.log = rebuildJobStatus.log.slice(-300); };
@@ -2509,7 +2509,7 @@ export const appRouter = router({
   // Admin: batchReclassifyTileTypes – reclassify ALL tiles using the new multi-dimensional score
   // Uses Sobel edge density + chroma variance + pixel diversity + L-variance
   // This replaces the old LAB-quadrant-variance-only classification
-  batchReclassifyTileTypes: publicProcedure.mutation(async () => {
+  batchReclassifyTileTypes: adminProcedure.mutation(async () => {
     if (rebuildJobStatus.running) return { started: false, message: 'Ein Job läuft bereits' };
     rebuildJobStatus = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
     const log = (msg: string) => { rebuildJobStatus.log.push(msg); if (rebuildJobStatus.log.length > 300) rebuildJobStatus.log = rebuildJobStatus.log.slice(-300); };
@@ -2556,7 +2556,7 @@ export const appRouter = router({
   }),
 
   // Admin: Get images with filters
-  getAdminImages: publicProcedure
+  getAdminImages: adminProcedure
     .input(z.object({
       page: z.number().default(1),
       pageSize: z.number().default(50),
@@ -2574,7 +2574,7 @@ export const appRouter = router({
 
   // Admin: Get ALL tiles for PDF export (no pagination limit)
   // Returns only id + sourceUrl + colorCategory + brightnessCategory + LAB for PDF rendering
-  getAllTilesForPdf: publicProcedure
+  getAllTilesForPdf: adminProcedure
     .input(z.object({
       brightnessFilter: z.string().optional(),
       colorFilter: z.string().optional(),
@@ -2619,12 +2619,12 @@ export const appRouter = router({
     }),
 
   // Admin: Delete image
-  deleteMosaicImage: publicProcedure
+  deleteMosaicImage: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => db.deleteMosaicImage(input.id)),
 
   // Admin: Alle Tiles einer Quelle löschen
-  deleteBySource: publicProcedure
+  deleteBySource: adminProcedure
     .input(z.object({ source: z.string().min(1) }))
     .mutation(async ({ input }) => {
       const pool = db.getPool();
@@ -2636,7 +2636,7 @@ export const appRouter = router({
     }),
 
   // Admin: Get color distribution
-  getColorDistribution: publicProcedure.query(async () => {
+  getColorDistribution: adminProcedure.query(async () => {
     const pool = db.getPool();
     const res = await pool.query(`
       SELECT
@@ -2655,7 +2655,7 @@ export const appRouter = router({
   }),
 
   // Admin: Export seed data
-  exportSeed: publicProcedure.mutation(async () => {
+  exportSeed: adminProcedure.mutation(async () => {
     const pool = db.getPool();
     const res = await pool.query("SELECT source_url, tile128_url, avg_l, avg_a, avg_b FROM mosaic_images ORDER BY id");
     return { exported: res.rows.length, tiles: res.rows.map((r: any) => ({ sourceUrl: r.source_url, tile128Url: r.tile128_url, avgL: r.avg_l, avgA: r.avg_a, avgB: r.avg_b })) };
@@ -2700,7 +2700,7 @@ export const appRouter = router({
     }),
 
   // Server-side mosaic export
-  serverExport: publicProcedure
+  serverExport: adminProcedure
     .input(z.object({ tiles: z.array(z.object({ url: z.string(), col: z.number(), row: z.number() })), cols: z.number(), rows: z.number(), tilePx: z.number(), overlayBase64: z.string().optional(), overlayAlpha: z.number().optional(), formatLabel: z.string() }))
     .mutation(async ({ input }) => {
       const buf = await renderMosaicOnServer({ tiles: input.tiles as TileData[], cols: input.cols, rows: input.rows, tilePx: input.tilePx, overlayBase64: input.overlayBase64, overlayAlpha: input.overlayAlpha });
@@ -2709,7 +2709,7 @@ export const appRouter = router({
     }),
 
   // Targeted import: import images for a specific search query
-  targetedImport: publicProcedure
+  targetedImport: adminProcedure
     .input(z.object({
       sourceId: z.enum(["unsplash", "pexels", "pixabay", "flickr"]).default("pexels"),
       query: z.string().min(1).max(200),
@@ -2868,7 +2868,7 @@ export const appRouter = router({
     }),
 
   // Create a keyword import session (groups multiple targetedImport calls)
-  createKeywordSession: publicProcedure
+  createKeywordSession: adminProcedure
     .input(z.object({
       sessionId: z.string(),
       keywords: z.array(z.string()),
@@ -2914,7 +2914,7 @@ export const appRouter = router({
     }),
 
   // Upload tile image
-  uploadTileImage: publicProcedure
+  uploadTileImage: adminProcedure
     .input(z.object({ base64: z.string(), mimeType: z.string().default("image/jpeg") }))
     .mutation(async ({ input }) => {
       const { Jimp } = await import("jimp");
@@ -2941,7 +2941,7 @@ export const appRouter = router({
   // ── Mirror Tiles: create horizontally flipped copies of all tiles ──────────
   // This effectively doubles the tile pool without downloading new images.
   // Mirrored tiles get swapped quadrant LAB values (TL↔TR, BL↔BR).
-  mirrorTiles: publicProcedure
+  mirrorTiles: adminProcedure
     .input(z.object({
       batchSize: z.number().default(500),  // tiles per batch
       dryRun: z.boolean().default(false),  // if true, only count without inserting
@@ -3032,7 +3032,7 @@ export const appRouter = router({
     }),
 
   // ── QA: Run quality check ──────────────────────────────────────────────────
-  runQualityCheck: publicProcedure
+  runQualityCheck: adminProcedure
     .input(z.object({
       checkType: z.enum(['index-integrity', 'import-health', 'pool-balance', 'duplicate-check', 'tile-quality-score', 'all']),
     }))
@@ -3071,7 +3071,7 @@ export const appRouter = router({
   getAlgorithmProfiles: publicProcedure
     .query(async () => db.getAlgorithmProfiles()),
 
-  saveAlgorithmProfile: publicProcedure
+  saveAlgorithmProfile: adminProcedure
     .input(z.object({
       name: z.string(),
       settings: z.record(z.any()),
@@ -3086,7 +3086,7 @@ export const appRouter = router({
     .query(async () => db.getDefaultAlgorithmProfile()),
 
   // ── Admin: Get images with importedSince filter ───────────────────────────
-  getAdminImagesFiltered: publicProcedure
+  getAdminImagesFiltered: adminProcedure
     .input(z.object({
       page: z.number().default(1),
       limit: z.number().default(50),
@@ -3142,7 +3142,7 @@ export const appRouter = router({
       return await db.getImageCategories();
     }),
 
-  saveImageCategoryAlgoSettings: publicProcedure
+  saveImageCategoryAlgoSettings: adminProcedure
     .input(z.object({
       categoryName: z.string(),
       algoSettings: z.record(z.unknown()),
@@ -3152,7 +3152,7 @@ export const appRouter = router({
       return { ok: true };
     }),
 
-  upsertImageCategory: publicProcedure
+  upsertImageCategory: adminProcedure
     .input(z.object({
       name: z.string(),
       label: z.string(),
@@ -3167,7 +3167,7 @@ export const appRouter = router({
     }),
 
   // ── Analyse Testbild gegen Pool ─────────────────────────────────────────────────────
-  analyzeTestImage: publicProcedure
+  analyzeTestImage: adminProcedure
     .input(z.object({
       imageUrl: z.string().optional(), // kept for display only
       // LAB zones pre-computed by client-side Canvas (avoids server-side image processing)
@@ -3357,7 +3357,7 @@ export const appRouter = router({
     }),
 
   // ── Auto-Learn: Start cycle ────────────────────────────────────────────────
-  startAutoLearnCycle: publicProcedure
+  startAutoLearnCycle: adminProcedure
     .input(z.object({
       importCount: z.number().min(50).max(2000).default(300),
       targetPerBucket: z.number().min(50).max(1000).default(200),
@@ -3573,7 +3573,7 @@ export const appRouter = router({
    * Stufe 1: Automatisch löschbar (rejected inkl. Gemini-Rejects + URL-Duplikate + Pixabay-Hotlinks)
    * Stufe 2: Bulk-Delete mit Vorschau (grau+busy, fast-weiss, tiefer Quality-Score)
    */
-  getCleanupCandidates: publicProcedure.query(async () => {
+  getCleanupCandidates: adminProcedure.query(async () => {
     const pool = db.getPool();
 
     // Alle Counts in einem einzigen Query (deutlich schneller auf grosser DB)
@@ -3630,7 +3630,7 @@ export const appRouter = router({
   /**
    * Gibt eine Vorschau (max. 50 Tiles) für eine bestimmte Bereinigungskategorie zurück.
    */
-  getCleanupPreview: publicProcedure
+  getCleanupPreview: adminProcedure
     .input(z.object({
       category: z.enum(['rejected', 'poor', 'urlDuplicates', 'grayBusy', 'nearWhite', 'lowScore', 'generalLow', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       limit: z.number().min(1).max(200).default(50),
@@ -3701,7 +3701,7 @@ export const appRouter = router({
    * Löscht Tiles einer bestimmten Bereinigungskategorie (mit optionaler ID-Liste für selektives Löschen).
    * Gibt die Anzahl gelöschter Tiles zurück.
    */
-  bulkDeleteTiles: publicProcedure
+  bulkDeleteTiles: adminProcedure
     .input(z.object({
       category: z.enum(['rejected', 'poor', 'urlDuplicates', 'grayBusy', 'nearWhite', 'generalLow', 'lowScore', 'oversaturatedSkin', 'portraitBusy', 'pixabayHotlink']),
       // Wenn ids angegeben: nur diese IDs löschen (selektiv)
