@@ -950,7 +950,7 @@ export default function Admin() {
         if (!job.running && job.finishedAt) {
           setActiveJob(null)
           fetchStats()
-          if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
+          if (job.error) setMessage({ text: `Fehler: ${typeof job.error === 'string' ? job.error : (job.error as any)?.message ?? JSON.stringify(job.error)}`, type: 'error' })
           else if (job.sessionId && (job.imported ?? 0) > 0) {
             openImportReview(job.sessionId)
           } else {
@@ -977,7 +977,7 @@ export default function Admin() {
           if (!job.running && job.finishedAt) {
             setActiveJobs(prev => { const next = new Set(prev); next.delete(src); return next })
             fetchStats()
-            if (job.error) setMessage({ text: `Fehler (${src}): ${job.error}`, type: 'error' })
+            if (job.error) setMessage({ text: `Fehler (${src}): ${typeof job.error === 'string' ? job.error : (job.error as any)?.message ?? JSON.stringify(job.error)}`, type: 'error' })
           }
         } catch { /* ignore */ }
       }, 1500)
@@ -1002,7 +1002,7 @@ export default function Admin() {
           setActiveJob(null)
           fetchStats()
           fetchRecommendations()
-          if (job.error) setMessage({ text: `Fehler: ${job.error}`, type: 'error' })
+          if (job.error) setMessage({ text: `Fehler: ${typeof job.error === 'string' ? job.error : (job.error as any)?.message ?? JSON.stringify(job.error)}`, type: 'error' })
           else if ((job as any).sessionId && (job.imported ?? 0) > 0) {
             openImportReview((job as any).sessionId)
           } else {
@@ -1496,7 +1496,7 @@ export default function Admin() {
                     <div className="text-xs text-violet-700 font-medium">
                       {analysisImportJobMain.imported ?? 0} / {analysisImportJobMain.total ?? 0} Bilder importiert
                       {analysisImportJobMain.finishedAt && <span className="ml-2 text-green-600">✅ Fertig</span>}
-                      {analysisImportJobMain.error && <span className="ml-2 text-red-600">❌ {analysisImportJobMain.error}</span>}
+                      {analysisImportJobMain.error && <span className="ml-2 text-red-600">❌ {typeof analysisImportJobMain.error === 'string' ? analysisImportJobMain.error : (analysisImportJobMain.error as any)?.message ?? JSON.stringify(analysisImportJobMain.error)}</span>}
                     </div>
                     {analysisImportJobMain.log.length > 0 && (
                       <div className="bg-white rounded-lg p-2 max-h-20 overflow-y-auto text-xs text-gray-500 font-mono">
@@ -2171,7 +2171,7 @@ function ImportCard({ title, description, icon, color, available, job, isActive,
       {job && (
         <div className="mb-3 text-xs text-gray-600 bg-gray-50 rounded-lg p-2">
           {job.running ? `Läuft... ${job.imported ?? 0}/${job.total ?? '?'} importiert`
-            : job.error ? <span className="text-red-600">{job.error}</span>
+            : job.error ? <span className="text-red-600">{typeof job.error === 'string' ? job.error : (job.error as any)?.message ?? JSON.stringify(job.error)}</span>
             : `Fertig: ${job.imported ?? 0} importiert`}
           {job.log && job.log.length > 0 && (
             <div className="mt-1 text-gray-400 text-xs max-h-16 overflow-y-auto">
@@ -2317,7 +2317,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         fetchDbStats()
         fetchImages(1)
       } else {
-        setDedupResult(`❌ Fehler: ${data.error}`)
+        setDedupResult(`❌ Fehler: ${typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error)}`)
       }
     } catch (e) {
       setDedupResult(`❌ Netzwerkfehler: ${String(e)}`)
@@ -2336,7 +2336,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (data.ok) {
         setConstraintResult(`✅ ${data.message}`)
       } else {
-        setConstraintResult(`❌ Fehler: ${data.error}`)
+        setConstraintResult(`❌ Fehler: ${typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error)}`)
       }
     } catch (e) {
       setConstraintResult(`❌ Netzwerkfehler: ${String(e)}`)
@@ -2357,7 +2357,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         fetchDbStats()
         fetchImages(1)
       } else {
-        setShutterstockResult(`❌ Fehler: ${data.error}`)
+        setShutterstockResult(`❌ Fehler: ${typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error)}`)
       }
     } catch (e) {
       setShutterstockResult(`❌ Netzwerkfehler: ${String(e)}`)
@@ -2382,7 +2382,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         fetchDbStats()
         fetchImages(1)
       } else {
-        setGrayCleanupResult(`❌ Fehler: ${data.error}`)
+        setGrayCleanupResult(`❌ Fehler: ${typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error)}`)
       }
     } catch (e) {
       setGrayCleanupResult(`❌ Netzwerkfehler: ${String(e)}`)
@@ -3232,7 +3232,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
                   {/* Error display */}
                   {poolImportProgress.error && (
                     <div className="mt-2 bg-red-50 rounded p-2 text-xs text-red-700">
-                      {poolImportProgress.error}
+                      {typeof poolImportProgress.error === 'string' ? poolImportProgress.error : (poolImportProgress.error as any)?.message ?? JSON.stringify(poolImportProgress.error)}
                     </div>
                   )}
 
@@ -5627,7 +5627,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
                     <div className="text-xs text-violet-700 font-medium">
                       {analysisImportJob.imported ?? 0} / {analysisImportJob.total ?? 0} Bilder importiert
                       {analysisImportJob.finishedAt && <span className="ml-2 text-green-600">✅ Fertig</span>}
-                      {analysisImportJob.error && <span className="ml-2 text-red-600">❌ {analysisImportJob.error}</span>}
+                      {analysisImportJob.error && <span className="ml-2 text-red-600">❌ {typeof analysisImportJob.error === 'string' ? analysisImportJob.error : (analysisImportJob.error as any)?.message ?? JSON.stringify(analysisImportJob.error)}</span>}
                     </div>
                     {analysisImportJob.log.length > 0 && (
                       <div className="bg-white rounded-lg p-2 max-h-24 overflow-y-auto text-xs text-gray-500 font-mono">

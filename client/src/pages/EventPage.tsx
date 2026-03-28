@@ -139,7 +139,7 @@ export default function EventPage() {
         fetchPhotos()
         setTimeout(() => setUploadSuccess(false), 5000)
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 3000)
       }
     } catch (e) {
@@ -164,7 +164,7 @@ export default function EventPage() {
       if (data.ok) {
         setRegistered(true)
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 3000)
       }
     } catch (e) {
@@ -190,7 +190,7 @@ export default function EventPage() {
         setEvent(prev => prev ? { ...prev, photo_count: data.photoCount } : prev)
         if (previewPhoto?.id === photoId) setPreviewPhoto(null)
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 3000)
       }
     } catch (e) {
@@ -216,7 +216,7 @@ export default function EventPage() {
       if (data.ok) {
         setMatchResult(data)
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 5000)
       }
     } catch (e) {
@@ -247,7 +247,7 @@ export default function EventPage() {
       if (data.ok) {
         setRenderedImage(data.imageDataUrl)
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 5000)
       }
     } catch (e) {
@@ -281,7 +281,7 @@ export default function EventPage() {
       if (data.ok) {
         setSendResult({ sent: data.sent, failed: data.failed })
       } else {
-        setError(data.error)
+        setError(typeof data.error === 'string' ? data.error : data.error?.message ?? JSON.stringify(data.error))
         setTimeout(() => setError(null), 5000)
       }
     } catch (e) {
