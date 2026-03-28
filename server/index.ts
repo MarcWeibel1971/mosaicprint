@@ -2841,7 +2841,7 @@ app.post("/api/projects/:id/print-url", requireAuth, async (req, res) => {
     // Check project ownership
     const projRes = await pool.query("SELECT id FROM projects WHERE id = $1 AND user_id = $2", [req.params.id, user.id]);
     if (projRes.rows.length === 0) return res.status(404).json({ ok: false, error: 'Projekt nicht gefunden' });
-    // Upload to R2 under prints/ prefix
+    // Upload to R2 under prints/ prefix, or fall back to local disk storage
     let printUrl: string | null = null;
     if (isR2Configured()) {
       const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
@@ -2861,7 +2861,13 @@ app.post("/api/projects/:id/print-url", requireAuth, async (req, res) => {
       const r2PublicUrl = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
       printUrl = `${r2PublicUrl}/${key}`;
     } else {
-      return res.status(503).json({ ok: false, error: 'R2 not configured' });
+      // Fallback: store print file on local disk and serve via /prints/ static route
+      const printsDir = path.join(__dirname, isCompiledBuild ? '../../prints' : '../prints');
+      await fs.promises.mkdir(printsDir, { recursive: true });
+      const filename = `project-${req.params.id}-${Date.now()}.jpg`;
+      await fs.promises.writeFile(path.join(printsDir, filename), fileBuffer);
+      printUrl = `/prints/${filename}`;
+      console.log(`[PrintUrl] R2 not configured – saved locally: ${printUrl}`);
     }
     // Save URL in project
     await pool.query("UPDATE projects SET print_url = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3", [printUrl, req.params.id, user.id]);
@@ -3590,6 +3596,16 @@ app.post("/api/events/:slug/send-mosaic", async (req, res) => {
 const distPath = isCompiledBuild
   ? path.join(__dirname, "../../client/dist")
   : path.join(__dirname, "../client/dist");
+// Serve locally stored print files (fallback when R2 is not configured)
+const printsPath = isCompiledBuild
+  ? path.join(__dirname, "../../prints")
+  : path.join(__dirname, "../prints");
+app.use("/prints", express.static(printsPath, {
+  setHeaders: (res, filePath) => {
+    res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+  }
+}));
 app.use(express.static(distPath));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));

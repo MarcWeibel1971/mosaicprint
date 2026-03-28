@@ -5725,6 +5725,18 @@ export default function Studio() {
                 )}
                 {ready && (
                   <>
+                    {/* HD Zoom Button: shown when mosaic is ready but no hi-res available yet.
+                        Useful when loading a saved project (tiles not in memory → auto hi-res fails).
+                        Also shown when auto hi-res was skipped or failed. */}
+                    {!hiResReady && !hiResLoading && (
+                      <button
+                        onClick={() => triggerClientHiResRender()}
+                        className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-200 shadow-sm hover:shadow-md transition-all text-indigo-600 hover:text-indigo-800"
+                        title="HD-Zoom aktivieren (schärfere Darstellung beim Zoomen)"
+                      >
+                        <span className="text-[10px] font-bold leading-none">HD</span>
+                      </button>
+                    )}
                     <button onClick={() => handleDownload(false)} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900" title="Vorschau herunterladen (mit Wasserzeichen)">
                       <Download className="w-4 h-4" />
                     </button>
