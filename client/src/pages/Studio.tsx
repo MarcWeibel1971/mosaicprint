@@ -558,6 +558,7 @@ export default function Studio() {
   const [userTileImages, setUserTileImages] = useState<HTMLImageElement[]>([]);
   const userTileImagesRef = useRef<HTMLImageElement[]>([]);
   const userTileHiResRef = useRef<HTMLImageElement[]>([]); // hi-res versions (512px) for detail/zoom
+  const userTileOriginalRef = useRef<HTMLImageElement[]>([]); // full-resolution originals for print quality
   const validImgsHiResRef = useRef<(HTMLImageElement | null)[]>([]); // parallel to validImgsRef: hi-res for user tiles, null for DB tiles
   const tileSourceModeRef = useRef<'pool' | 'own' | 'mix'>('pool');
   const tileUploadRef = useRef<HTMLInputElement>(null);
@@ -1803,11 +1804,13 @@ export default function Studio() {
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (imageFiles.length === 0) return;
     setUserTileFiles(prev => [...prev, ...imageFiles]);
-    // Load all images: 64px thumbnail for matching + hi-res for detail/zoom
-    // Mobile: smaller hi-res to avoid memory issues (203 × 512² = 53MB in memory)
+    // Load all images:
+    // - 64px thumbnail for tile matching (fast, low memory)
+    // - 512/256px hi-res for zoom/detail (medium quality)
+    // - ORIGINAL full-resolution for print quality (center-cropped, max quality)
     const isMobile = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const HR_SIZE = isMobile ? 256 : 512;
-    const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement} | null>(resolve => {
+    const loadPromises = imageFiles.map(file => new Promise<{thumb: HTMLImageElement; hires: HTMLImageElement; original: HTMLImageElement} | null>(resolve => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
@@ -1831,26 +1834,42 @@ export default function Studio() {
           if (hiresCtx) {
             hiresCtx.drawImage(img, sx, sy, s, s, 0, 0, hiresSize, hiresSize);
           } else {
-            // Fallback: use thumbnail as hi-res (better than nothing)
             console.warn('[TileUpload] hi-res canvas context failed, using thumbnail');
+          }
+
+          // ORIGINAL: full-resolution center-cropped square for print quality
+          // Cap at 2048px to avoid memory issues, but keep as large as possible
+          const MAX_ORIG = isMobile ? 1024 : 2048;
+          const origSize = Math.min(MAX_ORIG, s);
+          const origCanvas = document.createElement('canvas');
+          origCanvas.width = origSize; origCanvas.height = origSize;
+          const origCtx = origCanvas.getContext('2d');
+          if (origCtx) {
+            origCtx.drawImage(img, sx, sy, s, s, 0, 0, origSize, origSize);
           }
 
           const thumbDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.85);
           const hiresDataUrl = hiresCtx ? hiresCanvas.toDataURL('image/jpeg', 0.92) : thumbDataUrl;
+          const origDataUrl = origCtx ? origCanvas.toDataURL('image/jpeg', 0.95) : hiresDataUrl;
 
           let loaded = 0;
           const thumbImg = new Image();
           const hiresImg = new Image();
+          const origImg = new Image();
           const checkDone = () => {
             loaded++;
-            if (loaded === 2) resolve({ thumb: thumbImg, hires: hiresImg });
+            if (loaded === 3) resolve({ thumb: thumbImg, hires: hiresImg, original: origImg });
           };
           thumbImg.onload = checkDone;
           thumbImg.onerror = () => resolve(null);
           hiresImg.onload = checkDone;
-          hiresImg.onerror = () => { console.warn('[TileUpload] hires image load failed'); resolve({ thumb: thumbImg, hires: thumbImg }); };
+          hiresImg.onerror = () => { console.warn('[TileUpload] hires image load failed'); loaded++; if (loaded === 3) resolve({ thumb: thumbImg, hires: thumbImg, original: thumbImg }); };
+          origImg.onload = checkDone;
+          origImg.onerror = () => { console.warn('[TileUpload] original image load failed'); loaded++; if (loaded === 3) resolve({ thumb: thumbImg, hires: hiresImg, original: hiresImg }); };
           thumbImg.src = thumbDataUrl;
           hiresImg.src = hiresDataUrl;
+          origImg.src = origDataUrl;
+          console.log(`[TileUpload] ${file.name}: original=${img.naturalWidth}x${img.naturalHeight} → thumb=64, hires=${hiresSize}, print=${origSize}px`);
         };
         img.onerror = () => resolve(null);
         img.src = e.target?.result as string;
@@ -1859,15 +1878,17 @@ export default function Studio() {
       reader.readAsDataURL(file);
     }));
     Promise.all(loadPromises).then(results => {
-      const valid = results.filter(Boolean) as {thumb: HTMLImageElement; hires: HTMLImageElement}[];
+      const valid = results.filter(Boolean) as {thumb: HTMLImageElement; hires: HTMLImageElement; original: HTMLImageElement}[];
       const thumbs = valid.map(v => v.thumb);
       const hires = valid.map(v => v.hires);
+      const originals = valid.map(v => v.original);
       setUserTileImages(prev => {
         const next = [...prev, ...thumbs];
         userTileImagesRef.current = next;
         return next;
       });
       userTileHiResRef.current = [...userTileHiResRef.current, ...hires];
+      userTileOriginalRef.current = [...userTileOriginalRef.current, ...originals];
     });
   }, []);
 
@@ -1879,6 +1900,7 @@ export default function Studio() {
       return next;
     });
     userTileHiResRef.current = userTileHiResRef.current.filter((_, i) => i !== index);
+    userTileOriginalRef.current = userTileOriginalRef.current.filter((_, i) => i !== index);
   }, []);
 
   // Auto-render when photo is loaded
@@ -2823,20 +2845,25 @@ export default function Studio() {
     const currentTileMode = tileSourceModeRef.current;
     const currentUserTiles = userTileImagesRef.current;
     const currentUserHiRes = userTileHiResRef.current;
+    // PRINT QUALITY: use original full-resolution images (2048px mobile / 2048px desktop)
+    // instead of 512px hi-res copies. Falls back to hi-res if original not available.
+    const currentUserOriginals = userTileOriginalRef.current;
+    const getHiResForIdx = (i: number): HTMLImageElement | null =>
+      currentUserOriginals[i] || currentUserHiRes[i] || null;
     let validImgsHiRes: (HTMLImageElement | null)[] = new Array(validImgs.length).fill(null);
 
     if (currentTileMode === 'own' && currentUserTiles.length > 0) {
       // Only user tiles – replace entire pool
       validImgs = [...currentUserTiles];
       validTileIds = currentUserTiles.map((_, i) => -(i + 1)); // negative IDs for user tiles
-      validImgsHiRes = currentUserTiles.map((_, i) => currentUserHiRes[i] || null);
+      validImgsHiRes = currentUserTiles.map((_, i) => getHiResForIdx(i));
       // Duplicate tiles to fill pool if too few (repeat to reach ~200 minimum for variety)
       while (validImgs.length < 200 && currentUserTiles.length > 0) {
         validImgs.push(...currentUserTiles);
         validTileIds.push(...currentUserTiles.map((_, i) => -(i + 1)));
-        validImgsHiRes.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
+        validImgsHiRes.push(...currentUserTiles.map((_, i) => getHiResForIdx(i)));
       }
-      console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length})`);
+      console.log(`[Studio] Tile source: OWN ONLY – ${currentUserTiles.length} user tiles (expanded to ${validImgs.length}), originals: ${currentUserOriginals.length}`);
     } else if (currentTileMode === 'mix' && currentUserTiles.length > 0) {
       // Mix: user tiles + DB pool – expand user tiles to ~30% of pool for strong presence
       const dbPoolSize = validImgs.length;
@@ -2847,7 +2874,8 @@ export default function Studio() {
       const userHiResExpanded: (HTMLImageElement | null)[] = [];
       for (let rep = 0; rep < reps; rep++) {
         userExpanded.push(...currentUserTiles);
-        userHiResExpanded.push(...currentUserTiles.map((_, i) => currentUserHiRes[i] || null));
+        // Use original full-resolution for print quality (falls back to hi-res if not available)
+        userHiResExpanded.push(...currentUserTiles.map((_, i) => getHiResForIdx(i)));
       }
       const userIds = userExpanded.map((_, i) => -(i + 1));
       validImgs = [...userExpanded, ...validImgs];
