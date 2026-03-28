@@ -4460,25 +4460,24 @@ export default function Studio() {
     const tl = gsap.timeline({ repeat: -1, repeatDelay: 1.0 });
 
     tileEls.forEach((tile, i) => {
-      const delay = i * 1.4; // 1.4s between each tile
-      // Appear + zoom out towards viewer
+      const delay = i * 3.0; // 3s between each tile start
+      // Appear + zoom out towards viewer (3s)
       tl.fromTo(tile, {
         opacity: 0, scale: 1,
         boxShadow: 'none',
       }, {
         opacity: 1, scale: popScale,
         boxShadow: '0 12px 40px rgba(0,0,0,0.7)',
-        duration: 1.0,
+        duration: 3.0,
         ease: 'power2.out',
       }, delay);
-      // Hold briefly
-      // Then shrink back and fade
+      // Hold visible (1s), then shrink back + fade (2s)
       tl.to(tile, {
         scale: 1, opacity: 0,
         boxShadow: 'none',
-        duration: 0.8,
+        duration: 2.0,
         ease: 'power2.inOut',
-      }, delay + 1.6);
+      }, delay + 4.0);
     });
 
     popOutWaveTlRef.current = tl;
