@@ -4357,152 +4357,132 @@ export default function Studio() {
     setShowOrderPanel(true);
   }, []);
 
-  // Pop-Out effect: render individual tiles large enough to see (min ~4cm = ~150px)
-  const renderPopOut = useCallback(() => {
-    const snapshot = snapshotRef.current;
-    const params = mosaicParamsRef.current;
-    const popContainer = popOutContainerRef.current;
-    if (!snapshot || !params || !popContainer) return;
-    const { cols, rows, tilePx } = params;
-
-    // Determine tile display size: at least 150px (~4cm on screen), fit within viewport
-    const viewW = window.innerWidth * 0.92;
-    const viewH = window.innerHeight * 0.7;
-    const minTileCss = 150; // ~4cm on mobile
-    // Scale so tiles fill the viewport area, but each tile is at least minTileCss
-    const gap = 4; // fixed 4px gap
-    const fitTileCss = Math.floor(Math.min(
-      (viewW - gap * (cols + 1)) / cols,
-      (viewH - gap * (rows + 1)) / rows
-    ));
-    const cssTilePx = Math.max(minTileCss, fitTileCss);
-    const cssW = cols * (cssTilePx + gap) + gap;
-    const cssH = rows * (cssTilePx + gap) + gap;
-
-    // Hi-res source: use loaded tile images if available, otherwise snapshot
-    const validImgs = validImgsRef.current;
-    const assignment = assignmentRef.current;
-    const rotations = assignmentRotRef.current;
-
-    // Canvas resolution per tile for sharp rendering (match CSS size or higher)
-    const canvasTilePx = Math.min(256, Math.max(cssTilePx, 128));
-
-    // Create source canvas from snapshot as fallback
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = snapshot.width;
-    srcCanvas.height = snapshot.height;
-    srcCanvas.getContext('2d')!.putImageData(snapshot, 0, 0);
-
-    // Clear previous tiles
-    popContainer.innerHTML = '';
-    popContainer.style.width = `${cssW}px`;
-    popContainer.style.height = `${cssH}px`;
-    popContainer.style.background = '#1a1a1a';
-    popContainer.style.position = 'relative';
-    popContainer.style.overflow = 'visible';
-    popContainer.style.borderRadius = '12px';
-
-    // Create individual tile canvases with sharp rendering
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const ci = row * cols + col;
-        const tileCanvas = document.createElement('canvas');
-        tileCanvas.width = canvasTilePx;
-        tileCanvas.height = canvasTilePx;
-        tileCanvas.className = 'pop-wave-tile';
-        const tCtx = tileCanvas.getContext('2d')!;
-        tCtx.imageSmoothingEnabled = true;
-        tCtx.imageSmoothingQuality = 'high';
-
-        // Try to draw from the original tile image (sharp)
-        let drawn = false;
-        if (assignment && validImgs) {
-          const tileIdx = assignment[ci];
-          const img = validImgs[tileIdx];
-          if (img && img.complete && img.naturalWidth > 0) {
-            try {
-              const rot = rotations?.[ci] || 0;
-              if (rot === 0) {
-                tCtx.drawImage(img, 0, 0, canvasTilePx, canvasTilePx);
-              } else {
-                tCtx.save();
-                tCtx.translate(canvasTilePx / 2, canvasTilePx / 2);
-                tCtx.rotate(rot * Math.PI / 2);
-                tCtx.drawImage(img, -canvasTilePx / 2, -canvasTilePx / 2, canvasTilePx, canvasTilePx);
-                tCtx.restore();
-              }
-              drawn = true;
-            } catch { /* fallback below */ }
-          }
-        }
-        // Fallback: extract from snapshot
-        if (!drawn) {
-          tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, canvasTilePx, canvasTilePx);
-        }
-
-        const dx = gap + col * (cssTilePx + gap);
-        const dy = gap + row * (cssTilePx + gap);
-        tileCanvas.style.cssText = `position:absolute;left:${dx}px;top:${dy}px;width:${cssTilePx}px;height:${cssTilePx}px;transform-origin:center center;will-change:transform;box-shadow:2px 3px 10px rgba(0,0,0,0.4);border-radius:3px;`;
-        popContainer.appendChild(tileCanvas);
-      }
-    }
-  }, []);
-
-  // Toggle pop-out: render tiles + GSAP random fly-out effect
+  // Pop-Out effect: tiles zoom out of the mosaic one by one
+  // The normal canvas stays visible. High-res tile overlays animate above it.
   useEffect(() => {
-    if (popOutMode && ready) {
-      renderPopOut();
-      setTimeout(() => {
-        const popContainer = popOutContainerRef.current;
-        if (!popContainer) return;
-        const params = mosaicParamsRef.current;
-        if (!params) return;
-        if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); }
-        const allTiles = Array.from(popContainer.querySelectorAll('.pop-wave-tile'));
-        if (allTiles.length === 0) return;
-
-        // Endlos-Timeline: zufällige Kacheln fliegen nacheinander "entgegen"
-        const tl = gsap.timeline({ repeat: -1, repeatDelay: 0.3 });
-
-        // Pro Durchlauf ~8-12 zufällige Kacheln animieren
-        const numPerBatch = Math.min(Math.max(6, Math.round(allTiles.length * 0.01)), 12);
-        const totalBatches = 5; // 5 Durchläufe pro Repeat-Zyklus
-
-        for (let batch = 0; batch < totalBatches; batch++) {
-          // Zufällige Kacheln auswählen (ohne Duplikate pro Batch)
-          const shuffled = [...allTiles].sort(() => Math.random() - 0.5);
-          const selected = shuffled.slice(0, numPerBatch);
-
-          selected.forEach((tile, i) => {
-            const delay = batch * 1.8 + i * 0.15;
-            // Fly towards viewer: scale up + lift with shadow + slight rotation
-            tl.to(tile, {
-              scale: 1.6,
-              zIndex: 20,
-              boxShadow: '0 8px 30px rgba(0,0,0,0.6)',
-              duration: 0.5,
-              ease: 'back.out(1.4)',
-            }, delay);
-            // Zurück ins Mosaik
-            tl.to(tile, {
-              scale: 1,
-              zIndex: 0,
-              boxShadow: '',
-              duration: 0.6,
-              ease: 'power2.inOut',
-            }, delay + 0.7);
-          });
-        }
-
-        popOutWaveTlRef.current = tl;
-      }, 80);
-    } else {
-      // Pop-out deaktiviert: Effekt stoppen und Tiles entfernen
+    if (!popOutMode || !ready) {
       if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); popOutWaveTlRef.current = null; }
       const popContainer = popOutContainerRef.current;
       if (popContainer) popContainer.innerHTML = '';
+      return;
     }
-  }, [popOutMode, ready, renderPopOut]);
+
+    const params = mosaicParamsRef.current;
+    const popContainer = popOutContainerRef.current;
+    const canvas = canvasRef.current;
+    if (!params || !popContainer || !canvas) return;
+    const { cols, rows, tilePx } = params;
+    const displayScale = (params as any)._displayScale || 1;
+    const cssTileW = tilePx * displayScale;
+    const cssTileH = tilePx * displayScale;
+    const validImgs = validImgsRef.current;
+    const assignment = assignmentRef.current;
+    const rotations = assignmentRotRef.current;
+    const totalCells = cols * rows;
+
+    // Desired zoomed-in size: ~150px (4cm on screen)
+    const targetZoomedPx = 150;
+    const popScale = Math.max(3, targetZoomedPx / cssTileW);
+
+    // Hi-res canvas resolution for sharp zoom
+    const canvasResPx = Math.min(256, Math.max(128, Math.round(targetZoomedPx * (window.devicePixelRatio || 1))));
+
+    // Create snapshot fallback canvas
+    const snapshot = snapshotRef.current;
+    let srcCanvas: HTMLCanvasElement | null = null;
+    if (snapshot) {
+      srcCanvas = document.createElement('canvas');
+      srcCanvas.width = snapshot.width;
+      srcCanvas.height = snapshot.height;
+      srcCanvas.getContext('2d')!.putImageData(snapshot, 0, 0);
+    }
+
+    // Build a pool of tile indices (shuffle for randomness)
+    const indices = Array.from({ length: totalCells }, (_, i) => i);
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+
+    popContainer.innerHTML = '';
+
+    // Create one hi-res canvas overlay per animated tile, positioned exactly over its spot
+    const numTiles = Math.min(30, totalCells); // animate up to 30 tiles per cycle
+    const tileEls: HTMLCanvasElement[] = [];
+
+    for (let t = 0; t < numTiles; t++) {
+      const ci = indices[t];
+      const col = ci % cols;
+      const row = Math.floor(ci / cols);
+
+      const tileCanvas = document.createElement('canvas');
+      tileCanvas.width = canvasResPx;
+      tileCanvas.height = canvasResPx;
+      const tCtx = tileCanvas.getContext('2d')!;
+      tCtx.imageSmoothingEnabled = true;
+      tCtx.imageSmoothingQuality = 'high';
+
+      // Draw from original tile image (sharp)
+      let drawn = false;
+      if (assignment && validImgs) {
+        const tileIdx = assignment[ci];
+        const img = validImgs[tileIdx];
+        if (img && img.complete && img.naturalWidth > 0) {
+          try {
+            const rot = rotations?.[ci] || 0;
+            if (rot === 0) {
+              tCtx.drawImage(img, 0, 0, canvasResPx, canvasResPx);
+            } else {
+              tCtx.save();
+              tCtx.translate(canvasResPx / 2, canvasResPx / 2);
+              tCtx.rotate(rot * Math.PI / 2);
+              tCtx.drawImage(img, -canvasResPx / 2, -canvasResPx / 2, canvasResPx, canvasResPx);
+              tCtx.restore();
+            }
+            drawn = true;
+          } catch { /* fallback */ }
+        }
+      }
+      if (!drawn && srcCanvas) {
+        tCtx.drawImage(srcCanvas, col * tilePx, row * tilePx, tilePx, tilePx, 0, 0, canvasResPx, canvasResPx);
+      }
+
+      // Position exactly over the tile's spot in the mosaic
+      const left = col * cssTileW;
+      const top = row * cssTileH;
+      tileCanvas.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${cssTileW}px;height:${cssTileH}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;border-radius:3px;pointer-events:none;`;
+      popContainer.appendChild(tileCanvas);
+      tileEls.push(tileCanvas);
+    }
+
+    // GSAP animation: tiles pop out one by one
+    if (popOutWaveTlRef.current) { popOutWaveTlRef.current.kill(); }
+    const tl = gsap.timeline({ repeat: -1, repeatDelay: 1.0 });
+
+    tileEls.forEach((tile, i) => {
+      const delay = i * 1.4; // 1.4s between each tile
+      // Appear + zoom out towards viewer
+      tl.fromTo(tile, {
+        opacity: 0, scale: 1,
+        boxShadow: 'none',
+      }, {
+        opacity: 1, scale: popScale,
+        boxShadow: '0 12px 40px rgba(0,0,0,0.7)',
+        duration: 1.0,
+        ease: 'power2.out',
+      }, delay);
+      // Hold briefly
+      // Then shrink back and fade
+      tl.to(tile, {
+        scale: 1, opacity: 0,
+        boxShadow: 'none',
+        duration: 0.8,
+        ease: 'power2.inOut',
+      }, delay + 1.6);
+    });
+
+    popOutWaveTlRef.current = tl;
+  }, [popOutMode, ready]);
 
   // Auto-start Hi-Res rendering in background once mosaic is ready
   // Always use client-side render (images already loaded, no download failures)
@@ -5838,13 +5818,23 @@ export default function Studio() {
                   <canvas
                     ref={canvasRef}
                     style={{
-                      display: (ready || loading || projectLoading) && !popOutMode ? "block" : "none",
+                      display: (ready || loading || projectLoading) ? "block" : "none",
                       imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 1.5) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
                   />
-                  {/* Pop-Out container moved to fullscreen overlay below */}
+                  {/* Pop-Out: animated tile overlays above the canvas */}
+                  <div
+                    ref={popOutContainerRef}
+                    style={{
+                      display: popOutMode && ready ? "block" : "none",
+                      position: "absolute",
+                      top: 0, left: 0, width: "100%", height: "100%",
+                      pointerEvents: "none",
+                      overflow: "visible",
+                    }}
+                  />
                   {/* Hi-Res image overlay - sharp zoom (show from zoom > 1.5 for better quality on mobile) */}
                   {hiResImgUrl && hiResReady && zoom > 1.5 && (
                     <img
@@ -6625,36 +6615,6 @@ export default function Studio() {
           </div>
         )}
       </div>
-
-      {/* Pop-Out Fullscreen Overlay */}
-      {popOutMode && ready && (
-        <div
-          style={{
-            position: 'fixed', inset: 0, zIndex: 50,
-            background: 'rgba(15,15,20,0.95)',
-            overflow: 'auto',
-            WebkitOverflowScrolling: 'touch',
-          }}
-        >
-          {/* Close button */}
-          <button
-            onClick={() => setPopOutMode(false)}
-            style={{
-              position: 'fixed', top: 16, right: 16, zIndex: 60,
-              width: 40, height: 40, borderRadius: '50%',
-              background: 'rgba(255,255,255,0.15)', border: 'none',
-              color: 'white', fontSize: 20, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              backdropFilter: 'blur(8px)',
-            }}
-          >
-            ✕
-          </button>
-          <div style={{ padding: '60px 16px 32px', display: 'flex', justifyContent: 'center' }}>
-            <div ref={popOutContainerRef} />
-          </div>
-        </div>
-      )}
 
       {/* Stripe Payment Modal */}
       {/* Photo Preview Modal */}
