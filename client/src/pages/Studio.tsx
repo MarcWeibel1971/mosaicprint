@@ -315,13 +315,18 @@ async function renderMosaicClientSide(opts: {
 
   // Draw tiles with per-tile LAB color transfer (matches preview quality)
   const total = cols * rows;
-  const cBoost = algoSettings.contrastBoost ?? 1.30;
+  // PRINT: Use slightly lower contrast boost than preview (1.10 vs 1.30)
+  // Hi-res tiles already have good contrast; over-boosting causes color distortion.
+  const cBoost = Math.min(1.15, algoSettings.contrastBoost ?? 1.10);
   const histBlend = algoSettings.histogramBlend ?? 0.0;
   const blendFactor = Math.min(1.0, histBlend / 0.10);
-  const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-  const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
-  const MAX_COLOR_SHIFT = 18;
-  const MAX_BLUE_SHIFT = 10;
+  // PRINT RENDER: Use much weaker LAB correction than preview.
+  // Hi-Res tiles (400-2048px) have more color variation than 64px thumbnails,
+  // causing stronger avgL shifts that distort colors. Reduce to ~60% of preview strength.
+  const L_BLEND  = 0.25 + 0.25 * blendFactor;  // 0.25 minimum (was 0.40), up to 0.50 at full blend
+  const AB_BLEND = 0.06 + 0.10 * blendFactor;  // 0.06 minimum (was 0.12), up to 0.16 at full blend
+  const MAX_COLOR_SHIFT = 12;  // tighter clamp for print (was 18)
+  const MAX_BLUE_SHIFT = 6;    // much tighter blue clamp for print (was 10)
 
   // Offscreen buffer canvas for per-tile LAB processing
   const bCanvas = document.createElement('canvas');
@@ -444,7 +449,8 @@ async function renderMosaicClientSide(opts: {
       const tr = tc.length > ti+2 ? tc[ti] : 128, tg = tc.length > ti+2 ? tc[ti+1] : 128, tb2 = tc.length > ti+2 ? tc[ti+2] : 128;
       const edge = em.length > ci2 ? em[ci2] : 0;
       const fb = fm.length > ci2 && fm[ci2] ? 0.04 : 0;  // reduced: 0.25→0.04 to prevent brownish face patches
-      const str = olMode !== 'none' ? Math.min(0.30, BASE_OL + edge*EDGE_B + fb) : 0;  // cap 0.85→0.30
+      // PRINT: cap overlay strength lower than preview (0.20 vs 0.30) to avoid color distortion in print
+      const str = olMode !== 'none' ? Math.min(0.20, BASE_OL + edge*EDGE_B + fb) : 0;  // print cap 0.20
       const ys = row*actualTile, ye = Math.min(ys+actualTile, H), xs = col*actualTile, xe = Math.min(xs+actualTile, W);
       for (let py = ys; py < ye; py++) for (let px = xs; px < xe; px++) {
         const pi = (py*W + px)*4;
