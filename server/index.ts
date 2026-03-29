@@ -2029,9 +2029,18 @@ app.get('/api/admin/orders', async (_req, res) => {
 app.post('/api/admin/orders/:id/status', express.json(), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const { status } = req.body;
+    const { status, downloadToken } = req.body;
     if (!status) return res.status(400).json({ error: 'Missing status' });
-    await db.updateOrderStatus(orderId, status);
+    if (downloadToken) {
+      // Update status AND store the R2 download URL in download_token
+      const pool = db.getPool();
+      await pool.query(
+        'UPDATE mosaic_orders SET status = $1, download_token = $2 WHERE id = $3',
+        [status, downloadToken, orderId]
+      );
+    } else {
+      await db.updateOrderStatus(orderId, status);
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: String(e) });
