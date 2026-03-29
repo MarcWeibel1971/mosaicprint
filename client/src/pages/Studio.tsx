@@ -160,48 +160,44 @@ async function pollForResult(
  * Chrome + Adobe Acrobat extension can intercept blob: URLs and open them as PDF.
  * This helper uses multiple strategies to ensure the file is saved correctly.
  */
-function forceDownloadBlob(blob: Blob, filename: string, mimeType = 'image/jpeg') {
-  // Strategy 1: Verify JPEG magic bytes if expected
-  const isJpeg = mimeType === 'image/jpeg';
-  
-  // Re-wrap blob with explicit MIME type
-  const typedBlob = new Blob([blob], { type: mimeType });
-  
-  // Strategy 2: Use File System Access API if available (Chrome 86+)
-  // This completely bypasses the blob: URL issue AND the Adobe Acrobat PDF extension interception
-  if ('showSaveFilePicker' in window) {
-    const ext = isJpeg ? 'jpg' : 'png';
-    (window as any).showSaveFilePicker({
-      suggestedName: filename,
-      types: [{
-        description: isJpeg ? 'JPEG Image' : 'PNG Image',
-        accept: { [mimeType]: [`.${ext}`] },
-      }],
-    }).then(async (handle: any) => {
-      const writable = await handle.createWritable();
-      await writable.write(typedBlob);
-      await writable.close();
-    }).catch(() => {
-      // User cancelled or API not supported — fall through to Strategy 3
-      fallbackBlobDownload(typedBlob, filename, mimeType);
+async function forceDownloadBlob(blob: Blob, filename: string, mimeType: string) {
+  // Strategy 1: Upload blob to server, then open /api/print-download/:token
+  // This is the most reliable method: server sends Content-Disposition: attachment
+  // which Chrome always treats as a download, bypassing Adobe Acrobat extension
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const response = await fetch('/api/temp-blob', {
+      method: 'POST',
+      headers: { 'Content-Type': mimeType },
+      body: arrayBuffer,
     });
-    return;
+    if (response.ok) {
+      const { token } = await response.json();
+      // Open the server download URL — server sets Content-Disposition: attachment
+      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      const dlLink = document.createElement('a');
+      dlLink.href = downloadUrl;
+      dlLink.download = filename;
+      dlLink.style.display = 'none';
+      document.body.appendChild(dlLink);
+      dlLink.click();
+      setTimeout(() => document.body.removeChild(dlLink), 5000);
+      return;
+    }
+  } catch (e) {
+    console.warn('[forceDownloadBlob] Server upload failed, falling back to blob URL:', e);
   }
   
-  fallbackBlobDownload(typedBlob, filename, mimeType);
-}
-
-function fallbackBlobDownload(blob: Blob, filename: string, mimeType: string) {
-  const url = URL.createObjectURL(blob);
+  // Fallback: direct blob URL download
+  const typedBlob = new Blob([blob], { type: mimeType });
+  const url = URL.createObjectURL(typedBlob);
   const dlLink = document.createElement('a');
   dlLink.href = url;
   dlLink.download = filename;
   dlLink.type = mimeType;
   dlLink.style.display = 'none';
-  // Set rel to prevent opener issues
   dlLink.rel = 'noopener';
   document.body.appendChild(dlLink);
-  // Use MouseEvent dispatch instead of .click() for better browser compatibility
   dlLink.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
   setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 15000);
 }
