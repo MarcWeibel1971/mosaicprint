@@ -716,7 +716,7 @@ export default function Admin() {
     } catch {
       setMessage({ text: 'Fehler beim Laden der Statistiken', type: 'error' })
     } finally { setLoading(false) }
-  }, [])
+  }, [authHeaders])
 
   const startRebuildPolling = useCallback(() => {
     if (rebuildPollRef.current) return
@@ -769,7 +769,7 @@ export default function Admin() {
     } catch { /* ignore */ } finally {
       setRecsLoading(false)
     }
-  }, [])
+  }, [authHeaders])
 
   // Open Import-Review-Modal for a given session
   const openImportReview = useCallback(async (sessionId: string) => {
@@ -789,7 +789,7 @@ export default function Admin() {
     } finally {
       setImportReviewLoading(false)
     }
-  }, [])
+  }, [authHeaders])
   // Confirm Import: activate selected, delete rejected
   const confirmImportReview = useCallback(async () => {
     if (!importReviewSessionId) return
@@ -892,7 +892,7 @@ export default function Admin() {
       setExcellentSelected(new Set((result.keywords ?? []).slice(0, 10).map((k: any) => k.keyword)))
     } catch { /* ignore */ }
     setExcellentLoading(false)
-  }, [])
+  }, [authHeaders])
 
   const startExcellentImport = async () => {
     if (excellentImportRunning || excellentSelected.size === 0) return
@@ -2263,7 +2263,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       const data = await res.json()
       setDbStats(data.result?.data?.json ?? data.result?.data ?? data)
     } catch { /* ignore */ }
-  }, [])
+  }, [authHeaders])
 
   const handleBatchReclassify = async () => {
     if (!window.confirm('Alle Tiles mit dem neuen mehrdimensionalen Score reklassifizieren? Das dauert 30-90 Min für 45k Tiles.')) return
@@ -2350,7 +2350,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } finally {
       setConstraintLoading(false)
     }
-  }, [])
+  }, [authHeaders])
 
   const runRemoveShutterstock = useCallback(async () => {
     if (!confirm('Alle Shutterstock-Bilder (mit Wasserzeichen) aus der Datenbank entfernen? Dieser Vorgang kann nicht rükgängig gemacht werden.')) return
@@ -4556,7 +4556,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
         return rows
       })
     } catch { /* ignore */ }
-  }, [])
+  }, [authHeaders])
 
   useEffect(() => { fetchRuns() }, [fetchRuns, lastRefresh])
 
@@ -4568,7 +4568,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       setRunItems(data.result?.data?.json ?? data.result?.data ?? [])
     } catch { /* ignore */ }
     finally { setLoadingItems(false) }
-  }, [])
+  }, [authHeaders])
 
   useEffect(() => {
     if (selectedRun !== null) fetchItems(selectedRun)
@@ -4634,7 +4634,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       const rows = data.result?.data?.json ?? data.result?.data ?? []
       if (Array.isArray(rows)) setAutoLearnRuns(rows)
     } catch { /* ignore */ }
-  }, [])
+  }, [authHeaders])
   useEffect(() => { fetchAutoLearnRuns() }, [fetchAutoLearnRuns])
   const startAutoLearn = useCallback(async () => {
     setAutoLearnRunning(true)
@@ -4701,7 +4701,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       const result = data.result?.data?.json ?? data.result?.data ?? data
       if (Array.isArray(result)) setCategories(result)
     } catch { /* ignore */ }
-  }, [])
+  }, [authHeaders])
   useEffect(() => { fetchCategories() }, [fetchCategories])
 
   // Detect category from LAB zones
@@ -5790,9 +5790,11 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
       const res = await fetch('/api/trpc/getCleanupCandidates', { headers: authHeaders() })
       const data = await res.json()
       setCandidates(data.result?.data?.json ?? data.result?.data ?? null)
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.error('[CleanupAssistant] fetchCandidates failed:', e)
+    }
     finally { setLoadingCandidates(false) }
-  }, [])
+  }, [authHeaders])
 
   useEffect(() => { if (expanded) fetchCandidates() }, [expanded, fetchCandidates])
 
@@ -5814,7 +5816,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
       onMessage({ text: `Vorschau-Fehler: ${String(e)}`, type: 'error' })
     }
     finally { setLoadingPreview(false) }
-  }, [onMessage])
+  }, [onMessage, authHeaders])
 
   const toggleTile = (id: number) => {
     setSelectedIds(prev => {
@@ -6143,7 +6145,7 @@ function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch { /* ignore */ }
   }
 
-  useEffect(() => { fetchStats() }, [])
+  useEffect(() => { fetchStats() }, [authHeaders])
 
   const pollJobStatus = (intervalRef: { id: ReturnType<typeof setInterval> | null }) => {
     intervalRef.id = setInterval(async () => {
