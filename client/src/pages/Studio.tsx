@@ -1285,12 +1285,15 @@ export default function Studio() {
       // The main render applies luminance scaling + AB color transfer per tile (Reinhard-style).
       // Hi-res uses original photos which are more saturated/different than 64px thumbnails.
       // We apply the same LAB correction here to ensure visual consistency between preview and zoom.
-      // Skip on mobile: getImageData on large canvas can crash mobile Safari.
-      if (!isMob) {
+      // On mobile: use tile-by-tile getImageData (smaller chunks) to avoid crashing Mobile Safari.
+      // On desktop: use full canvas getImageData for performance.
+      {
         const hrW = hrCanvas!.width;
         const hrH = hrCanvas!.height;
-        const hrImageData = hrCtx!.getImageData(0, 0, hrW, hrH);
-        const hd = hrImageData.data;
+        // Mobile: process tile-by-tile to avoid large getImageData crash
+        // Desktop: get full canvas at once for performance
+        const fullImageData = !isMob ? hrCtx!.getImageData(0, 0, hrW, hrH) : null;
+        const hd = fullImageData ? fullImageData.data : null;
         const cellLabData = cellLabRef.current;  // LAB target per cell
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
         const blendFactor = Math.min(1.0, (algoSettings.histogramBlend ?? 0.0) / 0.10);
@@ -1299,15 +1302,17 @@ export default function Studio() {
         const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // Use same parameters as renderMosaic for visual consistency
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
-        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
-        const AB_BLEND = AB_BLEND_BASE * (0.5 + 0.5 * colorEnhanceVal); // scale by colorEnhance (50%-100% of base)
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by colorEnhance slider (0 at 0%, same as renderMosaic)
         const MAX_COLOR_SHIFT = 15;
         const MAX_BLUE_SHIFT = 5;
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         if (cellLabData.length > 0) {
-          console.log('[ClientHiRes] Applying LAB color correction (same as renderMosaic)');
+          console.log(`[ClientHiRes] Applying LAB color correction (mobile=${isMob})`);
           // Process each tile cell
+          // Mobile: tile-by-tile getImageData to avoid large buffer crash in Mobile Safari
+          // Desktop: use pre-fetched full canvas ImageData (hd) for performance
           for (let row = 0; row < rows; row++) {
             for (let col = 0; col < cols; col++) {
               const ci = row * cols + col;
@@ -1317,23 +1322,45 @@ export default function Studio() {
               const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
               const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
 
-              // Compute tile average L using 8x8 subsample for consistency with preview/print.
-              // Full-resolution avgL differs from preview (64px thumbnails) — causes color mismatch.
               const yStart = row * actualTile;
               const xStart = col * actualTile;
+              const yEnd = Math.min(yStart + actualTile, hrH);
+              const xEnd = Math.min(xStart + actualTile, hrW);
+              const tileW = xEnd - xStart;
+              const tileH = yEnd - yStart;
+              if (tileW <= 0 || tileH <= 0) continue;
+
+              // Get pixel data: mobile uses per-tile getImageData, desktop uses full buffer
+              let tileData: ImageData;
+              let td: Uint8ClampedArray;
+              if (isMob) {
+                try { tileData = hrCtx!.getImageData(xStart, yStart, tileW, tileH); }
+                catch { continue; } // skip tile if getImageData fails
+                td = tileData.data;
+              } else {
+                tileData = fullImageData!;
+                td = hd!;
+              }
+
+              // Compute tile average L using 8x8 subsample
               const REF_N = 8;
               const stepY = Math.max(1, Math.floor(actualTile / REF_N));
               const stepX = Math.max(1, Math.floor(actualTile / REF_N));
               let sumL = 0, pCount = 0;
               for (let sy = 0; sy < REF_N; sy++) {
                 for (let sx = 0; sx < REF_N; sx++) {
-                  const py = Math.min(yStart + sy * stepY, yStart + actualTile - 1);
-                  const px = Math.min(xStart + sx * stepX, xStart + actualTile - 1);
-                  if (py < hrH && px < hrW) {
+                  if (isMob) {
+                    const lx = Math.min(sx * stepX, tileW - 1);
+                    const ly = Math.min(sy * stepY, tileH - 1);
+                    const pi = (ly * tileW + lx) * 4;
+                    sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+                  } else {
+                    const py = Math.min(yStart + sy * stepY, yEnd - 1);
+                    const px = Math.min(xStart + sx * stepX, xEnd - 1);
                     const pi = (py * hrW + px) * 4;
-                    sumL += rgbToLab(hd[pi], hd[pi+1], hd[pi+2])[0];
-                    pCount++;
+                    sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
                   }
+                  pCount++;
                 }
               }
               const avgL = pCount > 0 ? sumL / pCount : 50;
@@ -1343,46 +1370,67 @@ export default function Studio() {
               const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
 
               // Apply per-pixel LAB correction
-              for (let py = yStart; py < yEnd; py++) {
-                for (let px = xStart; px < xEnd; px++) {
-                  const pi = (py * hrW + px) * 4;
-                  const [pl, pa, pb] = rgbToLab(hd[pi], hd[pi+1], hd[pi+2]);
-                  let newL = Math.max(0, Math.min(100, pl * lumScale));
-                  if (isShadowZone && shadowBoost > 0.05) {
-                    const deviation = pl - avgL;
-                    const stretchFactor = 1.0 + shadowBoost * 0.4;
-                    newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+              if (isMob) {
+                for (let ly = 0; ly < tileH; ly++) {
+                  for (let lx = 0; lx < tileW; lx++) {
+                    const pi = (ly * tileW + lx) * 4;
+                    const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const deviation = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + deviation * (1.0 + shadowBoost * 0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tB - pb) * AB_BLEND;
+                    const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDeltaB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+                    const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+                    const satBoost = 0.90 + cBoost * 0.15;
+                    const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+                    const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
+                    const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+                    td[pi] = nr; td[pi+1] = ng; td[pi+2] = nb;
                   }
-                  if (isShadowZone && newL > tL + 25) {
-                    newL = tL + 25 + (newL - tL - 25) * 0.2;
+                }
+                hrCtx!.putImageData(tileData, xStart, yStart);
+              } else {
+                for (let py = yStart; py < yEnd; py++) {
+                  for (let px = xStart; px < xEnd; px++) {
+                    const pi = (py * hrW + px) * 4;
+                    const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const deviation = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + deviation * (1.0 + shadowBoost * 0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tB - pb) * AB_BLEND;
+                    const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDeltaB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+                    const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+                    const satBoost = 0.90 + cBoost * 0.15;
+                    const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+                    const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
+                    const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+                    td[pi] = nr; td[pi+1] = ng; td[pi+2] = nb;
                   }
-                  const rawDeltaA = (tA - pa) * AB_BLEND;
-                  const rawDeltaB = (tB - pb) * AB_BLEND;
-                  const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
-                  const clampedDeltaB = rawDeltaB < 0
-                    ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
-                    : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
-                  const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
-                  const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
-                  const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
-                  const satBoost = 0.90 + cBoost * 0.15;
-                  const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
-                  const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
-                  const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
-                  const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
-                  hd[pi] = nr;
-                  hd[pi+1] = ng;
-                  hd[pi+2] = nb;
                 }
               }
             }
             // Yield to UI every few rows
             if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
           }
-          hrCtx!.putImageData(hrImageData, 0, 0);
+          if (!isMob && fullImageData) hrCtx!.putImageData(fullImageData, 0, 0);
         } else {
           // No cellLab data available (e.g. loaded from saved project without re-render)
-          // Fall back to simple contrast boost only
           console.log('[ClientHiRes] No cellLab data, skipping LAB correction');
         }
       }
