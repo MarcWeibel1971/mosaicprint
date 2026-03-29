@@ -329,6 +329,7 @@ interface R2Diagnosis {
   byProvider: Array<{ source_provider: string; total: string; on_r2: string; missing: string }>;
 }
 function R2MigrationPanel() {
+  const { authHeaders } = useAuth();
   const [status, setStatus] = React.useState<R2Status | null>(null);
   const [diagnosis, setDiagnosis] = React.useState<R2Diagnosis | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -2196,6 +2197,7 @@ function ImportCard({ title, description, icon, color, available, job, isActive,
 
 // ── Database Browser ──────────────────────────────────────────────────────────
 function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const { authHeaders } = useAuth();
   const [images, setImages] = useState<TileImage[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -3706,6 +3708,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 // ── Algorithm Settings ────────────────────────────────────────────────────────
 // ── Category Profiles Panel ─────────────────────────────────────────────────
 function CategoryProfilesPanel() {
+  const { authHeaders } = useAuth();
   const [categories, setCategories] = useState<Array<{
     name: string; label: string; parent_category: string;
     keywords: string[]; algo_settings: Record<string, unknown>;
@@ -3831,6 +3834,7 @@ function ProfilePopup({ profile, onClose, onApply }: {
   onClose: () => void
   onApply: (settings: Partial<AlgoSettings>) => void
 }) {
+  const { authHeaders } = useAuth();
   const [editedSettings, setEditedSettings] = useState<Partial<AlgoSettings>>({ ...profile.settings })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -4519,6 +4523,7 @@ function LastMosaicQualityPanel() {
 // ── Quality Assurance Tab ─────────────────────────────────────────────────────
 // (QaRun, QaItem interfaces and QA_CHECKS const are declared above Admin component to avoid TDZ)
 function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const { authHeaders } = useAuth();
   const [runs, setRuns] = useState<QaRun[]>([])
   const [runningChecks, setRunningChecks] = useState<Set<string>>(new Set())
   const [selectedRun, setSelectedRun] = useState<number | null>(null)
@@ -5765,6 +5770,7 @@ interface CleanupCandidates {
 }
 
 function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const { authHeaders } = useAuth();
   const [expanded, setExpanded] = useState(false)
   const [candidates, setCandidates] = useState<CleanupCandidates | null>(null)
   const [loadingCandidates, setLoadingCandidates] = useState(false)
@@ -6117,6 +6123,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
 
 // ── KI-Bildanalyse Panel (Gemini Vision Batch) ───────────────────────────
 function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const { authHeaders } = useAuth();
   const [open, setOpen] = useState(true)
   const [running, setRunning] = useState(false)
   const [batchSize, setBatchSize] = useState(100)
@@ -6329,6 +6336,7 @@ interface OrderItem {
 }
 
 function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
+  const { authHeaders } = useAuth();
   const [orders, setOrders] = useState<OrderItem[]>([])
   const [loading, setLoading] = useState(true)
   const [renderingId, setRenderingId] = useState<number | null>(null)
