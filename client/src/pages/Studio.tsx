@@ -5251,8 +5251,40 @@ export default function Studio() {
             onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
           });
 
-          // Force download with proper MIME type (bypasses Chrome PDF viewer)
+          // Upload print file to R2 BEFORE triggering download (same as hi-res path)
           const jpgBlob1 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+          if (savedProjectIdRef.current && user) {
+            try {
+              setDlProgressMsg('Druckdatei wird auf Server gespeichert...');
+              const uploadRes1 = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+                body: jpgBlob1,
+              });
+              const uploadResult1 = await uploadRes1.json();
+              if (uploadResult1.ok) {
+                setDlProgressMsg('✓ Druckdatei gespeichert – wird heruntergeladen...');
+                // Send confirmation email
+                try {
+                  await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify({ printUrl: uploadResult1.printUrl }),
+                  });
+                } catch (emailErr) {
+                  console.warn('[Email] Confirmation email failed:', emailErr);
+                }
+              } else {
+                setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
+              }
+            } catch (uploadErr) {
+              console.warn('[PrintUpload] Failed:', uploadErr);
+              setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wird lokal heruntergeladen.');
+            }
+          } else if (!savedProjectIdRef.current && user) {
+            setDlProgressMsg('✓ Download fertig. Tipp: Projekt speichern, um Druckdatei unter Projekte abzurufen.');
+          }
+          // Force download with proper MIME type (bypasses Chrome PDF viewer)
           forceDownloadBlob(jpgBlob1, printFilename, 'image/jpeg');
           setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob1.size / 1024 / 1024).toFixed(1)} MB)`);
           setDlProgress(100);
@@ -5297,6 +5329,16 @@ export default function Studio() {
             const uploadResult = await uploadRes.json();
             if (uploadResult.ok) {
               setDlProgressMsg('✓ Druckdatei gespeichert – wird heruntergeladen...');
+              // Send confirmation email
+              try {
+                await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                  body: JSON.stringify({ printUrl: uploadResult.printUrl }),
+                });
+              } catch (emailErr) {
+                console.warn('[Email] Confirmation email failed:', emailErr);
+              }
             } else {
               setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
             }

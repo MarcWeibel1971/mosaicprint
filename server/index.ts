@@ -2965,6 +2965,79 @@ app.post("/api/projects/:id/print-url", requireAuth, async (req, res) => {
   }
 });
 
+// ── Order Confirmation Email ───────────────────────────────────────────────
+// POST /api/projects/:id/send-confirmation
+// Sends a confirmation email with download link to the logged-in user
+app.post("/api/projects/:id/send-confirmation", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    // Get project details
+    const projRes = await pool.query(
+      "SELECT id, name, print_url FROM projects WHERE id = $1 AND user_id = $2",
+      [req.params.id, user.id]
+    );
+    if (projRes.rows.length === 0) return res.status(404).json({ ok: false, error: 'Projekt nicht gefunden' });
+    const project = projRes.rows[0];
+    const printUrl = req.body?.printUrl || project.print_url;
+    if (!printUrl) return res.status(400).json({ ok: false, error: 'Keine Druckdatei-URL vorhanden' });
+    // Check SMTP config
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const smtpFrom = process.env.SMTP_FROM || smtpUser;
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      console.warn('[ConfirmEmail] SMTP not configured – skipping confirmation email');
+      return res.json({ ok: false, skipped: true, reason: 'SMTP nicht konfiguriert' });
+    }
+    const nodemailer = await import('nodemailer');
+    const transporter = nodemailer.default.createTransport({
+      host: smtpHost,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+    // Build absolute download URL (handle relative /prints/ paths)
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+    const absolutePrintUrl = printUrl.startsWith('http') ? printUrl : `${proto}://${host}${printUrl}`;
+    const projectName = project.name || 'Mein Mosaik';
+    const displayName = user.display_name || user.email.split('@')[0];
+    await transporter.sendMail({
+      from: `MosaicPrint <${smtpFrom}>`,
+      to: user.email,
+      subject: `Deine Druckdatei ist bereit: "${projectName}"`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
+          <div style="text-align: center; margin-bottom: 32px;">
+            <h1 style="color: #e05c3a; font-size: 28px; margin: 0;">MosaicPrint</h1>
+            <p style="color: #888; font-size: 13px; margin: 4px 0 0;">Dein Foto als Kunstwerk</p>
+          </div>
+          <h2 style="color: #1a1a1a; font-size: 22px;">Hallo ${displayName}!</h2>
+          <p style="color: #555; font-size: 16px; line-height: 1.6;">
+            Deine Druckdatei f&uuml;r das Projekt <strong>"${projectName}"</strong> wurde erfolgreich erstellt und ist jetzt zum Download bereit.
+          </p>
+          <div style="text-align: center; margin: 32px 0;">
+            <a href="${absolutePrintUrl}" style="background: #e05c3a; color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; display: inline-block;">Druckdatei herunterladen</a>
+          </div>
+          <p style="color: #555; font-size: 14px; line-height: 1.6;">
+            Du kannst deine Druckdatei auch jederzeit unter <strong>Projekte</strong> in deinem Konto herunterladen.
+          </p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            Erstellt mit MosaicPrint &mdash; Dein Foto als Kunstwerk &bull; <a href="https://mosaicprint.ch" style="color: #e05c3a;">mosaicprint.ch</a>
+          </p>
+        </div>
+      `,
+    });
+    console.log(`[ConfirmEmail] Sent to ${user.email} for project ${req.params.id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[ConfirmEmail] Failed:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // ── QR Code API ────────────────────────────────────────────────────────────
 
 app.get("/api/events/:slug/qr", async (req, res) => {
