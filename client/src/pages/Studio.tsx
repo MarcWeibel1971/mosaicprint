@@ -168,9 +168,8 @@ function forceDownloadBlob(blob: Blob, filename: string, mimeType = 'image/jpeg'
   const typedBlob = new Blob([blob], { type: mimeType });
   
   // Strategy 2: Use File System Access API if available (Chrome 86+)
-  // This completely bypasses the blob: URL issue
-  if ('showSaveFilePicker' in window && typedBlob.size > 5 * 1024 * 1024) {
-    // Only use for large files (>5MB) where PDF interception is likely
+  // This completely bypasses the blob: URL issue AND the Adobe Acrobat PDF extension interception
+  if ('showSaveFilePicker' in window) {
     const ext = isJpeg ? 'jpg' : 'png';
     (window as any).showSaveFilePicker({
       suggestedName: filename,
@@ -4006,9 +4005,14 @@ export default function Studio() {
               // Target is neutral but tile is blue -> penalize (prevents blue flecks in white hair/walls)
               // Threshold lowered from -12 to -5: tiles with b=-6 to -11 were slipping through
               // Factor increased for bright targets (white hair has brightness > 70)
-              const brightBoost = tf.brightness > 70 ? 2.5 : 1.0; // extra strong for white hair
-              const neutralBluePenalty = (-tileB2 - 5) * brightnessScale * 45 * brightBoost;
-              baseDist += Math.min(1200, neutralBluePenalty);
+              // brightBoost: 2.5 → 5.0 for L>70, 3.0 for L>60 (white/gray hair outside face mesh)
+              const brightBoost = tf.brightness > 75 ? 5.0 : (tf.brightness > 70 ? 3.5 : (tf.brightness > 60 ? 2.0 : 1.0));
+              const neutralBluePenalty = (-tileB2 - 5) * brightnessScale * 55 * brightBoost;
+              baseDist += Math.min(2500, neutralBluePenalty);
+            }
+            // Extra: very blue tiles (b < -12) in ANY bright neutral area get a hard cap penalty
+            if (tileB2 < -12 && tf.brightness > 55) {
+              baseDist += Math.min(1500, (-tileB2 - 12) * 80 * brightnessScale);
             }
           }
           // MIX MODE: User tile preference bonus (user photos should appear prominently)
@@ -5255,7 +5259,8 @@ export default function Studio() {
           });
 
           // Force download with proper MIME type (bypasses Chrome PDF viewer)
-          forceDownloadBlob(await printBlob.arrayBuffer().then(ab => new Blob([ab], { type: 'image/jpeg' })), printFilename, 'image/jpeg');
+          const jpgBlob1 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+          forceDownloadBlob(jpgBlob1, printFilename, 'image/jpeg');
           setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob1.size / 1024 / 1024).toFixed(1)} MB)`);
           setDlProgress(100);
         } catch (e) {
@@ -5286,8 +5291,10 @@ export default function Studio() {
         });
 
         // Force download with proper MIME type (bypasses Chrome PDF viewer)
-          forceDownloadBlob(await printBlob.arrayBuffer().then(ab => new Blob([ab], { type: 'image/jpeg' })), printFilename, 'image/jpeg');
+        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
         setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+
         setDlProgress(100);
         // Upload print file to R2 and save URL in project
         if (savedProjectIdRef.current && user) {
