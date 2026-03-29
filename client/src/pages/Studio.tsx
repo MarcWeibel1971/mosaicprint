@@ -606,16 +606,12 @@ const MATERIALS = [
   { label: "Fotopapier", surcharge: -10, icon: "📄" },
 ];
 
-// Digital download options (no physical print)
-// Tile sizes chosen so each tier produces visibly different output dimensions
-// even for large grids (120+ cols). Server MAX_DIM raised to 32000.
-// Max output per dimension: 16000px (server MAX_DIM). Tile sizes auto-capped for large grids.
-// For a typical 100x120 grid: 64px→6400x7680, 100px→10000x12000, 128px→12800x15360(capped~133px)
+// Download/Print formats – used for BOTH digital download and print order
+// tilePx determines output resolution: same rendering path for both use cases
 const DIGITAL_FORMATS = [
-  { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
-  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 100, price: 19, format: 'jpg' as const },
+  { label: "HD", desc: "Hochauflösend (ca. 10.000×12.000 px)", tilePx: 100, price: 19, format: 'jpg' as const },
   { label: "Ultra HD", desc: "Maximale Auflösung (1cm@400PPI)", tilePx: 157, price: 29, format: 'jpg' as const },
-  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 128, price: 39, format: 'png' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei, maximale Qualität", tilePx: 157, price: 39, format: 'png' as const },
 ];
 
 export default function Studio() {
@@ -667,7 +663,7 @@ export default function Studio() {
   const MIN_OWN_TILES = 20; // minimum tiles for 'own' mode
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [orderMode, setOrderMode] = useState<'print' | 'digital'>('print');
-  const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(1); // HD default
+  const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(0); // HD default (index 0 after removing Standard)
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
   // Crop modal state
   const [cropModalOpen, setCropModalOpen] = useState(false);
@@ -5413,9 +5409,7 @@ export default function Studio() {
     link.click();
   }, [selectedFormat]);
 
-  const totalPrice = orderMode === 'print'
-    ? PRINT_FORMATS[selectedFormat].price + MATERIALS[selectedMaterial].surcharge
-    : DIGITAL_FORMATS[selectedDigitalFormat].price;
+  const totalPrice = DIGITAL_FORMATS[selectedDigitalFormat].price;
 
   // Digital download handler: server-side render without watermark
   const handleDigitalDownload = useCallback(async () => {
@@ -5501,97 +5495,127 @@ export default function Studio() {
     }
   }, []);
 
-  // Printolino order: create order + render file for admin fulfillment
+  // Druck bestellen: create order in DB + render file client-side for admin fulfillment
   const [printolinoLoading, setPrintolinoLoading] = useState(false);
   const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
   const handlePrintolinoOrder = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
-    const fmt = PRINT_FORMATS[selectedFormat];
-    const mat = MATERIALS[selectedMaterial];
+    const digFmt = DIGITAL_FORMATS[selectedDigitalFormat]; // use same format as digital download
     const { cols, rows } = mosaicParamsRef.current;
 
-    setPrintolinoLoading(true);
-    try {
-      // 1. Calculate tilePx for the print format (matching handleDownload logic)
-      const PX_PER_CM = 400 / 2.54; // 400 DPI = 1 Kachel pro cm bei 157px
-      const tileSizeCm = fmt.widthCm / cols;
-      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max API)
-      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+    // Calculate tilePx using same logic as handleDigitalDownload
+    const SERVER_MAX_DIM = 16000;
+    let PRINT_TILE_PX = Math.min(Math.max(digFmt.tilePx, 32), 256);
+    if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
+      PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
+      PRINT_TILE_PX = Math.max(32, PRINT_TILE_PX);
+    }
+    const outW = cols * PRINT_TILE_PX;
+    const outH = rows * PRINT_TILE_PX;
+    const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
 
-      // 2. Create order in DB with render params
+    setPrintolinoLoading(true);
+    setDlLoading(true);
+    try {
+      // 1. Render file client-side (same path as digital download = same quality)
+      setDlProgressMsg(`Rendere Druckdatei ${digFmt.label} (${outW.toLocaleString()}x${outH.toLocaleString()}px)...`);
+      setDlProgress(5);
+      const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
+        cols, rows, tilePx: PRINT_TILE_PX, format: useFormat as 'jpg' | 'png',
+        assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
+        validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+        snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+        targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        cellLab: cellLabRef.current,
+        userOverlay, userPhotoImg,
+        onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
+      });
+      setDlProgress(70);
+      setDlProgressMsg('Datei wird auf Server gespeichert...');
+
+      // 2. Upload to R2 for persistent download link
+      let printUrl: string | null = null;
+      if (savedProjectIdRef.current && user) {
+        try {
+          const mimeType4 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
+          const uploadBlob = new Blob([await printBlob.arrayBuffer()], { type: mimeType4 });
+          const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+            method: 'POST',
+            headers: { 'Content-Type': mimeType4, ...authHeaders() },
+            body: uploadBlob,
+          });
+          const uploadResult = await uploadRes.json();
+          if (uploadResult.ok) printUrl = uploadResult.printUrl ?? null;
+        } catch (uploadErr) {
+          console.warn('[PrintOrder] R2 upload failed:', uploadErr);
+        }
+      }
+      setDlProgress(85);
+      setDlProgressMsg('Bestellung wird angelegt...');
+
+      // 3. Create order in DB
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
-          formatLabel: fmt.label,
-          materialLabel: mat.label,
-          priceChf: fmt.price + mat.surcharge,
+          formatLabel: digFmt.label,
+          materialLabel: useFormat.toUpperCase(),
+          priceChf: digFmt.price,
           customerEmail: user?.email ?? null,
           userId: user?.id ?? null,
           renderParams: {
-            tileIds: tileIdsRef.current,
-            assignment: assignmentRef.current,
             cols, rows,
             tilePx: PRINT_TILE_PX,
-            overlayMode: dlSettings.overlayMode ?? 'softlight',
-            baseOverlay: dlSettings.baseOverlay ?? 0.15,
-            edgeBoost: dlSettings.edgeBoost ?? 0.20,
-            targetColors: targetColorsRef.current,
-            edgeMap: edgeMapRef.current,
-            faceMask: faceMaskRef.current,
+            format: useFormat,
+            outputWidth: outW,
+            outputHeight: outH,
+            printUrl,
           },
         }),
       });
       const orderData = await orderResp.json();
       if (!orderData.ok) throw new Error(orderData.error || 'Order creation failed');
 
-      // 3. Now render the file for this order
-      setProgressMsg(`Rendere Druckdatei fuer Printolino (${fmt.label})...`);
-      setProgress(10);
-      const jobId = `prt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const renderResp = await fetch('/api/print-render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tileIds: tileIdsRef.current,
-          assignment: assignmentRef.current,
-          cols, rows,
-          tilePx: PRINT_TILE_PX,
-          format: 'jpg',
-          jobId,
-          overlayMode: dlSettings.overlayMode ?? 'softlight',
-          baseOverlay: dlSettings.baseOverlay ?? 0.15,
-          edgeBoost: dlSettings.edgeBoost ?? 0.20,
-          targetColors: targetColorsRef.current,
-          edgeMap: edgeMapRef.current,
-          faceMask: faceMaskRef.current,
-        }),
-      });
-      if (!renderResp.ok) throw new Error('Render failed');
-      // Poll for completion
-      const prtResult = await pollForResult(jobId, setProgress, setProgressMsg);
-      const { token } = prtResult;
+      // 4. If we have a printUrl, mark order as ready immediately
+      if (printUrl && orderData.orderId) {
+        await fetch(`/api/admin/orders/${orderData.orderId}/status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ status: 'ready', downloadToken: printUrl }),
+        });
+      }
 
-      // 4. Update order with download token
-      await fetch(`/api/admin/orders/${orderData.orderId}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'ready', downloadToken: token }),
-      });
+      // 5. Send confirmation email
+      if (savedProjectIdRef.current && user) {
+        try {
+          await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ printUrl, orderId: orderData.orderId }),
+          });
+        } catch (emailErr) {
+          console.warn('[PrintOrder] Email failed:', emailErr);
+        }
+      }
 
+      setDlProgress(100);
+      setDlProgressMsg(`✓ Bestellung #${orderData.orderId} erstellt! Download: ${printFilename}`);
       setPrintolinoSuccess(true);
-      setProgressMsg('Bestellung erfolgreich erstellt!');
-      setProgress(100);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); setPrintolinoSuccess(false); }, 5000);
+
+      // 6. Trigger local download too
+      const mimeType5 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
+      forceDownloadBlob(printBlob, printFilename, mimeType5);
+
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); setPrintolinoSuccess(false); }, 8000);
     } catch (e) {
-      console.error('[Printolino] Order failed:', e);
-      setProgressMsg(`Fehler: ${e}`);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+      console.error('[PrintOrder] Failed:', e);
+      setDlProgressMsg(`Fehler: ${e}`);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 3000);
     } finally {
       setPrintolinoLoading(false);
+      setDlLoading(false);
     }
-  }, [selectedFormat, selectedMaterial, user]);
+  }, [selectedDigitalFormat, user, authHeaders, userOverlay, userPhotoImg]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
@@ -6669,205 +6693,58 @@ export default function Studio() {
             {/* ===== PRINT MODE ===== */}
             {orderMode === 'print' && (
               <>
-                {/* Format selection */}
+                {/* Format selection – same formats as digital download for identical quality */}
                 <div className="mb-5">
-                  <p className="text-sm font-bold text-gray-700 mb-3">Druckformat waehlen</p>
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                    {PRINT_FORMATS.map(({ label, price, widthCm }, idx) => {
-                      const cols = mosaicParamsRef.current?.cols ?? 60;
-                      const tileMm = Math.round((widthCm / cols) * 10); // tile size in mm
-                      // Quality rating: <5mm = tiles too small, 5-7mm = ok, 8-12mm = ideal, >12mm = tiles dominate
-                      const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
-                      const qualityColor = quality === 'ideal' ? 'text-green-600' : quality === 'ok' ? 'text-blue-500' : quality === 'small' ? 'text-amber-600' : 'text-gray-500';
-                      const qualityLabel = quality === 'ideal' ? 'Optimal' : quality === 'ok' ? 'Gut' : quality === 'small' ? 'Kacheln klein' : 'Kacheln gross';
-                      const tooSmall = tileMm < 5; // tiles under 5mm are not individually recognizable
-                      return (
-                        <button
-                          key={label}
-                          onClick={() => setSelectedFormat(idx)}
-                          className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
-                            selectedFormat === idx
-                              ? "border-coral-500 bg-coral-50"
-                              : tooSmall ? "border-amber-200 hover:border-coral-200 bg-amber-50/30" : "border-gray-100 hover:border-coral-200"
-                          }`}
-                        >
-                          {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
-                          <div className="text-xs font-bold text-gray-900">{label}</div>
-                          <div className="text-[9px] text-gray-400 mt-0.5">Kachel: {tileMm}mm</div>
-                          <div className={`text-[9px] font-semibold mt-0.5 ${qualityColor}`}>{qualityLabel}</div>
-                          <div className="text-xs text-coral-700 font-semibold mt-0.5">CHF {price}</div>
-                          {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Material selection */}
-                <div className="mb-6">
-                  <p className="text-sm font-bold text-gray-700 mb-3">Material waehlen</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {MATERIALS.map(({ label, surcharge, icon }, idx) => (
+                  <p className="text-sm font-bold text-gray-700 mb-3">Qualitaet waehlen</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    {DIGITAL_FORMATS.map(({ label, desc, price }, idx) => (
                       <button
                         key={label}
-                        onClick={() => setSelectedMaterial(idx)}
-                        className={`p-3 rounded-xl border-2 text-left transition-all ${
-                          selectedMaterial === idx
-                            ? "border-coral-500 bg-coral-50"
-                            : "border-gray-100 hover:border-coral-200"
+                        onClick={() => setSelectedDigitalFormat(idx)}
+                        className={`relative p-3 rounded-xl border-2 text-center transition-all ${
+                          selectedDigitalFormat === idx
+                            ? 'border-coral-500 bg-coral-50'
+                            : 'border-gray-100 hover:border-coral-200'
                         }`}
                       >
-                        <div className="text-xl mb-1">{icon}</div>
-                        <div className="text-xs font-bold text-gray-900">{label}</div>
-                        <div className="text-xs text-gray-500">
-                          {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `-CHF ${Math.abs(surcharge)}` : "Inklusive"}
-                        </div>
+                        {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Empfohlen</div>}
+                        <div className="text-sm font-bold text-gray-900">{label}</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5">{desc}</div>
+                        <div className="text-xs text-coral-700 font-semibold mt-1">CHF {price}</div>
+                        {selectedDigitalFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* Order summary */}
+                {/* Order info */}
                 <div className="bg-coral-50 rounded-xl p-4 mb-5">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} . {MATERIALS[selectedMaterial].label}</p>
-                      <p className="text-sm text-gray-500">inkl. MwSt., Druck & Lieferung CH</p>
+                      <p className="font-bold text-gray-900">Druck bestellen &ndash; {DIGITAL_FORMATS[selectedDigitalFormat].label}</p>
+                      <p className="text-sm text-gray-500">Hochauflösende Druckdatei &middot; Bearbeitung durch Admin</p>
                     </div>
                     <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
                   </div>
                 </div>
 
-                {/* Printolino-Info-Box with quality analysis */}
-                {(() => {
-                  const fmt = PRINT_FORMATS[selectedFormat];
-                  const cols = mosaicParamsRef.current?.cols ?? 60;
-                  const rows = mosaicParamsRef.current?.rows ?? 80;
-                  const PX_PER_CM = 400 / 2.54; // 400 DPI Ultra HD
-                  const tileSizeCm = fmt.widthCm / cols;
-                  const tileMm = Math.round(tileSizeCm * 10);
-                  const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
-                  // Match actual download handler: min 64, max 400, then clamp to MAX_DIM=16000
-                  let printTilePx = Math.min(400, Math.max(64, naturalTilePx2));
-                  const SERVER_MAX_DIM2 = 16000;
-                  if (cols * printTilePx > SERVER_MAX_DIM2 || rows * printTilePx > SERVER_MAX_DIM2) {
-                    printTilePx = Math.min(Math.floor(SERVER_MAX_DIM2 / cols), Math.floor(SERVER_MAX_DIM2 / rows), printTilePx);
-                    printTilePx = Math.max(32, printTilePx);
-                  }
-                  const outW = cols * printTilePx;
-                  const outH = rows * printTilePx;
-                  const posterW = (cols * tileSizeCm).toFixed(0);
-                  const posterH = (rows * tileSizeCm).toFixed(0);
-                  // Quality assessment
-                  const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
-                  // Compute optimal baseTiles for ~9mm tiles in this format
-                  // 1cm/Kachel Regel: für 70x70cm = 70x70 Kacheln, für 40x40cm = 40x40 Kacheln
-                  const TARGET_TILE_CM = 1.0; // 1 Kachel pro cm (optimal für 20-30cm Betrachtungsabstand)
-                  const targetTileMm = Math.round(TARGET_TILE_CM * 10); // = 10mm
-                  // 1cm/Kachel: targetCols = widthCm, targetRows = heightCm (direkt vom Format)
-                  const targetCols = Math.round(fmt.widthCm / TARGET_TILE_CM);  // 70cm → 70 Kacheln
-                  const targetRows = Math.round(fmt.heightCm / TARGET_TILE_CM); // 70cm → 70 Kacheln
-                  // baseTiles = längere Seite (wie renderMosaic es erwartet)
-                  const optimalBaseTiles = Math.max(targetCols, targetRows);
-                  const isAlreadyOptimal = cols === targetCols && rows === targetRows;
-                  const needsOptimize = !isAlreadyOptimal;
-                  // Re-render handler: update baseTiles and trigger renderMosaic
-                  const handleOptimizeForFormat = () => {
-                    if (!userPhotoImg) return;
-                    try {
-                      const current = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}');
-                      current.baseTiles = optimalBaseTiles;
-                      localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(current));
-                    } catch { /* ignore */ }
-                    setReady(false); setLoading(true); setProgress(0);
-                    renderMosaic(userPhotoImg);
-                  };
-                  return (
-                    <div className={`rounded-xl p-3 mb-4 text-xs ${quality === 'small' ? 'bg-amber-50 border border-amber-300 text-amber-900' : quality === 'large' ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
-                      <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Poster-Groesse:</span>
-                        <span className="font-semibold">{posterW} × {posterH} cm</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Kachel-Groesse:</span>
-                        <span className="font-semibold">{tileMm}mm × {tileMm}mm {quality === 'ideal' ? '✓' : needsOptimize ? '⚠' : ''}</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Anzahl Kacheln:</span>
-                        <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
-                        <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
-                      </div>
-                      {/* 1cm/Kachel Optimieren-Button: immer anzeigen */}
-                      <div className="mt-2">
-                        {isAlreadyOptimal ? (
-                          <p className="text-green-700 font-medium">
-                            ✓ Optimal für {fmt.label}: {cols}×{rows} Kacheln (1 cm/Kachel, ideal für 20–30 cm Abstand)
-                          </p>
-                        ) : (
-                          <>
-                            <p className="text-blue-700 font-medium mb-2">
-                              Für {fmt.label} empfehlen wir <strong>{targetCols}×{targetRows} Kacheln</strong> (1 cm/Kachel, optimal für 20–30 cm Abstand).
-                              Aktuell: {cols}×{rows} Kacheln ({tileMm}mm/Kachel).
-                            </p>
-                            <button
-                              onClick={handleOptimizeForFormat}
-                              disabled={loading}
-                              className="w-full py-2 px-3 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
-                            >
-                              Neu rendern für {fmt.label} → {targetCols}×{targetRows} Kacheln (1 cm/Kachel)
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* Payment success banner */}
-                {paymentSuccess && (
-                  <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-2 text-green-800 text-sm font-semibold">
-                    <Check className="w-4 h-4 text-green-600" />
-                    Zahlung erfolgreich! Lade jetzt deine druckbereite Datei herunter.
-                    <button
-                      onClick={() => handleDownload(true)}
-                      className="ml-auto flex items-center gap-1 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Herunterladen
-                    </button>
-                  </div>
-                )}
-
-                {/* Printolino order success banner */}
+                {/* Order success banner */}
                 {printolinoSuccess && (
                   <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 text-green-800 text-sm font-semibold">
                     <Check className="w-4 h-4 text-green-600 inline mr-2" />
-                    Printolino-Bestellung erstellt! Die Druckdatei wird vorbereitet und erscheint im Admin-Bereich unter "Kundenbestellungen".
+                    Bestellung erstellt! Die Druckdatei erscheint im Admin-Bereich unter &quot;Kundenbestellungen&quot;.
                   </div>
                 )}
 
-                {paymentError && (
-                  <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
-                    {paymentError}
-                  </div>
-                )}
+                <button
+                  onClick={handlePrintolinoOrder}
+                  disabled={printolinoLoading || dlLoading}
+                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
+                >
+                  {(printolinoLoading || dlLoading) ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
+                  Druck bestellen &middot; CHF {totalPrice}
+                </button>
 
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <button
-                    onClick={() => setShowPayModal(true)}
-                    disabled={paymentLoading}
-                    className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
-                  >
-                    {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                    Mosaik kaufen . CHF {totalPrice}
-                  </button>
-                  <button
-                    onClick={handlePrintolinoOrder}
-                    disabled={printolinoLoading}
-                    className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all disabled:opacity-60"
-                  >
-                    {printolinoLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
-                    Bei Printolino bestellen
-                  </button>
-                </div>
                 <div className="flex items-center justify-between mt-3">
                   <button
                     onClick={() => handleDownload(false)}

@@ -6482,7 +6482,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
         <div className="text-center py-12 bg-gray-50 rounded-xl border border-gray-200">
           <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500 font-medium">Noch keine Bestellungen</p>
-          <p className="text-gray-400 text-sm mt-1">Kundenbestellungen erscheinen hier, sobald ein Kunde "Bei Printolino bestellen" klickt.</p>
+          <p className="text-gray-400 text-sm mt-1">Kundenbestellungen erscheinen hier, sobald ein Kunde auf "Druck bestellen" klickt.</p>
         </div>
       )}
 
@@ -6523,7 +6523,20 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
 
             {/* Actions */}
             <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
-              {order.render_params && (
+              {/* Direct download if R2 URL is stored as download_token */}
+              {order.download_token && order.download_token.startsWith('http') && (
+                <a
+                  href={order.download_token}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Druckdatei herunterladen
+                </a>
+              )}
+              {/* Fallback: re-render from params if no direct URL */}
+              {order.render_params && order.render_params.tileIds && !order.download_token?.startsWith('http') && (
                 <button
                   onClick={() => renderAndDownload(order)}
                   disabled={renderingId !== null}
@@ -6532,6 +6545,15 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                   <Download className="w-3.5 h-3.5" />
                   Druckdatei herunterladen
                 </button>
+              )}
+              {/* Show render_params info for debugging */}
+              {order.render_params && (
+                <span className="text-xs text-gray-400">
+                  {order.render_params.outputWidth && order.render_params.outputHeight
+                    ? `${order.render_params.outputWidth.toLocaleString()}x${order.render_params.outputHeight.toLocaleString()}px · ${order.render_params.format?.toUpperCase() ?? 'JPG'}`
+                    : `${order.render_params.cols ?? '?'}x${order.render_params.rows ?? '?'} Kacheln`
+                  }
+                </span>
               )}
 
               {/* Status buttons */}
@@ -6542,7 +6564,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               )}
               {order.status === 'ready' && (
                 <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
-                  Bei Printolino bestellt
+                  Bei Printolino bestellt ✓
                 </button>
               )}
               {(order.status === 'ordered' || order.status === 'ready') && (
