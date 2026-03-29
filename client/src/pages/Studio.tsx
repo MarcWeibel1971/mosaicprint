@@ -4710,13 +4710,9 @@ export default function Studio() {
       const tileIdx = assignment[ci];
       if (popOutLoadedIdxs.has(tileIdx)) continue; // already queued
       const dbId = tileIds?.[tileIdx];
-      if (!dbId || dbId <= 0) continue; // user tile — already has hi-res
-      const userOriginals = userTileOriginalRef.current;
-      const hiResImgs = validImgsHiResRef.current;
-      const origImg = userOriginals?.[tileIdx >= 0 ? -1 : -(tileIdx + 1)];
-      const hiImg = hiResImgs?.[tileIdx];
-      if ((origImg && origImg.complete && origImg.naturalWidth >= 256) ||
-          (hiImg && hiImg.complete && hiImg.naturalWidth >= 256)) continue; // already sharp enough
+      if (!dbId || dbId <= 0) continue; // user tile — already has hi-res via userTileOriginalRef
+      // Always load 512px for DB tiles — validImgs only has 64px thumbnails
+      // Don't skip based on validImgsHiResRef (those are null for DB tiles)
       popOutLoadedIdxs.add(tileIdx);
       // Need to load hi-res for this DB tile
       popOutLoadPromises.push(new Promise<void>(resolve => {
@@ -4729,11 +4725,22 @@ export default function Studio() {
       }));
     }
     // Load all hi-res tiles in parallel (max ~30 tiles × ~50KB = ~1.5MB)
+    console.log(`[PopOut] tileIds.length=${tileIds?.length}, assignment=${assignment?.length}, numTiles=${numTiles}, loadPromises=${popOutLoadPromises.length}`);
     if (popOutLoadPromises.length > 0) {
       console.log(`[PopOut] Loading ${popOutLoadPromises.length} hi-res tiles for sharp pop-out...`);
       await Promise.all(popOutLoadPromises);
       if (cancelled) return;
-      console.log(`[PopOut] Loaded ${Object.keys(popOutHiResCache).length} hi-res tiles`);
+      console.log(`[PopOut] Loaded ${Object.keys(popOutHiResCache).length}/${popOutLoadPromises.length} hi-res tiles`);
+    } else {
+      // Debug: why no promises? Check first few tiles
+      for (let t2 = 0; t2 < Math.min(3, numTiles); t2++) {
+        const ci2 = indices[t2];
+        if (!assignment) break;
+        const tileIdx2 = assignment[ci2];
+        const dbId2 = tileIds?.[tileIdx2];
+        const hiImg2 = validImgsHiResRef.current?.[tileIdx2];
+        console.log(`[PopOut] tile t=${t2} ci=${ci2} tileIdx=${tileIdx2} dbId=${dbId2} hiImg=${hiImg2?.naturalWidth}px`);
+      }
     }
 
     for (let t = 0; t < numTiles; t++) {
