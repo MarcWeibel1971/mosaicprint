@@ -1039,7 +1039,22 @@ export default function Studio() {
   const triggerClientHiResRender = useCallback(async () => {
     const assignment = assignmentRef.current;
     const validImgs = validImgsRef.current;
-    const hiResImgs = validImgsHiResRef.current;
+    const tileIdsForHiRes = tileIdsRef.current;
+    // For user tiles (negative IDs), prefer userTileHiResRef (512px) over validImgsHiResRef
+    // (which may contain only 64px thumbnails if project was loaded from saved state).
+    // Build a merged hi-res array: for each tile index, use userTileHiRes if tileId < 0.
+    const rawHiResImgs = validImgsHiResRef.current;
+    const userHiRes = userTileHiResRef.current;
+    const hiResImgs: (HTMLImageElement | null)[] = rawHiResImgs.map((img, idx) => {
+      const tileId = tileIdsForHiRes[idx];
+      if (tileId !== undefined && tileId < 0) {
+        // Negative ID = user tile. Map back to user tile index (1-based negative → 0-based)
+        const userIdx = Math.abs(tileId) - 1;
+        const uhr = userHiRes[userIdx % Math.max(1, userHiRes.length)];
+        if (uhr && uhr.complete && uhr.naturalWidth > 0) return uhr;
+      }
+      return img;
+    });
     const params = mosaicParamsRef.current;
     const snapshot = snapshotRef.current;
     if (!assignment.length || !validImgs.length || !params) {
