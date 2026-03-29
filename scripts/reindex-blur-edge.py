@@ -1,8 +1,9 @@
 """
-reindex-blur-edge.py – Nachberechnung von blur_score und edge_energy für alle Tiles in der DB.
+reindex-blur-edge.py – Nachberechnung von blur_score, edge_energy und ai_mosaic_score für alle Tiles in der DB.
 
 Für Tiles mit R2-URL: Bild von R2 herunterladen, Features berechnen, DB updaten.
 Für LHQ-Tiles: Bild aus lokalem Verzeichnis laden (falls vorhanden).
+Berechnet auch ai_mosaic_score (0-100) aus blur_score, edge_energy und Chroma.
 
 Usage:
   python3 scripts/reindex-blur-edge.py [--lhq-dir /path/to/lhq_1024_jpg] [--batch N] [--limit N]
@@ -124,15 +125,31 @@ def load_image_from_lhq(source_url: str, lhq_dir: Path) -> Image.Image | None:
     return None
 
 
-def update_tile(tile_id: int, blur_score: float, edge_energy: float):
-    """Update blur_score and edge_energy in DB."""
+def compute_mosaic_score(blur_score: float, edge_energy: float, avg_a: float, avg_b: float) -> int:
+    """Compute mosaic_score (0-100) from blur, edge and chroma values."""
+    chroma = math.sqrt(avg_a**2 + avg_b**2)
+    blur_norm = min(1.0, blur_score / 80.0)
+    edge_norm = min(1.0, edge_energy / 0.15)
+    chroma_norm = min(1.0, chroma / 40.0)
+    score = min(1.0, 0.4 * blur_norm + 0.3 * edge_norm + 0.3 * chroma_norm)
+    return round(score * 100)
+
+
+def update_tile(tile_id: int, blur_score: float, edge_energy: float, mosaic_score: int | None = None):
+    """Update blur_score, edge_energy and ai_mosaic_score in DB."""
     conn = get_thread_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE mosaic_images SET blur_score=%s, edge_energy=%s WHERE id=%s",
-                (blur_score, edge_energy, tile_id)
-            )
+            if mosaic_score is not None:
+                cur.execute(
+                    "UPDATE mosaic_images SET blur_score=%s, edge_energy=%s, ai_mosaic_score=%s WHERE id=%s",
+                    (blur_score, edge_energy, mosaic_score, tile_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE mosaic_images SET blur_score=%s, edge_energy=%s WHERE id=%s",
+                    (blur_score, edge_energy, tile_id)
+                )
             conn.commit()
     except Exception as e:
         try:
@@ -178,7 +195,7 @@ def main():
     limit_sql = f"LIMIT {args.limit}" if args.limit > 0 else ""
 
     cur.execute(f"""
-        SELECT id, source_url, tile128_url, source_provider
+        SELECT id, source_url, tile128_url, source_provider, avg_a, avg_b
         FROM mosaic_images
         {where_sql}
         ORDER BY id
@@ -196,7 +213,7 @@ def main():
     start_time = time.time()
 
     def process_one(row) -> str:
-        tile_id, source_url, tile128_url, provider = row
+        tile_id, source_url, tile128_url, provider, avg_a, avg_b = row
 
         img = None
 
@@ -213,7 +230,11 @@ def main():
 
         try:
             blur_score, edge_energy = compute_blur_and_edge(img)
-            update_tile(tile_id, blur_score, edge_energy)
+            # Compute mosaic_score if LAB values are available
+            mosaic_score = None
+            if avg_a is not None and avg_b is not None:
+                mosaic_score = compute_mosaic_score(blur_score, edge_energy, float(avg_a), float(avg_b))
+            update_tile(tile_id, blur_score, edge_energy, mosaic_score)
             return "updated"
         except Exception:
             return "failed"

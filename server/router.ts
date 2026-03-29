@@ -2422,14 +2422,16 @@ export const appRouter = router({
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
                   br_l=$13, br_a=$14, br_b=$15,
-                  tile_type=$17, edge_energy=$18
+                  tile_type=$17, edge_energy=$18,
+                  blur_score=$19, ai_mosaic_score=$20
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id, lab.tileType, lab.edgeDensity]
+                 row.id, lab.tileType, lab.edgeDensity,
+                 lab.blurScore, Math.round(lab.mosaicScore * 100)]
               );
               indexed++;
             }
@@ -2491,14 +2493,16 @@ export const appRouter = router({
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
                   br_l=$13, br_a=$14, br_b=$15,
-                  tile_type=$17, edge_energy=$18
+                  tile_type=$17, edge_energy=$18,
+                  blur_score=$19, ai_mosaic_score=$20
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id, lab.tileType, lab.edgeDensity]
+                 row.id, lab.tileType, lab.edgeDensity,
+                 lab.blurScore, Math.round(lab.mosaicScore * 100)]
               );
               totalIndexed++;
             }
@@ -3515,8 +3519,8 @@ export const appRouter = router({
                 const lab = await computeLabFull(row.tile128_url);
                 if (lab) {
                   await alPool.query(
-                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,edge_energy=$18,indexed_at=NOW() WHERE id=$17',
-                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id,lab.edgeDensity]
+                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,edge_energy=$18,blur_score=$19,ai_mosaic_score=$20,indexed_at=NOW() WHERE id=$17',
+                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id,lab.edgeDensity,lab.blurScore,Math.round(lab.mosaicScore * 100)]
                   );
                   alIndexed++;
                 }
