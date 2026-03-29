@@ -4514,6 +4514,7 @@ export default function Studio() {
     popContainer.innerHTML = '';
 
     // Create one hi-res canvas overlay per animated tile, positioned exactly over its spot
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const numTiles = Math.min(isMob ? 15 : 30, totalCells); // fewer tiles on mobile to save memory
     const tileEls: HTMLCanvasElement[] = [];
 
