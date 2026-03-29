@@ -2035,6 +2035,47 @@ app.get('/api/admin/orders', async (_req, res) => {
   }
 });
 
+// GET /api/admin/orders/:id/download – proxy R2 file as attachment (avoids CORS issues)
+app.get('/api/admin/orders/:id/download', async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const pool = db.getPool();
+    const result = await pool.query('SELECT download_token FROM mosaic_orders WHERE id = $1', [orderId]);
+    const order = result.rows[0];
+    if (!order || !order.download_token || !order.download_token.startsWith('http')) {
+      return res.status(404).json({ error: 'Kein Download-Link für diese Bestellung' });
+    }
+    const url = order.download_token as string;
+    const ext = url.toLowerCase().includes('.png') ? 'png' : 'jpg';
+    const filename = `mosaicprint-bestellung-${orderId}.${ext}`;
+    // Fetch from R2 and stream to client as attachment
+    const r2Res = await fetch(url, { signal: AbortSignal.timeout(120000) });
+    if (!r2Res.ok) return res.status(502).json({ error: `R2 Fehler: ${r2Res.status}` });
+    const contentType = r2Res.headers.get('content-type') || (ext === 'png' ? 'image/png' : 'image/jpeg');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    const contentLength = r2Res.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    // Stream response body
+    if (r2Res.body) {
+      const reader = r2Res.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    res.end();
+  } catch (e) {
+    console.error('[download-proxy]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/orders/:id/status – update order status
 app.post('/api/admin/orders/:id/status', express.json(), async (req, res) => {
   try {
@@ -3785,6 +3826,7 @@ app.use("/prints", express.static(printsPath, {
     res.setHeader('Cache-Control', 'public, max-age=86400');
   }
 }));
+
 app.use(express.static(distPath));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));

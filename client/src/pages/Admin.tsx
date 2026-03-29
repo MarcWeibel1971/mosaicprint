@@ -6523,24 +6523,16 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
 
             {/* Actions */}
             <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
-              {/* Direct download if R2 URL is stored as download_token */}
+              {/* Direct download via server proxy (avoids CORS issues with R2 URLs) */}
               {order.download_token && order.download_token.startsWith('http') && (
-                <button
-                  onClick={() => {
-                    const a = document.createElement('a');
-                    a.href = order.download_token!;
-                    a.download = `mosaicprint-order-${order.id}.jpg`;
-                    a.target = '_blank';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' });
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700"
+                <a
+                  href={`/api/admin/orders/${order.id}/download`}
+                  onClick={() => onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' })}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Druckdatei herunterladen
-                </button>
+                </a>
               )}
               {/* Fallback: re-render from params if no direct URL */}
               {order.render_params && order.render_params.tileIds && !order.download_token?.startsWith('http') && (
