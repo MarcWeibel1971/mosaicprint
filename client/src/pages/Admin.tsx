@@ -10,7 +10,7 @@ import {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /** Upgrade a tile URL to a higher-resolution preview URL */
-function getHighResUrl(url: string, size = 600, tile128Url?: string): string {
+function getHighResUrl(url: string, size = 600, tile128Url?: string, tileId?: number): string {
   if (!url) return url
   // Picsum: https://picsum.photos/id/123/128/128 -> /id/123/600/600
   const picsumMatch = url.match(/picsum\.photos\/id\/([^/]+)\/\d+\/\d+/)
@@ -38,6 +38,9 @@ function getHighResUrl(url: string, size = 600, tile128Url?: string): string {
   if (url.includes('cloudfront.net') || url.includes('amazonaws.com')) {
     return url
   }
+  // Fallback: use server-side tile proxy for unknown sources (lhq, pixabay, etc.)
+  // The /api/tile/:id endpoint resizes from source_url via sharp
+  if (tileId && tileId > 0) return `/api/tile/${tileId}?size=${size}`
   return url
 }
 
@@ -3573,7 +3576,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
               <button onClick={() => setSelectedImage(null)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
             </div>
             <img
-              src={getHighResUrl(selectedImage.sourceUrl, 600, selectedImage.tile128Url)}
+              src={getHighResUrl(selectedImage.sourceUrl, 600, selectedImage.tile128Url, selectedImage.id)}
               alt=""
               className="w-full aspect-square object-cover rounded-xl mb-4"
               onError={(e) => {
