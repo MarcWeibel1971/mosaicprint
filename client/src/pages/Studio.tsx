@@ -4591,6 +4591,8 @@ export default function Studio() {
       return;
     }
 
+    let cancelled = false;
+    (async () => {
     const params = mosaicParamsRef.current;
     const popContainer = popOutContainerRef.current;
     const canvas = canvasRef.current;
@@ -4637,6 +4639,45 @@ export default function Studio() {
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const numTiles = Math.min(isMob ? 15 : 30, totalCells); // fewer tiles on mobile to save memory
     const tileEls: HTMLCanvasElement[] = [];
+    const tileIds = tileIdsRef.current;
+
+    // Pre-load hi-res images for DB tiles that only have 64px thumbnails.
+    // This prevents blurry pop-out tiles (64px upscaled to 512px canvas).
+    const popOutLoadPromises: Promise<void>[] = [];
+    const popOutHiResCache: Record<number, HTMLImageElement> = {};
+    const popOutLoadedIdxs = new Set<number>();
+
+    for (let t = 0; t < numTiles; t++) {
+      const ci = indices[t];
+      if (!assignment) continue;
+      const tileIdx = assignment[ci];
+      if (popOutLoadedIdxs.has(tileIdx)) continue; // already queued
+      const dbId = tileIds?.[tileIdx];
+      if (!dbId || dbId <= 0) continue; // user tile — already has hi-res
+      const userOriginals = userTileOriginalRef.current;
+      const hiResImgs = validImgsHiResRef.current;
+      const origImg = userOriginals?.[tileIdx >= 0 ? -1 : -(tileIdx + 1)];
+      const hiImg = hiResImgs?.[tileIdx];
+      if ((origImg && origImg.complete && origImg.naturalWidth >= 256) ||
+          (hiImg && hiImg.complete && hiImg.naturalWidth >= 256)) continue; // already sharp enough
+      popOutLoadedIdxs.add(tileIdx);
+      // Need to load hi-res for this DB tile
+      popOutLoadPromises.push(new Promise<void>(resolve => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        const timeout = setTimeout(() => { img.onload = img.onerror = null; resolve(); }, 8000);
+        img.onload = () => { clearTimeout(timeout); if (img.naturalWidth > 0) popOutHiResCache[tileIdx] = img; resolve(); };
+        img.onerror = () => { clearTimeout(timeout); resolve(); };
+        img.src = `/api/tile/${dbId}?size=512&t=${Date.now()}`;
+      }));
+    }
+    // Load all hi-res tiles in parallel (max ~30 tiles × ~50KB = ~1.5MB)
+    if (popOutLoadPromises.length > 0) {
+      console.log(`[PopOut] Loading ${popOutLoadPromises.length} hi-res tiles for sharp pop-out...`);
+      await Promise.all(popOutLoadPromises);
+      if (cancelled) return;
+      console.log(`[PopOut] Loaded ${Object.keys(popOutHiResCache).length} hi-res tiles`);
+    }
 
     for (let t = 0; t < numTiles; t++) {
       const ci = indices[t];
@@ -4650,16 +4691,18 @@ export default function Studio() {
       tCtx.imageSmoothingEnabled = true;
       tCtx.imageSmoothingQuality = 'high';
 
-      // Draw from best available tile image: originals > hi-res > thumbnail > snapshot
+      // Draw from best available tile image: popOutHiRes > originals > hi-res > thumbnail > snapshot
       let drawn = false;
       if (assignment && validImgs) {
         const tileIdx = assignment[ci];
-        // Priority chain: user originals (full-res) > hi-res > thumbnail
+        // Priority chain: pop-out hi-res (freshly loaded 512px) > user originals (full-res) > hi-res > thumbnail
+        const popOutHi = popOutHiResCache[tileIdx];
         const userOriginals = userTileOriginalRef.current;
         const hiResImgs = validImgsHiResRef.current;
         const origImg = userOriginals?.[tileIdx >= 0 ? -1 : -(tileIdx + 1)]; // user tiles have negative IDs
         const hiImg = hiResImgs?.[tileIdx];
-        const bestImg = (origImg && origImg.complete && origImg.naturalWidth > 0) ? origImg
+        const bestImg = (popOutHi && popOutHi.complete && popOutHi.naturalWidth > 0) ? popOutHi
+          : (origImg && origImg.complete && origImg.naturalWidth > 0) ? origImg
           : (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg
           : validImgs[tileIdx];
         if (bestImg && bestImg.complete && bestImg.naturalWidth > 0) {
@@ -4716,6 +4759,8 @@ export default function Studio() {
     });
 
     popOutWaveTlRef.current = tl;
+    })(); // end async IIFE
+    return () => { cancelled = true; };
   }, [popOutMode, ready]);
 
   // Auto-start Hi-Res rendering in background once mosaic is ready
@@ -4885,6 +4930,9 @@ export default function Studio() {
         selectedMaterial,
         selectedTheme,
         tileSourceMode,
+        // Persist slider values so they are restored when loading the project
+        userOverlay,
+        colorEnhance,
       };
       // Save mosaic canvas as data URL
       let thumbnailUrl: string | undefined;
@@ -4943,7 +4991,7 @@ export default function Studio() {
     } finally {
       setSavingProject(false);
     }
-  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders]);
+  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders, userOverlay, colorEnhance]);
 
   // Project restore handler
   const restoreProject = useCallback(() => {
@@ -4961,6 +5009,9 @@ export default function Studio() {
       if (data.assignment) assignmentRef.current = data.assignment;
       if (data.tileIds) tileIdsRef.current = data.tileIds;
       if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+      // Restore slider values (Foto-Overlay & Farbkorrektur)
+      if (data.userOverlay !== undefined) setUserOverlay(data.userOverlay);
+      if (data.colorEnhance !== undefined) { setColorEnhance(data.colorEnhance); colorEnhanceRef.current = data.colorEnhance; }
 
       // Restore mosaic image to canvas
       if (data.mosaicImage && data.mosaicParams) {
@@ -5042,6 +5093,9 @@ export default function Studio() {
           if (data.assignment) assignmentRef.current = data.assignment;
           if (data.tileIds) tileIdsRef.current = data.tileIds;
           if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+          // Restore slider values (Foto-Overlay & Farbkorrektur)
+          if (data.userOverlay !== undefined) setUserOverlay(data.userOverlay);
+          if (data.colorEnhance !== undefined) { setColorEnhance(data.colorEnhance); colorEnhanceRef.current = data.colorEnhance; }
 
           // Restore user tiles from project if available
           const savedTiles = result.project.user_tiles;
