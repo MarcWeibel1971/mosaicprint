@@ -6525,15 +6525,22 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
             <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
               {/* Direct download if R2 URL is stored as download_token */}
               {order.download_token && order.download_token.startsWith('http') && (
-                <a
-                  href={order.download_token}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={() => {
+                    const a = document.createElement('a');
+                    a.href = order.download_token!;
+                    a.download = `mosaicprint-order-${order.id}.jpg`;
+                    a.target = '_blank';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' });
+                  }}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Druckdatei herunterladen
-                </a>
+                </button>
               )}
               {/* Fallback: re-render from params if no direct URL */}
               {order.render_params && order.render_params.tileIds && !order.download_token?.startsWith('http') && (
@@ -6556,13 +6563,8 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 </span>
               )}
 
-              {/* Status buttons */}
-              {order.status === 'pending' && (
-                <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
-                  Als "bestellt" markieren
-                </button>
-              )}
-              {order.status === 'ready' && (
+              {/* Status buttons – forward flow */}
+              {(order.status === 'pending' || order.status === 'ready') && (
                 <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
                   Bei Printolino bestellt ✓
                 </button>
@@ -6575,6 +6577,12 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               {order.status === 'shipped' && (
                 <button onClick={() => updateStatus(order.id, 'completed')} className="px-3 py-1.5 bg-green-100 text-green-700 text-xs font-semibold rounded-lg hover:bg-green-200">
                   Abgeschlossen
+                </button>
+              )}
+              {/* Reset to open – always available */}
+              {order.status !== 'pending' && (
+                <button onClick={() => updateStatus(order.id, 'pending')} className="px-3 py-1.5 bg-gray-100 text-gray-500 text-xs font-semibold rounded-lg hover:bg-gray-200">
+                  ↩ Bestellung offen
                 </button>
               )}
 

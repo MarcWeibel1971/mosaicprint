@@ -3593,8 +3593,8 @@ export const appRouter = router({
         COUNT(*) FILTER (WHERE quality_status = 'rejected' OR ai_suitability = 'reject') AS rejected,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor'
           AND COALESCE(quality_status,'') != 'rejected') AS poor,
-        COUNT(*) FILTER (WHERE id NOT IN (
-          SELECT MIN(id) FROM mosaic_images GROUP BY source_url
+        COUNT(*) FILTER (WHERE source_url IS NOT NULL AND id NOT IN (
+          SELECT MIN(id) FROM mosaic_images WHERE source_url IS NOT NULL GROUP BY source_url
         )) AS url_duplicates,
         COUNT(*) FILTER (WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
           AND tile_type = 'busy'
@@ -3620,8 +3620,25 @@ export const appRouter = router({
     const pixabayHotlinkCount = Number(s.pixabay_hotlink);
     const poorCount = Number(s.poor);
 
+    // Theme distribution (top 15)
+    let themeDistribution: Array<{ theme: string; count: number; pct: number }> = [];
+    try {
+      const themeRes = await pool.query(`
+        SELECT COALESCE(semantic_theme, '(kein Tag)') AS theme, COUNT(*) AS count
+        FROM mosaic_images
+        WHERE quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject'
+        GROUP BY semantic_theme ORDER BY count DESC LIMIT 15
+      `);
+      themeDistribution = themeRes.rows.map(r => ({
+        theme: r.theme,
+        count: Number(r.count),
+        pct: totalActive > 0 ? Math.round((Number(r.count) / totalActive) * 100) : 0,
+      }));
+    } catch { /* ignore theme errors */ }
+
     return {
       totalActive,
+      themeDistribution,
       stage1: {
         rejected: rejectedCount,
         poor: poorCount,
