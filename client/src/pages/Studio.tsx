@@ -173,15 +173,12 @@ async function forceDownloadBlob(blob: Blob, filename: string, mimeType: string)
     });
     if (response.ok) {
       const { token } = await response.json();
-      // Open the server download URL — server sets Content-Disposition: attachment
+      // Navigate directly to the server download URL.
+      // Server sets Content-Disposition: attachment + X-Content-Type-Options: nosniff
+      // Using window.location.href bypasses Adobe Acrobat extension completely
+      // (it only intercepts blob: URLs and synthetic <a> clicks, not real navigations)
       const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
-      const dlLink = document.createElement('a');
-      dlLink.href = downloadUrl;
-      dlLink.download = filename;
-      dlLink.style.display = 'none';
-      document.body.appendChild(dlLink);
-      dlLink.click();
-      setTimeout(() => document.body.removeChild(dlLink), 5000);
+      window.location.href = downloadUrl;
       return;
     }
   } catch (e) {
