@@ -5283,13 +5283,9 @@ export default function Studio() {
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
-        // Force download with proper MIME type (bypasses Chrome PDF viewer)
-        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
-        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
-        setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
-
         setDlProgress(100);
-        // Upload print file to R2 and save URL in project
+        // Upload print file to R2 BEFORE triggering download
+        // (forceDownloadBlob navigates away via window.location.href, killing any code after it)
         if (savedProjectIdRef.current && user) {
           try {
             setDlProgressMsg('Druckdatei wird auf Server gespeichert...');
@@ -5300,17 +5296,23 @@ export default function Studio() {
             });
             const uploadResult = await uploadRes.json();
             if (uploadResult.ok) {
-              setDlProgressMsg('✓ Druckdatei gespeichert – abrufbar unter Projekte');
+              setDlProgressMsg('✓ Druckdatei gespeichert – wird heruntergeladen...');
             } else {
               setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
             }
           } catch (uploadErr) {
             console.warn('[PrintUpload] Failed:', uploadErr);
-            setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wurde lokal heruntergeladen.');
+            setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wird lokal heruntergeladen.');
           }
         } else if (!savedProjectIdRef.current && user) {
           setDlProgressMsg('✓ Download fertig. Tipp: Projekt speichern, um Druckdatei unter Projekte abzurufen.');
         }
+
+        // Force download AFTER R2 upload (navigation via window.location.href kills subsequent code)
+        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
+        setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setDlProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
