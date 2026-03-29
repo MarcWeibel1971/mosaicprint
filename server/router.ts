@@ -2224,17 +2224,28 @@ export const appRouter = router({
     }))
     .query(async ({ input }) => {
       const pool = db.getPool();
+      // Combine import_query and subject fields for more diverse keyword coverage.
+      // Many tiles share the same import_query (e.g. "landscape") but have distinct
+      // subject values that provide better keyword diversity for targeted re-imports.
       const res = await pool.query(`
-        SELECT
-          import_query AS keyword,
-          COUNT(*) AS count,
-          ROUND(AVG(ai_mosaic_score)::numeric, 1) AS avg_score,
-          ROUND(AVG(SQRT(avg_a * avg_a + avg_b * avg_b))::numeric, 1) AS avg_chroma
-        FROM mosaic_images
-        WHERE ai_suitability = 'excellent'
-          AND import_query IS NOT NULL
-          AND import_query != ''
-        GROUP BY import_query
+        SELECT keyword, COUNT(*) AS count,
+          ROUND(AVG(avg_score)::numeric, 1) AS avg_score,
+          ROUND(AVG(avg_chroma)::numeric, 1) AS avg_chroma
+        FROM (
+          SELECT import_query AS keyword, ai_mosaic_score AS avg_score,
+                 SQRT(avg_a * avg_a + avg_b * avg_b) AS avg_chroma
+          FROM mosaic_images
+          WHERE ai_suitability = 'excellent'
+            AND import_query IS NOT NULL AND import_query != ''
+          UNION ALL
+          SELECT subject AS keyword, ai_mosaic_score AS avg_score,
+                 SQRT(avg_a * avg_a + avg_b * avg_b) AS avg_chroma
+          FROM mosaic_images
+          WHERE ai_suitability = 'excellent'
+            AND subject IS NOT NULL AND subject != '' AND subject != 'general'
+            AND (import_query IS NULL OR import_query = '' OR subject != import_query)
+        ) combined
+        GROUP BY keyword
         HAVING COUNT(*) >= $1
         ORDER BY COUNT(*) DESC
         LIMIT $2
@@ -2246,7 +2257,7 @@ export const appRouter = router({
           avgScore: Number(r.avg_score),
           avgChroma: Number(r.avg_chroma),
         })),
-        totalExcellent: await pool.query(`SELECT COUNT(*) FROM mosaic_images WHERE ai_suitability = 'excellent' AND import_query IS NOT NULL`).then(r => Number(r.rows[0].count)),
+        totalExcellent: await pool.query(`SELECT COUNT(*) FROM mosaic_images WHERE ai_suitability = 'excellent'`).then(r => Number(r.rows[0].count)),
       };
     }),
 
