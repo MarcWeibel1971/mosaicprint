@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { useAuth } from '../contexts/AuthContext'
 import { rgbToLab as rgbToLabUtil } from '../lib/colorUtils'
+import { useAuth } from '../contexts/AuthContext'
 // jsPDF loaded dynamically to avoid chunk initialization errors at module load time
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
@@ -329,7 +329,6 @@ interface R2Diagnosis {
   byProvider: Array<{ source_provider: string; total: string; on_r2: string; missing: string }>;
 }
 function R2MigrationPanel() {
-  const { authHeaders } = useAuth();
   const [status, setStatus] = React.useState<R2Status | null>(null);
   const [diagnosis, setDiagnosis] = React.useState<R2Diagnosis | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -337,7 +336,7 @@ function R2MigrationPanel() {
 
   const fetchStatus = async () => {
     try {
-      const r = await fetch('/api/admin/migrate-to-r2/status', { headers: { ...authHeaders() } });
+      const r = await fetch('/api/admin/migrate-to-r2/status', { headers: authHeaders() });
       const d = await r.json();
       setStatus(d);
     } catch { /* ignore */ }
@@ -346,7 +345,7 @@ function R2MigrationPanel() {
   const fetchDiagnosis = async () => {
     setLoadingDiag(true);
     try {
-      const r = await fetch('/api/admin/r2-diagnosis', { headers: { ...authHeaders() } });
+      const r = await fetch('/api/admin/r2-diagnosis', { headers: authHeaders() });
       const d = await r.json();
       setDiagnosis(d);
     } catch { /* ignore */ } finally { setLoadingDiag(false); }
@@ -362,7 +361,7 @@ function R2MigrationPanel() {
   const startMigration = async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/admin/migrate-to-r2', { method: 'POST', headers: { ...authHeaders() } });
+      const r = await fetch('/api/admin/migrate-to-r2', { method: 'POST', headers: authHeaders() });
       const d = await r.json();
       if (d.error) alert('Fehler: ' + d.error);
       else fetchStatus();
@@ -636,7 +635,7 @@ function KeywordGenerator({ onInsertKeywords }: { onInsertKeywords: (kws: string
 
 // ── Main Component ──────────────────────────────────────────────────────────────
 export default function Admin() {
-  const { user, authHeaders } = useAuth();
+  const { authHeaders } = useAuth();
   // Mark admin as visited in localStorage so Studio shows admin-only buttons
   useEffect(() => {
     try { localStorage.setItem('mosaicprint_admin_visited', '1'); } catch {}
@@ -703,8 +702,8 @@ export default function Admin() {
     setLoading(true)
     try {
       const [statsRes, keysRes] = await Promise.all([
-        fetch('/api/trpc/getTileStats', { headers: { ...authHeaders() } }),
-        fetch('/api/trpc/getApiKeyStatus', { headers: { ...authHeaders() } }),
+        fetch('/api/trpc/getTileStats', { headers: authHeaders() }),
+        fetch('/api/trpc/getApiKeyStatus', { headers: authHeaders() }),
       ])
       const statsData = await statsRes.json()
       const keysData = await keysRes.json()
@@ -719,7 +718,7 @@ export default function Admin() {
     if (rebuildPollRef.current) return
     rebuildPollRef.current = setInterval(async () => {
       try {
-        const res = await fetch('/api/trpc/getRebuildStatus', { headers: { ...authHeaders() } })
+        const res = await fetch('/api/trpc/getRebuildStatus', { headers: authHeaders() })
         const data = await res.json()
         const status = data.result?.data ?? data
         setRebuildStatus(status)
@@ -753,7 +752,7 @@ export default function Admin() {
     setRecsLoading(true)
     try {
       const params = encodeURIComponent(JSON.stringify({ limit: 30 }))
-      const res = await fetch(`/api/trpc/getImportRecommendations?input=${params}`, { headers: { ...authHeaders() } })
+      const res = await fetch(`/api/trpc/getImportRecommendations?input=${params}`, { headers: authHeaders() })
       const data = await res.json()
       const result = data.result?.data ?? data
       setRecommendations(result.tasks ?? [])
@@ -776,7 +775,7 @@ export default function Admin() {
     setImportReviewOpen(true)
     try {
       const params = encodeURIComponent(JSON.stringify({ sessionId }))
-      const res = await fetch(`/api/trpc/getImportPreview?input=${params}`, { headers: { ...authHeaders() } })
+      const res = await fetch(`/api/trpc/getImportPreview?input=${params}`, { headers: authHeaders() })
       const data = await res.json()
       const tiles: ImportPreviewTile[] = data.result?.data?.tiles ?? data.result?.data?.json?.tiles ?? []
       setImportReviewTiles(tiles)
@@ -836,7 +835,7 @@ export default function Admin() {
         attempts++
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: analysisImportSourceMain, isAnalysis: true }))
-          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
           const data = await res.json()
           const job = data.result?.data ?? data
           setAnalysisImportJobMain({ running: job.running, log: job.log ?? [], imported: job.imported ?? 0, total: job.total ?? 0, error: job.error, finishedAt: job.finishedAt })
@@ -880,7 +879,7 @@ export default function Admin() {
   const fetchExcellentKeywords = useCallback(async () => {
     setExcellentLoading(true)
     try {
-      const res = await fetch('/api/trpc/getExcellentKeywords?input=' + encodeURIComponent(JSON.stringify({ limit: 50, minCount: 2 })), { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getExcellentKeywords?input=' + encodeURIComponent(JSON.stringify({ limit: 50, minCount: 2 })), { headers: authHeaders() })
       const data = await res.json()
       const result = data?.result?.data ?? data
       setExcellentKeywords(result.keywords ?? [])
@@ -906,7 +905,7 @@ export default function Admin() {
       const pollInterval = setInterval(async () => {
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: excellentImportSource, isAnalysis: true }))
-          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
           const data = await res.json()
           const job = data?.result?.data ?? data
           setExcellentImportJob(prev => ({ ...prev, ...job, log: job.log ?? prev?.log ?? [] }))
@@ -945,7 +944,7 @@ export default function Admin() {
     const interval = setInterval(async () => {
       try {
         const params = encodeURIComponent(JSON.stringify({ sourceId: activeJob }))
-        const res = await fetch(`/api/trpc/getImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+        const res = await fetch(`/api/trpc/getImportStatus?input=${params}`, { headers: authHeaders() })
         const data = await res.json()
         const raw = data.result?.data ?? data
         const job: ImportJob = { log: [], ...raw }
@@ -972,7 +971,7 @@ export default function Admin() {
       const interval = setInterval(async () => {
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: src }))
-          const res = await fetch(`/api/trpc/getImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const res = await fetch(`/api/trpc/getImportStatus?input=${params}`, { headers: authHeaders() })
           const data = await res.json()
           const raw = data.result?.data ?? data
           const job: ImportJob = { log: [], ...raw }
@@ -996,7 +995,7 @@ export default function Admin() {
     const interval = setInterval(async () => {
       try {
         const params = encodeURIComponent(JSON.stringify({ sourceId }))
-        const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+        const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
         const data = await res.json()
         const raw2 = data.result?.data ?? data
         const job: SmartImportJob = { log: [], ...raw2 }
@@ -1027,7 +1026,7 @@ export default function Admin() {
       const interval = setInterval(async () => {
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: src }))
-          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
           const data = await res.json()
           // Handle tRPC error responses (e.g. validation errors)
           if (data.error || data[0]?.error) {
@@ -1239,7 +1238,7 @@ export default function Admin() {
     const pollStart = Date.now()
     const pollInterval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/trpc/getKeywordSession?input=${encodeURIComponent(JSON.stringify({ sessionId }))}`, { headers: { ...authHeaders() } })
+        const res = await fetch(`/api/trpc/getKeywordSession?input=${encodeURIComponent(JSON.stringify({ sessionId }))}`, { headers: authHeaders() })
         const data = await res.json()
         const sess = data.result?.data ?? data
         if (!sess) return
@@ -2197,7 +2196,6 @@ function ImportCard({ title, description, icon, color, available, job, isActive,
 
 // ── Database Browser ──────────────────────────────────────────────────────────
 function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const { authHeaders } = useAuth();
   const [images, setImages] = useState<TileImage[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -2242,7 +2240,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     if (rebuildPollRef.current) return
     rebuildPollRef.current = setInterval(async () => {
       try {
-        const res = await fetch('/api/trpc/getRebuildStatus', { headers: { ...authHeaders() } })
+        const res = await fetch('/api/trpc/getRebuildStatus', { headers: authHeaders() })
         const data = await res.json()
         const status = data.result?.data ?? data
         setRebuildStatus(status)
@@ -2256,7 +2254,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 
   const fetchDbStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/trpc/getDbStats', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getDbStats', { headers: authHeaders() })
       const data = await res.json()
       setDbStats(data.result?.data?.json ?? data.result?.data ?? data)
     } catch { /* ignore */ }
@@ -2298,7 +2296,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (qualityStatusFilter !== 'alle') params.qualityStatus = qualityStatusFilter
       if (tileTypeFilter !== 'alle') params.tileType = tileTypeFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
-      const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`, { headers: { ...authHeaders() } })
+      const res = await fetch(`/api/trpc/getAdminImagesFiltered?input=${encoded}`, { headers: authHeaders() })
       const data = await res.json()
       const parsed = data.result?.data ?? data
       setImages(parsed.images ?? [])
@@ -2306,14 +2304,14 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     } catch {
       onMessage({ text: 'Fehler beim Laden der Bilder', type: 'error' })
     } finally { setLoading(false) }
-  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, geminiFilter, importedSince, qualityStatusFilter, tileTypeFilter, onMessage])
+  }, [sourceFilter, colorFilter, brightnessFilter, warmCoolFilter, saturationFilter, geminiFilter, importedSince, qualityStatusFilter, tileTypeFilter, onMessage, authHeaders])
 
   const runDedup = useCallback(async () => {
     if (!confirm('Duplikate aus der Datenbank entfernen? Jede source_url wird nur einmal behalten (niedrigste ID). Dieser Vorgang kann nicht rückgängig gemacht werden.')) return
     setDedupLoading(true)
     setDedupResult(null)
     try {
-      const res = await fetch('/api/admin/dedup-tiles', { method: 'POST', headers: { ...authHeaders() } })
+      const res = await fetch('/api/admin/dedup-tiles', { method: 'POST', headers: authHeaders() })
       const data = await res.json()
       if (data.ok) {
         setDedupResult(`✅ ${data.message}`)
@@ -2335,7 +2333,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     setConstraintLoading(true)
     setConstraintResult(null)
     try {
-      const res = await fetch('/api/admin/add-unique-constraint', { method: 'POST', headers: { ...authHeaders() } })
+      const res = await fetch('/api/admin/add-unique-constraint', { method: 'POST', headers: authHeaders() })
       const data = await res.json()
       if (data.ok) {
         setConstraintResult(`✅ ${data.message}`)
@@ -2354,7 +2352,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
     setShutterstockLoading(true)
     setShutterstockResult(null)
     try {
-      const res = await fetch('/api/admin/remove-shutterstock', { method: 'POST', headers: { ...authHeaders() } })
+      const res = await fetch('/api/admin/remove-shutterstock', { method: 'POST', headers: authHeaders() })
       const data = await res.json()
       if (data.ok) {
         setShutterstockResult(`✅ ${data.message}`)
@@ -2414,7 +2412,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
         attempts++
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: 'pexels', isAnalysis: false }))
-          const statusRes = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const statusRes = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
           const statusData = await statusRes.json()
           const job = statusData.result?.data ?? statusData
           setPoolImportProgress(prev => ({
@@ -2504,7 +2502,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
       if (colorFilter !== 'alle') params.colorFilter = colorFilter
       if (brightnessFilter !== 'alle') params.brightnessFilter = brightnessFilter
       const encoded = encodeURIComponent(JSON.stringify(params))
-      const res = await fetch(`/api/trpc/getAllTilesForPdf?input=${encoded}`, { headers: { ...authHeaders() } })
+      const res = await fetch(`/api/trpc/getAllTilesForPdf?input=${encoded}`, { headers: authHeaders() })
       const data = await res.json()
       const parsed = data.result?.data ?? data
       const allImages: TileImage[] = parsed.images ?? []
@@ -2525,7 +2523,7 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
           try {
             const controller = new AbortController()
             const timeout = setTimeout(() => controller.abort(), 8000)
-            const imgRes = await fetch(`/api/tile/${img.id}?size=64`, { signal: controller.signal, headers: { ...authHeaders() } })
+            const imgRes = await fetch(`/api/tile/${img.id}?size=64`, { headers: authHeaders(), signal: controller.signal })
             clearTimeout(timeout)
             if (!imgRes.ok) return
             const blob = await imgRes.blob()
@@ -3708,7 +3706,6 @@ function DatabaseBrowser({ onMessage }: { onMessage: (m: { text: string; type: '
 // ── Algorithm Settings ────────────────────────────────────────────────────────
 // ── Category Profiles Panel ─────────────────────────────────────────────────
 function CategoryProfilesPanel() {
-  const { authHeaders } = useAuth();
   const [categories, setCategories] = useState<Array<{
     name: string; label: string; parent_category: string;
     keywords: string[]; algo_settings: Record<string, unknown>;
@@ -3721,7 +3718,7 @@ function CategoryProfilesPanel() {
   const loadCategories = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/trpc/getImageCategories', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getImageCategories', { headers: authHeaders() })
       const data = await res.json()
       const cats = data?.result?.data?.json ?? data?.result?.data ?? []
       setCategories(cats.filter((c: {algo_settings: Record<string,unknown>}) =>
@@ -3834,7 +3831,6 @@ function ProfilePopup({ profile, onClose, onApply }: {
   onClose: () => void
   onApply: (settings: Partial<AlgoSettings>) => void
 }) {
-  const { authHeaders } = useAuth();
   const [editedSettings, setEditedSettings] = useState<Partial<AlgoSettings>>({ ...profile.settings })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -4523,7 +4519,6 @@ function LastMosaicQualityPanel() {
 // ── Quality Assurance Tab ─────────────────────────────────────────────────────
 // (QaRun, QaItem interfaces and QA_CHECKS const are declared above Admin component to avoid TDZ)
 function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const { authHeaders } = useAuth();
   const [runs, setRuns] = useState<QaRun[]>([])
   const [runningChecks, setRunningChecks] = useState<Set<string>>(new Set())
   const [selectedRun, setSelectedRun] = useState<number | null>(null)
@@ -4533,7 +4528,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
 
   const fetchRuns = useCallback(async () => {
     try {
-      const res = await fetch('/api/trpc/getQualityRuns?input=' + encodeURIComponent(JSON.stringify({ limit: 50 })), { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getQualityRuns?input=' + encodeURIComponent(JSON.stringify({ limit: 50 })), { headers: authHeaders() })
       const data = await res.json()
       const rows: QaRun[] = data.result?.data?.json ?? data.result?.data ?? []
       setRuns(rows)
@@ -4560,7 +4555,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const fetchItems = useCallback(async (runId: number) => {
     setLoadingItems(true)
     try {
-      const res = await fetch('/api/trpc/getQualityRunItems?input=' + encodeURIComponent(JSON.stringify({ runId })), { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getQualityRunItems?input=' + encodeURIComponent(JSON.stringify({ runId })), { headers: authHeaders() })
       const data = await res.json()
       setRunItems(data.result?.data?.json ?? data.result?.data ?? [])
     } catch { /* ignore */ }
@@ -4626,7 +4621,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   const [autoLearnRunsExpanded, setAutoLearnRunsExpanded] = useState(false)
   const fetchAutoLearnRuns = useCallback(async () => {
     try {
-      const res = await fetch('/api/trpc/getAutoLearnRuns', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getAutoLearnRuns', { headers: authHeaders() })
       const data = await res.json()
       const rows = data.result?.data?.json ?? data.result?.data ?? []
       if (Array.isArray(rows)) setAutoLearnRuns(rows)
@@ -4649,7 +4644,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       // Poll status
       const poll = setInterval(async () => {
         try {
-          const r2 = await fetch('/api/trpc/getAutoLearnRun?input=' + encodeURIComponent(JSON.stringify({ runId })), { headers: { ...authHeaders() } })
+          const r2 = await fetch('/api/trpc/getAutoLearnRun?input=' + encodeURIComponent(JSON.stringify({ runId })), { headers: authHeaders() })
           const d2 = await r2.json()
           const run = d2.result?.data?.json ?? d2.result?.data
           if (!run) return
@@ -4693,7 +4688,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
   // Load categories from DB
   const fetchCategories = useCallback(async () => {
     try {
-      const res = await fetch('/api/trpc/getImageCategories', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getImageCategories', { headers: authHeaders() })
       const data = await res.json()
       const result = data.result?.data?.json ?? data.result?.data ?? data
       if (Array.isArray(result)) setCategories(result)
@@ -4771,7 +4766,7 @@ function QualityAssurance({ onMessage }: { onMessage: (m: { text: string; type: 
       const poll = async () => {
         try {
           const params = encodeURIComponent(JSON.stringify({ sourceId: analysisImportSource, isAnalysis: true }))
-          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: { ...authHeaders() } })
+          const res = await fetch(`/api/trpc/getSmartImportStatus?input=${params}`, { headers: authHeaders() })
           const data = await res.json()
           const job = data.result?.data?.json ?? data.result?.data ?? data
           setAnalysisImportJob({ running: job.running, log: job.log ?? [], imported: job.imported ?? 0, total: job.total ?? 0, error: job.error, finishedAt: job.finishedAt })
@@ -5770,7 +5765,6 @@ interface CleanupCandidates {
 }
 
 function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const { authHeaders } = useAuth();
   const [expanded, setExpanded] = useState(false)
   const [candidates, setCandidates] = useState<CleanupCandidates | null>(null)
   const [loadingCandidates, setLoadingCandidates] = useState(false)
@@ -5784,7 +5778,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
   const fetchCandidates = useCallback(async () => {
     setLoadingCandidates(true)
     try {
-      const res = await fetch('/api/trpc/getCleanupCandidates', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getCleanupCandidates', { headers: authHeaders() })
       const data = await res.json()
       setCandidates(data.result?.data?.json ?? data.result?.data ?? null)
     } catch { /* ignore */ }
@@ -5799,7 +5793,7 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
     setSelectedIds(new Set())
     setLoadingPreview(true)
     try {
-      const res = await fetch('/api/trpc/getCleanupPreview?input=' + encodeURIComponent(JSON.stringify({ category: cat, limit: 100 })), { headers: { ...authHeaders() } })
+      const res = await fetch('/api/trpc/getCleanupPreview?input=' + encodeURIComponent(JSON.stringify({ category: cat, limit: 100 })), { headers: authHeaders() })
       const data = await res.json()
       // tRPC v11 kann Daten in verschiedenen Strukturen zurückgeben
       const raw = data.result?.data?.json ?? data.result?.data ?? data
@@ -6123,7 +6117,6 @@ function CleanupAssistant({ onMessage }: { onMessage: (m: { text: string; type: 
 
 // ── KI-Bildanalyse Panel (Gemini Vision Batch) ───────────────────────────
 function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const { authHeaders } = useAuth();
   const [open, setOpen] = useState(true)
   const [running, setRunning] = useState(false)
   const [batchSize, setBatchSize] = useState(100)
@@ -6134,7 +6127,7 @@ function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: '
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/admin/ai-analyze-stats', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/admin/ai-analyze-stats', { headers: authHeaders() })
       const data = await res.json()
       if (data.ok) setStats(data.stats)
     } catch { /* ignore */ }
@@ -6145,7 +6138,7 @@ function AiAnalysisPanel({ onMessage }: { onMessage: (m: { text: string; type: '
   const pollJobStatus = (intervalRef: { id: ReturnType<typeof setInterval> | null }) => {
     intervalRef.id = setInterval(async () => {
       try {
-        const res = await fetch('/api/admin/ai-analyze-job-status', { headers: { ...authHeaders() } })
+        const res = await fetch('/api/admin/ai-analyze-job-status', { headers: authHeaders() })
         const data = await res.json()
         const state = data.state
         if (state) {
@@ -6336,7 +6329,6 @@ interface OrderItem {
 }
 
 function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
-  const { authHeaders } = useAuth();
   const [orders, setOrders] = useState<OrderItem[]>([])
   const [loading, setLoading] = useState(true)
   const [renderingId, setRenderingId] = useState<number | null>(null)
@@ -6346,7 +6338,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const fetchOrders = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/admin/orders', { headers: { ...authHeaders() } })
+      const res = await fetch('/api/admin/orders', { headers: authHeaders() })
       const data = await res.json()
       if (data.ok) setOrders(data.orders ?? [])
     } catch {

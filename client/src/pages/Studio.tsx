@@ -156,6 +156,53 @@ async function pollForResult(
 }
 
 /**
+ * Force-download a Blob as a file, bypassing Chrome's PDF viewer interception.
+ * Chrome + Adobe Acrobat extension can intercept blob: URLs and open them as PDF.
+ * This helper uses multiple strategies to ensure the file is saved correctly.
+ */
+async function forceDownloadBlob(blob: Blob, filename: string, mimeType: string) {
+  // Strategy 1: Upload blob to server, then open /api/print-download/:token
+  // This is the most reliable method: server sends Content-Disposition: attachment
+  // which Chrome always treats as a download, bypassing Adobe Acrobat extension
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const response = await fetch('/api/temp-blob', {
+      method: 'POST',
+      headers: { 'Content-Type': mimeType },
+      body: arrayBuffer,
+    });
+    if (response.ok) {
+      const { token } = await response.json();
+      // Open the server download URL — server sets Content-Disposition: attachment
+      const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
+      const dlLink = document.createElement('a');
+      dlLink.href = downloadUrl;
+      dlLink.download = filename;
+      dlLink.style.display = 'none';
+      document.body.appendChild(dlLink);
+      dlLink.click();
+      setTimeout(() => document.body.removeChild(dlLink), 5000);
+      return;
+    }
+  } catch (e) {
+    console.warn('[forceDownloadBlob] Server upload failed, falling back to blob URL:', e);
+  }
+  
+  // Fallback: direct blob URL download
+  const typedBlob = new Blob([blob], { type: mimeType });
+  const url = URL.createObjectURL(typedBlob);
+  const dlLink = document.createElement('a');
+  dlLink.href = url;
+  dlLink.download = filename;
+  dlLink.type = mimeType;
+  dlLink.style.display = 'none';
+  dlLink.rel = 'noopener';
+  document.body.appendChild(dlLink);
+  dlLink.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 15000);
+}
+
+/**
  * Client-side mosaic print rendering.
  * Renders the mosaic at high resolution using already-loaded tile images,
  * applies contrast + soft-light overlay, and returns a downloadable Blob.
@@ -441,19 +488,51 @@ async function renderMosaicClientSide(opts: {
         bCtx.putImageData(outImageData, 0, 0);
         ctx.drawImage(bCanvas, x, y, actualTile, actualTile);
       } catch {
-        // Fallback: fill with target pixel color
-        ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
-        ctx.fillRect(x, y, actualTile, actualTile);
+        // Fallback: use snapshot canvas if available, otherwise fill with target color
+        let usedSnap = false;
+        if (snapCtx && snapshot && snapshot.width > 0 && snapshot.height > 0) {
+          try {
+            const snapTW = snapshot.width / cols;
+            const snapTH = snapshot.height / rows;
+            ctx.drawImage(snapCanvas, col * snapTW, row * snapTH, snapTW, snapTH, x, y, actualTile, actualTile);
+            usedSnap = true;
+          } catch { /* fall through */ }
+        }
+        if (!usedSnap) {
+          ctx.fillStyle = `rgb(${tR},${tG},${tBv})`;
+          ctx.fillRect(x, y, actualTile, actualTile);
+        }
         if (process.env.NODE_ENV !== 'production') {
-          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} LAB transfer failed, using target color`);
+          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} LAB transfer failed, using ${usedSnap ? 'snapshot' : 'target color'}`);
         }
       }
     } else {
-      // Fallback: use target color
-      ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
-      ctx.fillRect(x, y, actualTile, actualTile);
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
+      // Fallback: use snapshot canvas (preview quality) instead of flat target color
+      // This prevents visible bright/flat patches in the print output
+      let usedSnapshot = false;
+      if (snapCtx && snapshot && snapshot.width > 0 && snapshot.height > 0) {
+        try {
+          // Map print tile position to snapshot coordinates
+          const snapTileW = snapshot.width / cols;
+          const snapTileH = snapshot.height / rows;
+          const sx = col * snapTileW;
+          const sy = row * snapTileH;
+          // Draw the snapshot region scaled up to the print tile size
+          ctx.drawImage(snapCanvas, sx, sy, snapTileW, snapTileH, x, y, actualTile, actualTile);
+          usedSnapshot = true;
+          if (process.env.NODE_ENV !== 'production') {
+            console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} missing, used snapshot fallback`);
+          }
+        } catch {
+          // Snapshot extraction failed, fall through to target color
+        }
+      }
+      if (!usedSnapshot) {
+        ctx.fillStyle = tc.length > tci+2 ? `rgb(${tR},${tG},${tBv})` : '#888';
+        ctx.fillRect(x, y, actualTile, actualTile);
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn(`[PrintRender] Tile ci=${ci} idx=${idx} not drawn, using target color`);
+        }
       }
     }
     if (ci % 200 === 0) { onProgress?.(15 + Math.round((ci/total)*55), `Tiles: ${ci}/${total}`); await new Promise(r => setTimeout(r, 0)); }
@@ -3582,9 +3661,21 @@ export default function Studio() {
                baseDist += Math.min(500, Math.abs(mf.lab[1]) * Math.abs(mf.lab[2]) * 3); // penalize cool-toned tiles
              }
            } else {
-             // Very bright target (white hair/beard): only penalize DARK cool tiles (they look wrong)
+             // Very bright target (white hair/beard): penalize ALL blue/cool tiles
+             // White hair (L>75) needs neutral/warm tiles – blue pool tiles (water, sky) look wrong
+             // Tier 1: Any tile with b < -3 (slightly blue) gets moderate penalty
+             if (mf.lab[2] < -3) {
+               const blueStrength = -3 - mf.lab[2]; // how blue the tile is
+               const brightFactor = Math.min(1.0, (tf.brightness - 75) / 15); // ramp up with target brightness
+               baseDist += Math.min(800, blueStrength * 40 * (0.5 + brightFactor * 0.5));
+             }
+             // Tier 2: Dark blue tiles (L<60) get extra penalty (they look terrible in white hair)
              if (mf.lab[2] < -5 && mf.lab[0] < 60) {
-               baseDist += Math.min(400, (-mf.lab[2] - 5) * 25); // mild penalty for dark blue in bright areas
+               baseDist += Math.min(600, (-mf.lab[2] - 5) * 35);
+             }
+             // Tier 3: High-saturation cool tiles (saturated blue/teal) in white hair
+             if (tileSatC > 20 && mf.lab[2] < 0) {
+               baseDist += Math.min(500, tileSatC * (-mf.lab[2]) * 2);
              }
            }
            // Subject-Penalty: non-warm, non-neutral colorful tiles in skin areas
@@ -3906,10 +3997,18 @@ export default function Studio() {
               const neutralYellowPenalty = (tileB2 - 12) * brightnessScale * 45;
               baseDist += neutralYellowPenalty;
             }
-            if (tileB2 < -12) {
-              // Target is neutral but tile is blue -> also penalize (prevents blue flecks in white areas)
-              const neutralBluePenalty = (-tileB2 - 12) * brightnessScale * 35;
-              baseDist += neutralBluePenalty;
+            if (tileB2 < -5) {
+              // Target is neutral but tile is blue -> penalize (prevents blue flecks in white hair/walls)
+              // Threshold lowered from -12 to -5: tiles with b=-6 to -11 were slipping through
+              // Factor increased for bright targets (white hair has brightness > 70)
+              // brightBoost: 2.5 → 5.0 for L>70, 3.0 for L>60 (white/gray hair outside face mesh)
+              const brightBoost = tf.brightness > 75 ? 5.0 : (tf.brightness > 70 ? 3.5 : (tf.brightness > 60 ? 2.0 : 1.0));
+              const neutralBluePenalty = (-tileB2 - 5) * brightnessScale * 55 * brightBoost;
+              baseDist += Math.min(2500, neutralBluePenalty);
+            }
+            // Extra: very blue tiles (b < -12) in ANY bright neutral area get a hard cap penalty
+            if (tileB2 < -12 && tf.brightness > 55) {
+              baseDist += Math.min(1500, (-tileB2 - 12) * 80 * brightnessScale);
             }
           }
           // MIX MODE: User tile preference bonus (user photos should appear prominently)
@@ -5155,13 +5254,9 @@ export default function Studio() {
             onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
           });
 
-          // Re-wrap blob with explicit MIME type to prevent Edge from showing PDF icon
+          // Force download with proper MIME type (bypasses Chrome PDF viewer)
           const jpgBlob1 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
-          const printUrl = URL.createObjectURL(jpgBlob1);
-          const dlLink = document.createElement('a');
-          dlLink.href = printUrl; dlLink.download = printFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
-          document.body.appendChild(dlLink); dlLink.click();
-          setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
+          forceDownloadBlob(jpgBlob1, printFilename, 'image/jpeg');
           setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob1.size / 1024 / 1024).toFixed(1)} MB)`);
           setDlProgress(100);
         } catch (e) {
@@ -5191,14 +5286,11 @@ export default function Studio() {
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
-        // Re-wrap blob with explicit MIME type to prevent Edge from showing PDF icon
+        // Force download with proper MIME type (bypasses Chrome PDF viewer)
         const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
-        const printUrl = URL.createObjectURL(jpgBlob2);
-        const dlLink = document.createElement('a');
-        dlLink.href = printUrl; dlLink.download = printFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
-        document.body.appendChild(dlLink); dlLink.click();
-        setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(printUrl); }, 10000);
+        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
         setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+
         setDlProgress(100);
         // Upload print file to R2 and save URL in project
         if (savedProjectIdRef.current && user) {
@@ -5316,14 +5408,8 @@ export default function Studio() {
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
-
       const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
-      const blob3 = new Blob([await blob.arrayBuffer()], { type: mimeType3 });
-      const url = URL.createObjectURL(blob3);
-      const dlLink = document.createElement('a');
-      dlLink.href = url; dlLink.download = filename; dlLink.type = mimeType3; dlLink.style.display = 'none';
-      document.body.appendChild(dlLink); dlLink.click();
-      setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(url); }, 10000);
+      forceDownloadBlob(blob, filename, mimeType3);
       setDlProgressMsg(`✓ Download: ${filename} (${(blob3.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
@@ -5362,13 +5448,7 @@ export default function Studio() {
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
-
-      const adminBlob2 = new Blob([await adminBlob.arrayBuffer()], { type: 'image/jpeg' });
-      const adminUrl = URL.createObjectURL(adminBlob2);
-      const dlLink = document.createElement('a');
-      dlLink.href = adminUrl; dlLink.download = adminFilename; dlLink.type = 'image/jpeg'; dlLink.style.display = 'none';
-      document.body.appendChild(dlLink); dlLink.click();
-      setTimeout(() => { document.body.removeChild(dlLink); URL.revokeObjectURL(adminUrl); }, 10000);
+      forceDownloadBlob(adminBlob, adminFilename, 'image/jpeg');
       setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e) {

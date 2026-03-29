@@ -1824,6 +1824,27 @@ app.get('/api/print-download/:token', (req, res) => {
   stream.pipe(res);
 });
 
+// POST /api/temp-blob – receive a client-rendered image blob, store it temporarily, return a download token
+// Client uploads the rendered canvas blob here, then opens /api/print-download/:token to force a real download
+// This completely bypasses Chrome's blob: URL handling and Adobe Acrobat extension interception
+app.post('/api/temp-blob', express.raw({ type: ['image/jpeg', 'image/png'], limit: '500mb' }), (req, res) => {
+  try {
+    const contentType = req.headers['content-type'] || 'image/jpeg';
+    const ext = contentType === 'image/png' ? 'png' : 'jpg';
+    const token = `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const tmpDir = '/tmp/mosaicprint-downloads';
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, `${token}.${ext}`);
+    fs.writeFileSync(tmpFile, req.body as Buffer);
+    // Auto-delete after 10 minutes
+    setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch {} }, 10 * 60 * 1000);
+    res.json({ token });
+  } catch (err) {
+    console.error('[temp-blob] Error:', err);
+    res.status(500).json({ error: 'Failed to store blob' });
+  }
+});
+
 // ── Debug Endpoint ──────────────────────────────────────────────────────────
 
 // POST /api/debug/print-render-test – render a tiny 2x2 mosaic and return debug info
