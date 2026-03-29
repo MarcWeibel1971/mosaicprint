@@ -1058,13 +1058,17 @@ export default function Studio() {
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
     // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
-    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
-    const maxCanvasDim = isMob ? 8192 : 16000;
+    // Desktop: cap at 80MP to keep toBlob() fast (< 5s). At 120×90 tiles:
+    //   128px → 176.9MP (too slow), 96px → 99.5MP (borderline), 80px → 69.1MP (fast)
+    // Mobile: cap at 50MP
+    const maxCanvasArea = isMob ? 50_000_000 : 80_000_000;
+    const maxCanvasDim = isMob ? 8192 : 12000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
+    // Desktop ideal: 96px (sharp but not too large). Mobile: 256px (chunked)
+    const idealDesktopTile = 96;
     const idealMobileTile = 256;
-    const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
+    const HR_TILE = Math.min(isMob ? idealMobileTile : idealDesktopTile, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
     console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, canvas=${hrW}×${hrH} (${(hrW*hrH/1e6).toFixed(1)}MP, mobile=${isMob})`);
