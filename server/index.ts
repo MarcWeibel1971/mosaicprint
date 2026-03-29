@@ -109,13 +109,17 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     try {
       const pool = db.getPool();
       const result = await pool.query(
-        "SELECT source_url, tile128_url, r2_url FROM mosaic_images WHERE id = $1",
+        "SELECT source_url, tile128_url, r2_url, tile256_url FROM mosaic_images WHERE id = $1",
         [id]
       );
       if (!result.rows[0]) return null;
       const row = result.rows[0];
       const effectiveTile128 = row.r2_url || row.tile128_url || '';
-      const effectiveSource = row.source_url || row.r2_url || '';
+      // For source_url: skip custom protocols (lhq://, etc.) that aren't fetchable URLs.
+      // Fall back to tile256_url or r2_url for higher resolution.
+      const rawSource = row.source_url || '';
+      const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://') || rawSource.startsWith('data:');
+      const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || rawSource);
       tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
     } catch { return null; }
