@@ -2611,7 +2611,7 @@ export default function Studio() {
       // - Desktop: 5000 tiles (avoids Railway/Fastly 429 when loading 17k+ tiles individually)
       // Strategy: keep tiles that appear in the TOP-3 candidates for the most cells
       // This preserves quality (best matches kept) while reducing memory footprint
-      const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 800;
+      const MOBILE_MAX_TILES = savedSettings.mobileMaxTiles ?? 1200;
       const DESKTOP_MAX_TILES = 5000;
       const MAX_TILES = isMobileOrSlow ? MOBILE_MAX_TILES : DESKTOP_MAX_TILES;
       if (neededTileIds.size > MAX_TILES) {
@@ -3492,13 +3492,30 @@ export default function Studio() {
         let baseDist: number;
         // Face region scoring
         if (inFace && isSmallPool) {
-          // ── SMALL POOL FACE: Pure SSD + light green/blue guard ──────────────────
-          // SSD captures everything. Only keep minimal color-direction guards for
-          // face regions (prevents obviously wrong green/blue tiles on skin).
+          // ── SMALL POOL FACE: SSD + strong warm-tone enforcement ──────────────────
+          // SSD captures pixel-level similarity, but small pools often lack warm tiles.
+          // Strong color-direction guards ensure no blue/green tiles in face/skin areas.
           baseDist = ssdScore * 100;
-          // Light green/blue guard: only for clearly wrong colors (not threshold-sensitive)
-          if (mf.lab[1] < -3) baseDist += Math.min(80, (-mf.lab[1] - (-3)) * 8); // green guard
-          if (mf.lab[2] < 2) baseDist += Math.min(80, (2 - mf.lab[2]) * 6); // cool/blue guard (verschärft von b<-5)
+          // Skin-tone detection for target cell
+          const spIsTargetSkin = tf.lab[0] >= 35 && tf.lab[0] <= 85 && tf.lab[1] >= 2 && tf.lab[2] >= 5;
+          // Green guard: green tiles (a < -3) are wrong in face areas
+          if (mf.lab[1] < -3) {
+            const spGreenPen = spIsTargetSkin ? 40 : 20;
+            baseDist += Math.min(500, (-mf.lab[1] - (-3)) * spGreenPen);
+          }
+          // Blue/cool guard: cool tiles (b < 5) are wrong in warm skin areas
+          if (mf.lab[2] < 5) {
+            const spBluePen = spIsTargetSkin ? 30 : 15;
+            baseDist += Math.min(500, (5 - mf.lab[2]) * spBluePen);
+          }
+          // Warm-cool gap: if target is warm (b>8) and tile is cool (b<8), penalize
+          if (spIsTargetSkin && tf.lab[2] > 8 && mf.lab[2] < 8) {
+            baseDist += Math.min(400, (tf.lab[2] - 8) * (8 - mf.lab[2]) * 5);
+          }
+          // Brightness consistency in face: penalize large brightness differences
+          if (Math.abs(tf.brightness - mf.brightness) > 20) {
+            baseDist += (Math.abs(tf.brightness - mf.brightness) - 20) * 3;
+          }
           baseDist += neighborPenalty * 0.3 + reusePenalty * 0.2;
         } else if (inFace) {
           // Per-subregion weight multipliers (MediaPipe Face Mesh)
@@ -3668,10 +3685,13 @@ export default function Studio() {
           if (tA < 2 && mA > 8) {
             baseDist += Math.min(400, (mA - 8) * (-tA + 3) * 5);
           }
-          // WARM TARGET (b > 5, a > 0): penalize cool/blue tiles
-          // Verschärft: mB < 2 statt mB < -5 (leicht kühle Tiles erzeugen Blaustich in warmen Bereichen)
-          if (tB > 5 && mB < 2) {
-            baseDist += Math.min(500, (tB - 5) * (2 - mB) * 3);
+          // WARM TARGET (b > 5): penalize cool/blue tiles in warm areas
+          // Verschärft: mB < 5 (leicht kühle Tiles b=1-4 sehen gegen gelben Hintergrund b=25 deutlich bläulich aus)
+          // Cap 1200 (war 500) – verhindert dass guter SSD-Score die Penalty überschreibt
+          if (tB > 5 && mB < 5) {
+            const warmGap = tB - 5;
+            const coolGap = 5 - mB;
+            baseDist += Math.min(1200, warmGap * coolGap * 5);
           }
 
           // SKIN-TONE ENFORCEMENT (non-face regions like ears, neck, arms)
@@ -3723,14 +3743,22 @@ export default function Studio() {
             if (tB < -15 && mB > 0) baseDist += Math.min(400, mB * (-tB / 15) * 8);
             // Green target (a<-15): penalize red tiles (a>0)
             if (tA < -15 && mA > 0) baseDist += Math.min(400, mA * (-tA / 15) * 8);
-            // Yellow target (b>15): penalize blue tiles (b<0)
-            if (tB > 15 && mB < 0) baseDist += Math.min(400, (-mB) * (tB / 15) * 8);
+            // Yellow target (b>15): penalize cool/blue tiles (b<5)
+            // Verschärft: mB<5 statt mB<0 (leicht kühle Tiles b=0-4 wirken bläulich gegen gelb)
+            // Cap 800 (war 400) – verhindert Überschreibung durch SSD
+            if (tB > 15 && mB < 5) baseDist += Math.min(800, (5 - mB) * (tB / 15) * 12);
           } else if (targetSatC > 15 && tileSatC < 10) {
             baseDist += (10 - tileSatC) / 10 * 4 * 100; // x4: strongly push gray tiles away from colored areas
           } else if (targetSatC > 10 && tileSatC < 18 && tf.lab[1] > 2) {
             // Softer penalty for slightly gray tiles in warm/colored areas
             baseDist += (18 - tileSatC) / 18 * 2 * 100; // x2 soft penalty
           }
+          // YELLOW AREA: prevent cool/blue tiles in strongly yellow targets (b>20)
+          // Gelbe T-Shirts/Kleidung: Jeder Tile mit b < 8 bekommt harte Strafe
+          if (tB > 20 && mB < 8) {
+            baseDist += Math.min(1500, (8 - mB) * (tB - 20) * 8);
+          }
+
           // YELLOW TILE PENALTY: overly yellow tile (LAB b > 28) in skin/warm area (a > 3, b < 25)
           // Prevents bright yellow sunset tiles from appearing in skin-tone face areas
           const tileB = mf.lab[2];    // LAB b channel: positive = yellow
@@ -4461,10 +4489,10 @@ export default function Studio() {
     const popScale = Math.max(3, targetZoomedPx / cssTileW);
 
     // Hi-res canvas resolution: must be large enough to look sharp at ~150px CSS display
-    // Use at least 512px so the zoomed tile is crisp even on retina screens
-    // MOBILE: 256px is enough for ~150px display, and saves memory (30 canvases)
-    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
-    const canvasResPx = isMob ? 256 : 512;
+    // Use 512px for all devices so the zoomed tile is crisp even on retina screens
+    // 15 tiles × 512×512×4 bytes = 15 MB → unbedenklich auch auf Mobile
+    // iPhone 3× DPR: 512px auf ~150px CSS = 3.4× → Retina-scharf
+    const canvasResPx = 512;
 
     // Create snapshot fallback canvas
     const snapshot = snapshotRef.current;
