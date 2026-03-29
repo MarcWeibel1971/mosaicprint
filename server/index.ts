@@ -441,12 +441,22 @@ app.get("/api/tile-urls", async (req, res) => {
       `SELECT id, tile128_url, source_url, r2_url FROM mosaic_images WHERE id = ANY($1)`,
       [ids]
     );
+    const isHttp = (url: string | null) => !!url && (url.startsWith('https://') || url.startsWith('http://'));
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
       if (wantHiRes) {
-        // For hi-res/print: prefer original source_url (full resolution from Pexels/Unsplash ~940px)
-        // R2 only stores 128px thumbnails - source_url gives much better zoom quality
-        urlMap[row.id] = row.source_url || row.r2_url || row.tile128_url || '';
+        // For hi-res zoom: prefer source_url (full ~940px from Pexels/Unsplash)
+        // SKIP non-HTTP protocols (lhq://, etc.) – browser can't load them.
+        // Fall back to r2_url (128px but loadable) or tile128_url.
+        // If nothing is loadable, omit entry → client uses /api/tile/:id proxy.
+        if (isHttp(row.source_url)) {
+          urlMap[row.id] = row.source_url;
+        } else if (isHttp(row.r2_url)) {
+          urlMap[row.id] = row.r2_url;
+        } else if (isHttp(row.tile128_url)) {
+          urlMap[row.id] = row.tile128_url;
+        }
+        // else: omit – client falls back to /api/tile/:id which handles lhq:// via server-side proxy
       } else if (row.r2_url) {
         // For screen preview: R2 URL is permanent and fast (128px thumbnail)
         urlMap[row.id] = row.r2_url;
