@@ -5500,25 +5500,25 @@ export default function Studio() {
   const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
   const handlePrintolinoOrder = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
-    const digFmt = DIGITAL_FORMATS[selectedDigitalFormat]; // use same format as digital download
     const { cols, rows } = mosaicParamsRef.current;
-
-    // Calculate tilePx using same logic as handleDigitalDownload
+    // 1 tile = 1 cm @ 400 DPI → tilePx = 1 cm × (400/2.54) ≈ 157 px
+    // This gives cols cm × rows cm poster size (e.g. 120×90 cm for 120×90 tiles)
+    const TILE_PX_400DPI = 157;
     const SERVER_MAX_DIM = 16000;
-    let PRINT_TILE_PX = Math.min(Math.max(digFmt.tilePx, 32), 256);
+    let PRINT_TILE_PX = TILE_PX_400DPI;
     if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
       PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
       PRINT_TILE_PX = Math.max(32, PRINT_TILE_PX);
     }
     const outW = cols * PRINT_TILE_PX;
     const outH = rows * PRINT_TILE_PX;
-    const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
+    const useFormat = 'jpg'; // JPG for print (PNG would be too large for upload);
 
     setPrintolinoLoading(true);
     setDlLoading(true);
     try {
       // 1. Render file client-side (same path as digital download = same quality)
-      setDlProgressMsg(`Rendere Druckdatei ${digFmt.label} (${outW.toLocaleString()}x${outH.toLocaleString()}px)...`);
+      setDlProgressMsg(`Rendere Druckdatei ${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()}px @ 400 DPI)...`);
       setDlProgress(5);
       const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
         cols, rows, tilePx: PRINT_TILE_PX, format: useFormat as 'jpg' | 'png',
@@ -5558,9 +5558,9 @@ export default function Studio() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
-          formatLabel: digFmt.label,
-          materialLabel: useFormat.toUpperCase(),
-          priceChf: digFmt.price,
+          formatLabel: `${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()} px)`,
+          materialLabel: 'JPG 400DPI',
+          priceChf: 29,
           customerEmail: user?.email ?? null,
           userId: user?.id ?? null,
           renderParams: {
@@ -6693,40 +6693,45 @@ export default function Studio() {
             {/* ===== PRINT MODE ===== */}
             {orderMode === 'print' && (
               <>
-                {/* Format selection – same formats as digital download for identical quality */}
-                <div className="mb-5">
-                  <p className="text-sm font-bold text-gray-700 mb-3">Qualitaet waehlen</p>
-                  <div className="grid grid-cols-3 gap-3">
-                    {DIGITAL_FORMATS.map(({ label, desc, price }, idx) => (
-                      <button
-                        key={label}
-                        onClick={() => setSelectedDigitalFormat(idx)}
-                        className={`relative p-3 rounded-xl border-2 text-center transition-all ${
-                          selectedDigitalFormat === idx
-                            ? 'border-coral-500 bg-coral-50'
-                            : 'border-gray-100 hover:border-coral-200'
-                        }`}
-                      >
-                        {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Empfohlen</div>}
-                        <div className="text-sm font-bold text-gray-900">{label}</div>
-                        <div className="text-[10px] text-gray-500 mt-0.5">{desc}</div>
-                        <div className="text-xs text-coral-700 font-semibold mt-1">CHF {price}</div>
-                        {selectedDigitalFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Order info */}
-                <div className="bg-coral-50 rounded-xl p-4 mb-5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-gray-900">Druck bestellen &ndash; {DIGITAL_FORMATS[selectedDigitalFormat].label}</p>
-                      <p className="text-sm text-gray-500">Hochauflösende Druckdatei &middot; Bearbeitung durch Admin</p>
-                    </div>
-                    <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
-                  </div>
-                </div>
+                {/* Print info: format derived from grid (cols cm × rows cm @ 1cm/tile, 400 DPI) */}
+                {(() => {
+                  const printCols = mosaicParamsRef.current?.cols ?? 120;
+                  const printRows = mosaicParamsRef.current?.rows ?? 90;
+                  // 1 tile = 1 cm → poster size in cm = cols × rows
+                  // tilePx at 400 DPI: 1 cm × (400/2.54) ≈ 157 px
+                  const TILE_PX_400DPI = 157;
+                  const outW = printCols * TILE_PX_400DPI;
+                  const outH = printRows * TILE_PX_400DPI;
+                  return (
+                    <>
+                      {/* Blue info box: poster format derived from grid */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 text-sm">
+                        <p className="font-bold text-blue-800 mb-2">Druckqualitaet &amp; Poster-Groesse</p>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                          <span className="text-blue-600 font-medium">Poster-Groesse:</span>
+                          <span className="text-blue-900 font-bold">{printCols} × {printRows} cm</span>
+                          <span className="text-blue-600 font-medium">Kachel-Groesse:</span>
+                          <span className="text-blue-900 font-bold">10mm × 10mm ✓</span>
+                          <span className="text-blue-600 font-medium">Anzahl Kacheln:</span>
+                          <span className="text-blue-900 font-bold">{printCols} × {printRows} = {(printCols * printRows).toLocaleString('de-CH')}</span>
+                          <span className="text-blue-600 font-medium">Ausgabe-Pixel:</span>
+                          <span className="text-blue-900 font-bold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
+                        </div>
+                        <p className="text-[10px] text-blue-500 mt-2">400 DPI Druckqualitaet · JPG · Ideal fuer 20–30 cm Betrachtungsabstand</p>
+                      </div>
+                      {/* Order summary */}
+                      <div className="bg-coral-50 rounded-xl p-4 mb-5">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-bold text-gray-900">Druck bestellen &ndash; {printCols}×{printRows} cm</p>
+                            <p className="text-sm text-gray-500">Hochauflösende Druckdatei · {outW.toLocaleString()}×{outH.toLocaleString()} px · JPG</p>
+                          </div>
+                          <div className="text-2xl font-extrabold text-coral-700">CHF 29</div>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
 
                 {/* Order success banner */}
                 {printolinoSuccess && (
@@ -6742,7 +6747,7 @@ export default function Studio() {
                   className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
                 >
                   {(printolinoLoading || dlLoading) ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
-                  Druck bestellen &middot; CHF {totalPrice}
+                  {`Druck bestellen · ${mosaicParamsRef.current?.cols ?? 120}×${mosaicParamsRef.current?.rows ?? 90} cm · CHF 29`}
                 </button>
 
                 <div className="flex items-center justify-between mt-3">
@@ -6763,7 +6768,7 @@ export default function Studio() {
                   )}
                 </div>
 
-                {/* Inline Download Progress (Print) */}
+                                {/* Inline Download Progress (Print) */}
                 {(dlLoading || dlProgressMsg) && (
                   <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
                     <div className="flex items-center justify-between mb-2">
