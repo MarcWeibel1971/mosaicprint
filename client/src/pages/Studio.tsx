@@ -213,13 +213,14 @@ async function renderMosaicClientSide(opts: {
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
   cellLab?: [number, number, number][]; // LAB target per cell (blurred+original mix) for accurate color correction
   userOverlay?: number; // 0-100: how much original photo shows through (from Foto-Overlay slider)
+  colorEnhance?: number; // 0-100: color correction strength from Farbkorrektur slider
   userPhotoImg?: HTMLImageElement | null; // original user photo for overlay
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
   const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
     snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm,
     cellLab: cellLabData,
-    userOverlay = 0, userPhotoImg = null, onProgress } = opts;
+    userOverlay = 0, colorEnhance: colorEnhanceParam = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
   onProgress?.(2, 'Tiles prüfen...');
@@ -366,9 +367,11 @@ async function renderMosaicClientSide(opts: {
   // LAB parameters match preview exactly — avgL consistency is now ensured by 8x8 downsample
   // (same as preview which computes avgL on 64px thumbnails = equivalent low-freq reference)
   const L_BLEND  = 0.40 + 0.40 * blendFactor;  // matches preview
-  const AB_BLEND = 0.12 + 0.20 * blendFactor;  // matches preview
-  const MAX_COLOR_SHIFT = 18;  // matches preview
-  const MAX_BLUE_SHIFT = 10;   // matches preview
+  const colorEnhanceVal = colorEnhanceParam / 100; // 0.0 - 1.0
+  const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
+  const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by colorEnhance slider (0 at 0%)
+  const MAX_COLOR_SHIFT = 15;  // matches preview (reduced from 18)
+  const MAX_BLUE_SHIFT = 5;    // matches preview (reduced from 10)
 
   // Overlay parameters (needed inside tile loop for inline overlay application)
   const BASE_OL = algoSettings.baseOverlay ?? 0.15;
@@ -1298,8 +1301,8 @@ export default function Studio() {
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
         const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
         const AB_BLEND = AB_BLEND_BASE * (0.5 + 0.5 * colorEnhanceVal); // scale by colorEnhance (50%-100% of base)
-        const MAX_COLOR_SHIFT = 18;
-        const MAX_BLUE_SHIFT = 10;
+        const MAX_COLOR_SHIFT = 15;
+        const MAX_BLUE_SHIFT = 5;
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         if (cellLabData.length > 0) {
@@ -4302,15 +4305,21 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
+        // colorEnhance slider (0-100) scales the AB color transfer strength
+        // 0% = no color shift at all, 100% = full correction
+        const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
         // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-        // AB_BLEND: minimum 0.12 (reduced from 0.20 to prevent blue tint accumulation)
-        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.12+0.20*0.7=0.26
-        const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
-        const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
-        // Asymmetric blue clamp: limit blue shifts more aggressively (human eye is sensitive to blue tint)
-        const MAX_BLUE_SHIFT = 10;             // tighter clamp for negative b direction (toward blue)
+        // AB_BLEND: scaled by colorEnhance slider to prevent unwanted blue tint
+        // colorEnhance=0 → AB_BLEND=0 (no color shift, prevents blue tint)
+        // colorEnhance=50 → moderate color correction
+        // colorEnhance=100 → full strength
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by slider (0 at 0%)
+        const MAX_COLOR_SHIFT = 15;            // reduced from 18 to prevent unnatural tinting
+        // Asymmetric blue clamp: limit blue shifts aggressively (human eye is very sensitive to blue tint)
+        const MAX_BLUE_SHIFT = 5;              // reduced from 10 to prevent visible blue tint
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
         // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
@@ -5316,7 +5325,7 @@ export default function Studio() {
             snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
             targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
             cellLab: cellLabRef.current,
-            userOverlay, userPhotoImg,
+            userOverlay, colorEnhance, userPhotoImg,
             onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
           });
 
@@ -5380,7 +5389,7 @@ export default function Studio() {
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
           cellLab: cellLabRef.current, // Pass cellLab for accurate color correction (blurred+original mix)
-          userOverlay, userPhotoImg,
+          userOverlay, colorEnhance, userPhotoImg,
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
@@ -5514,6 +5523,7 @@ export default function Studio() {
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        colorEnhance,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
@@ -5554,6 +5564,7 @@ export default function Studio() {
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        colorEnhance,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       forceDownloadBlob(adminBlob, adminFilename, 'image/jpeg');
@@ -5600,7 +5611,7 @@ export default function Studio() {
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
         cellLab: cellLabRef.current,
-        userOverlay, userPhotoImg,
+        userOverlay, colorEnhance, userPhotoImg,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       setDlProgress(70);
