@@ -545,6 +545,8 @@ const DIGITAL_FORMATS = [
 export default function Studio() {
   const { user, authHeaders } = useAuth();
   const [searchParams] = useSearchParams();
+  // Mobile detection (used for hi-res overlay, canvas memory limits, etc.)
+  const isMobile = typeof window !== 'undefined' && (window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent));
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [userPhotoImg, setUserPhotoImg] = useState<HTMLImageElement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1319,17 +1321,24 @@ export default function Studio() {
       const mainCanvas = canvasRef.current;
       const snap = snapshotRef.current;
       if (mainCanvas && snap) {
-        const mainCtx = mainCanvas.getContext('2d');
-        if (mainCtx) {
-          try {
-            // Check if canvas was evicted (first pixel is 0,0,0,0 = transparent)
+        try {
+          // Force canvas buffer re-allocation by resetting dimensions
+          // (evicted canvases may silently fail on putImageData)
+          const w = mainCanvas.width;
+          const h = mainCanvas.height;
+          const mainCtx = mainCanvas.getContext('2d');
+          if (mainCtx) {
             const probe = mainCtx.getImageData(0, 0, 1, 1).data;
             if (probe[3] === 0 && snap.data[3] !== 0) {
               console.warn('[ClientHiRes] Main canvas was evicted, restoring from snapshot');
-              mainCtx.putImageData(snap, 0, 0);
+              // Reset canvas dimensions to force buffer re-allocation
+              mainCanvas.width = w;
+              mainCanvas.height = h;
+              const freshCtx = mainCanvas.getContext('2d');
+              if (freshCtx) freshCtx.putImageData(snap, 0, 0);
             }
-          } catch { /* ignore */ }
-        }
+          }
+        } catch { /* ignore – hi-res overlay will cover the canvas anyway */ }
       }
     }
   }, []);
@@ -5904,7 +5913,7 @@ export default function Studio() {
                     ref={canvasRef}
                     style={{
                       display: (ready || loading || projectLoading) ? "block" : "none",
-                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && zoom > 1.5) ? "pixelated" : "auto",
+                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && (isMobile || zoom > 1.5)) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
@@ -5920,8 +5929,10 @@ export default function Studio() {
                       overflow: "visible",
                     }}
                   />
-                  {/* Hi-Res image overlay - sharp zoom (show from zoom > 1.5 for better quality on mobile) */}
-                  {hiResImgUrl && hiResReady && zoom > 1.5 && (
+                  {/* Hi-Res image overlay - sharp zoom
+                      Desktop: show from zoom > 1.5 (main canvas is always intact)
+                      Mobile: show always when ready (main canvas may be evicted by memory pressure) */}
+                  {hiResImgUrl && hiResReady && (isMobile || zoom > 1.5) && (
                     <img
                       src={hiResImgUrl}
                       alt=""
@@ -5944,7 +5955,7 @@ export default function Studio() {
                   {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
                     // Disable color enhance overlay when hi-res is active: hi-res render already
                     // has per-pixel color correction built in. Overlay on top causes color patches.
-                    if (hiResReady && zoom > 1.5) return null;
+                    if (hiResReady && (isMobile || zoom > 1.5)) return null;
                     // Gentle zoom fade: full strength at <=100%, fades out quickly at zoom >1.2
                     // At zoom=1.5 without hi-res: 25% strength; at zoom=2.0: 0%
                     const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0.0, 1.0 - (zoom - 1.0) / 2.0);
@@ -6070,9 +6081,9 @@ export default function Studio() {
                     onChange={e => {
                       const v = Number(e.target.value);
                       setColorEnhance(v); colorEnhanceRef.current = v;
-                      // If hi-res is active and zoom > 1.5, reset and re-trigger hi-res render
+                      // If hi-res is active, reset and re-trigger hi-res render
                       // so the new colorEnhance value is baked into the hi-res image
-                      if (hiResReadyRef.current && zoom > 1.5) {
+                      if (hiResReadyRef.current && (isMobile || zoom > 1.5)) {
                         resetHiRes();
                         setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
                       }
@@ -6277,7 +6288,7 @@ export default function Studio() {
                       onChange={e => {
                         const v = Number(e.target.value);
                         setColorEnhance(v); colorEnhanceRef.current = v;
-                        if (hiResReadyRef.current && zoom > 1.5) {
+                        if (hiResReadyRef.current && (isMobile || zoom > 1.5)) {
                           resetHiRes();
                           setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
                         }
