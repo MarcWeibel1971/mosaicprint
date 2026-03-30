@@ -6355,6 +6355,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const [renderingId, setRenderingId] = useState<number | null>(null)
   const [renderProgress, setRenderProgress] = useState(0)
   const [renderMsg, setRenderMsg] = useState('')
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
 
   const fetchOrders = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -6493,6 +6494,28 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
         </div>
       )}
 
+      {/* Lightbox Overlay */}
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <div className="relative max-w-5xl max-h-full" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setLightboxUrl(null)}
+              className="absolute -top-10 right-0 text-white text-sm font-semibold hover:text-gray-300 flex items-center gap-1"
+            >
+              <X className="w-5 h-5" /> Schliessen
+            </button>
+            <img
+              src={lightboxUrl}
+              alt="Vollbild"
+              className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
+            />
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
       {orders.map(order => (
         <div key={order.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -6540,25 +6563,25 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 {order.photo_url && (
                   <div className="flex-1">
                     <p className="text-xs text-gray-400 mb-1">Kundenfoto <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
-                    <a href={order.photo_url} target="_blank" rel="noopener noreferrer" className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
+                    <div onClick={() => setLightboxUrl(order.photo_url)} className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
                       <img
                         src={order.photo_url}
                         alt="Kundenfoto"
                         className="max-w-full max-h-full object-contain"
                       />
-                    </a>
+                    </div>
                   </div>
                 )}
                 {order.mosaic_preview_url && (
                   <div className="flex-1">
                     <p className="text-xs text-gray-400 mb-1">Mosaik-Vorschau <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
-                    <a href={order.mosaic_preview_url} target="_blank" rel="noopener noreferrer" className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
+                    <div onClick={() => setLightboxUrl(order.mosaic_preview_url)} className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
                       <img
                         src={order.mosaic_preview_url}
                         alt="Mosaik-Vorschau"
                         className="max-w-full max-h-full object-contain"
                       />
-                    </a>
+                    </div>
                   </div>
                 )}
               </div>
