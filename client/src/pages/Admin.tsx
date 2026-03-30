@@ -6410,7 +6410,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
     setRenderingId(order.id)
     setRenderProgress(5)
     setRenderMsg('Server-Rendering gestartet...')
-
+    const renderStartTime = Date.now()
     try {
       // Use new server-side render endpoint (async, polls for completion)
       const resp = await fetch(`/api/admin/orders/${order.id}/render`, {
@@ -6420,7 +6420,6 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
       if (!resp.ok) throw new Error(`Render failed: ${resp.status}`)
       setRenderProgress(15)
       setRenderMsg('Rendering läuft auf Server... (kann einige Minuten dauern)')
-
       // Poll for completion
       const deadline = Date.now() + 20 * 60 * 1000 // 20 min max
       while (Date.now() < deadline) {
@@ -6438,9 +6437,19 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
         if (updatedOrder?.status === 'render_error') {
           throw new Error(updatedOrder.admin_notes || 'Render-Fehler')
         }
-        // Update progress estimate
-        const elapsed = Date.now() - (Date.now() - 3000)
-        setRenderProgress(Math.min(90, 15 + Math.floor((Date.now() % 60000) / 1000)))
+        // Update progress: use server-reported percentage from admin_notes (format: "66%|message")
+        // Fallback: monotonically increasing estimate based on elapsed time (no modulo reset)
+        const notes = updatedOrder?.admin_notes ?? ''
+        const serverPct = notes.match(/^(\d+)%/)
+        if (serverPct) {
+          const pct = parseInt(serverPct[1], 10)
+          setRenderProgress(Math.max(15, Math.min(95, pct)))
+          const msg = notes.split('|')[1] ?? ''
+          if (msg) setRenderMsg(`Server: ${msg}`)
+        } else {
+          const elapsed = Date.now() - renderStartTime
+          setRenderProgress(Math.min(90, 15 + Math.floor(elapsed / 10000))) // +1% every 10s, never resets
+        }
       }
       throw new Error('Zeitüberschreitung (20 Min)')
     } catch (e) {

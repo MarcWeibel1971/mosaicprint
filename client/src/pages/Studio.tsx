@@ -1341,10 +1341,13 @@ export default function Studio() {
         const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // Use same parameters as renderMosaic for visual consistency
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
-        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
-        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by colorEnhance slider (0 at 0%, same as renderMosaic)
-        const MAX_COLOR_SHIFT = 15;
-        const MAX_BLUE_SHIFT = 5;
+        // NOTE: Hi-res uses full-res source images (Pexels/Unsplash) which have stronger
+        // blue casts than the 128px thumbnails used in preview. Increase AB_BLEND and
+        // MAX_BLUE_SHIFT to compensate. Minimum blend of 0.18 even at 0% colorEnhance.
+        const AB_BLEND_BASE = 0.22 + 0.20 * blendFactor;  // increased from 0.12 for source_url images
+        const AB_BLEND = Math.max(0.18, AB_BLEND_BASE * colorEnhanceVal);
+        const MAX_COLOR_SHIFT = 18;
+        const MAX_BLUE_SHIFT = 14;  // increased from 5 – source images have stronger blue cast
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         if (cellLabData.length > 0) {
@@ -5677,7 +5680,7 @@ export default function Studio() {
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       forceDownloadBlob(adminBlob, adminFilename, 'image/jpeg');
-      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
