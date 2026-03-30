@@ -804,6 +804,11 @@ export default function Studio() {
   } | null>(null);
   const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
+  // -- Admin Order Mode: orderId from URL param (for saving updated preview back to order) --
+  const adminOrderId = searchParams.get('orderId') ? Number(searchParams.get('orderId')) : null;
+  const [savingPreview, setSavingPreview] = useState(false);
+  const [savedPreviewMsg, setSavedPreviewMsg] = useState<string | null>(null);
+
   // -- Project Save/Restore (localStorage) ------------------------------------
   const savedProjectIdRef = useRef<number | null>(null); // ID of last saved project (for print upload)
   const [hasSavedProject, setHasSavedProject] = useState<boolean>(() => {
@@ -5330,7 +5335,19 @@ export default function Studio() {
           if (data.userPhoto) {
             skipAutoRenderRef.current = true;
             const uImg = new Image();
-            uImg.onload = () => setUserPhotoImg(uImg);
+            uImg.onload = () => {
+              setUserPhotoImg(uImg);
+              // Build userOverlayUrl so the Foto-Overlay slider works immediately
+              // (normally built inside renderMosaic, but we skip rendering for loaded projects)
+              const canvas = canvasRef.current;
+              if (canvas && canvas.width > 0 && canvas.height > 0) {
+                const olCanvas = document.createElement('canvas');
+                olCanvas.width = canvas.width;
+                olCanvas.height = canvas.height;
+                olCanvas.getContext('2d')!.drawImage(uImg, 0, 0, canvas.width, canvas.height);
+                setUserOverlayUrl(olCanvas.toDataURL('image/jpeg', 0.92));
+              }
+            };
             uImg.src = data.userPhoto;
           }
         }
@@ -6443,6 +6460,61 @@ export default function Studio() {
                     <span>Maximal</span>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* Admin: Vorschau in Bestellung speichern */}
+            {adminOrderId && ready && (
+              <div className="flex items-center gap-3 mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                <div className="flex-1">
+                  <p className="text-xs font-semibold text-amber-800">Admin-Modus: Bestellung #{adminOrderId}</p>
+                  <p className="text-xs text-amber-600">Overlay/Farbkorrektur anpassen, dann Vorschau speichern</p>
+                  {savedPreviewMsg && <p className="text-xs text-green-700 font-medium mt-0.5">{savedPreviewMsg}</p>}
+                </div>
+                <button
+                  disabled={savingPreview}
+                  onClick={async () => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+                    setSavingPreview(true);
+                    setSavedPreviewMsg(null);
+                    try {
+                      const out = document.createElement('canvas');
+                      out.width = canvas.width; out.height = canvas.height;
+                      const ctx = out.getContext('2d')!;
+                      ctx.drawImage(canvas, 0, 0);
+                      if (colorEnhance > 0 && colorEnhanceUrl) {
+                        const ceImg = new Image(); ceImg.src = colorEnhanceUrl;
+                        await new Promise<void>(r => { ceImg.onload = () => r(); ceImg.onerror = () => r(); });
+                        ctx.globalAlpha = colorEnhance / 100; ctx.drawImage(ceImg, 0, 0, out.width, out.height); ctx.globalAlpha = 1;
+                      }
+                      if (userOverlay > 0 && userOverlayUrl) {
+                        const olImg = new Image(); olImg.src = userOverlayUrl;
+                        await new Promise<void>(r => { olImg.onload = () => r(); olImg.onerror = () => r(); });
+                        ctx.globalAlpha = userOverlay / 100; ctx.drawImage(olImg, 0, 0, out.width, out.height); ctx.globalAlpha = 1;
+                      }
+                      const dataUrl = out.toDataURL('image/jpeg', 0.88);
+                      const resp = await fetch(`/api/admin/orders/${adminOrderId}/preview-url`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                        body: JSON.stringify({ previewDataUrl: dataUrl }),
+                      });
+                      const result = await resp.json();
+                      if (result.ok) {
+                        setSavedPreviewMsg('Vorschau gespeichert - im Admin-Panel sichtbar');
+                      } else {
+                        setSavedPreviewMsg('Fehler: ' + (result.error || 'Unbekannt'));
+                      }
+                    } catch (e) {
+                      setSavedPreviewMsg('Fehler: ' + String(e));
+                    } finally {
+                      setSavingPreview(false);
+                    }
+                  }}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+                >
+                  {savingPreview ? 'Speichert...' : 'Vorschau speichern'}
+                </button>
               </div>
             )}
 

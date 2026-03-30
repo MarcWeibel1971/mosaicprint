@@ -6453,7 +6453,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
 
   const openInStudio = (order: OrderItem) => {
     if (order.project_id) {
-      window.open(`/studio?project=${order.project_id}`, '_blank')
+      window.open(`/studio?project=${order.project_id}&orderId=${order.id}`, '_blank')
     } else {
       onMessage({ text: 'Kein Projekt verknüpft – Bestellung wurde ohne Login erstellt', type: 'info' })
     }

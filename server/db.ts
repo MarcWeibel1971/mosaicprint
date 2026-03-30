@@ -857,6 +857,14 @@ export async function updateOrderNotes(orderId: number, notes: string): Promise<
   );
 }
 
+export async function updateOrderPreviewUrl(orderId: number, previewUrl: string): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    "UPDATE mosaic_orders SET mosaic_preview_url = $1 WHERE id = $2",
+    [previewUrl, orderId]
+  );
+}
+
 export async function updateOrderStatus(orderId: number, status: string): Promise<void> {
   const pool = getPool();
   await pool.query(

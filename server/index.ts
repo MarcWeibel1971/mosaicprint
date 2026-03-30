@@ -2322,6 +2322,38 @@ app.post('/api/admin/orders/:id/notes', express.json(), async (req, res) => {
   }
 });
 
+// POST /api/admin/orders/:id/preview-url – update mosaic_preview_url (after admin adjusts overlay in Studio)
+app.post('/api/admin/orders/:id/preview-url', express.json({ limit: '5mb' }), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { previewDataUrl } = req.body;
+    if (!previewDataUrl) return res.status(400).json({ error: 'Missing previewDataUrl' });
+
+    let finalUrl = previewDataUrl;
+
+    // If R2 is configured, upload the preview image to R2
+    if (isR2Configured()) {
+      try {
+        // Convert data URL to buffer
+        const base64 = previewDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        const buf = Buffer.from(base64, 'base64');
+        // Resize to max 1200px for preview
+        const resized = await sharp(buf).resize(1200, 1200, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
+        const key = `order-previews/order-${orderId}-preview-${Date.now()}.jpg`;
+        finalUrl = await uploadToR2(key, resized, 'image/jpeg', 'public, max-age=86400');
+      } catch (e) {
+        console.warn('[preview-url] R2 upload failed, storing data URL:', e);
+        // Fall back to storing data URL directly (not ideal but functional)
+      }
+    }
+
+    await db.updateOrderPreviewUrl(orderId, finalUrl);
+    res.json({ ok: true, url: finalUrl });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage
 // Runs in background, returns job status via GET /api/admin/migrate-to-r2/status
 const r2MigrationStatus = {
