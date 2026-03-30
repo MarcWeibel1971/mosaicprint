@@ -5641,7 +5641,6 @@ export default function Studio() {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const { cols, rows } = mosaicParamsRef.current;
     // 1 tile = 1 cm @ 400 DPI → tilePx = 1 cm × (400/2.54) ≈ 157 px
-    // This gives cols cm × rows cm poster size (e.g. 120×90 cm for 120×90 tiles)
     const TILE_PX_400DPI = 157;
     const SERVER_MAX_DIM = 16000;
     let PRINT_TILE_PX = TILE_PX_400DPI;
@@ -5651,110 +5650,86 @@ export default function Studio() {
     }
     const outW = cols * PRINT_TILE_PX;
     const outH = rows * PRINT_TILE_PX;
-    const useFormat = 'jpg'; // JPG for print (PNG would be too large for upload);
 
     setPrintolinoLoading(true);
     setDlLoading(true);
     try {
-      // 1. Render file client-side (same path as digital download = same quality)
-      setDlProgressMsg(`Rendere Druckdatei ${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()}px @ 400 DPI)...`);
-      setDlProgress(5);
-      const { blob: printBlob, filename: printFilename } = await renderMosaicClientSide({
-        cols, rows, tilePx: PRINT_TILE_PX, format: useFormat as 'jpg' | 'png',
-        assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
-        validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
-        snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
-        targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
-        cellLab: cellLabRef.current,
-        userOverlay, colorEnhance, userPhotoImg,
-        onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
-      });
-      setDlProgress(70);
-      setDlProgressMsg('Datei wird auf Server gespeichert...');
+      setDlProgressMsg('Bestellung wird angelegt...');
+      setDlProgress(20);
 
-      // 2. Upload to R2 for persistent download link
-      let printUrl: string | null = null;
-      if (savedProjectIdRef.current && user) {
-        try {
-          const mimeType4 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
-          const uploadBlob = new Blob([await printBlob.arrayBuffer()], { type: mimeType4 });
-          const uploadRes = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
-            method: 'POST',
-            headers: { 'Content-Type': mimeType4, ...authHeaders() },
-            body: uploadBlob,
-          });
-          const uploadResult = await uploadRes.json();
-          if (uploadResult.ok) printUrl = uploadResult.printUrl ?? null;
-        } catch (uploadErr) {
-          console.warn('[PrintOrder] R2 upload failed:', uploadErr);
+      // 1. Capture mosaic preview thumbnail from canvas
+      let mosaicPreviewUrl: string | null = null;
+      if (canvasRef.current) {
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = 400;
+        thumbCanvas.height = Math.round(400 * (canvasRef.current.height / canvasRef.current.width));
+        const thumbCtx = thumbCanvas.getContext('2d');
+        if (thumbCtx) {
+          thumbCtx.drawImage(canvasRef.current, 0, 0, thumbCanvas.width, thumbCanvas.height);
+          mosaicPreviewUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
         }
       }
-      setDlProgress(85);
-      setDlProgressMsg('Bestellung wird angelegt...');
 
-      // 3. Create order in DB
+      // 2. Capture customer photo thumbnail
+      let photoUrl: string | null = null;
+      if (userPhotoImg) {
+        const photoThumb = document.createElement('canvas');
+        photoThumb.width = 400;
+        photoThumb.height = Math.round(400 * (userPhotoImg.height / userPhotoImg.width));
+        const photoCtx = photoThumb.getContext('2d');
+        if (photoCtx) {
+          photoCtx.drawImage(userPhotoImg, 0, 0, photoThumb.width, photoThumb.height);
+          photoUrl = photoThumb.toDataURL('image/jpeg', 0.7);
+        }
+      } else if (userPhoto && typeof userPhoto === 'string') {
+        photoUrl = userPhoto;
+      }
+
+      setDlProgress(50);
+
+      // 3. Create order in DB with full render params (admin renders server-side)
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           formatLabel: `${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()} px)`,
-          materialLabel: 'JPG 400DPI',
-          priceChf: 29,
+          materialLabel: 'Alu-Dibond',
+          priceChf: 214,
           customerEmail: user?.email ?? null,
           userId: user?.id ?? null,
+          projectId: savedProjectIdRef.current ?? null,
+          photoUrl,
+          mosaicPreviewUrl,
           renderParams: {
             cols, rows,
             tilePx: PRINT_TILE_PX,
-            format: useFormat,
+            format: 'jpg',
             outputWidth: outW,
             outputHeight: outH,
-            printUrl,
+            userOverlay,
+            colorEnhance,
+            // Full assignment and tileIds for server-side rendering by admin
+            assignment: assignmentRef.current,
+            tileIds: tileIdsRef.current,
           },
         }),
       });
       const orderData = await orderResp.json();
       if (!orderData.ok) throw new Error(orderData.error || 'Order creation failed');
 
-      // 4. If we have a printUrl, mark order as ready immediately
-      if (printUrl && orderData.orderId) {
-        await fetch(`/api/admin/orders/${orderData.orderId}/status`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ status: 'ready', downloadToken: printUrl }),
-        });
-      }
-
-      // 5. Send confirmation email
-      if (savedProjectIdRef.current && user) {
-        try {
-          await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ printUrl, orderId: orderData.orderId }),
-          });
-        } catch (emailErr) {
-          console.warn('[PrintOrder] Email failed:', emailErr);
-        }
-      }
-
       setDlProgress(100);
-      setDlProgressMsg(`✓ Bestellung #${orderData.orderId} erstellt! Download: ${printFilename}`);
+      setDlProgressMsg(`✓ Bestellung #${orderData.orderId} eingegangen! Wir bereiten Ihre Druckdatei vor und melden uns per E-Mail.`);
       setPrintolinoSuccess(true);
-
-      // 6. Trigger local download too
-      const mimeType5 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
-      forceDownloadBlob(printBlob, printFilename, mimeType5);
-
-      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); setPrintolinoSuccess(false); }, 8000);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); setPrintolinoSuccess(false); }, 10000);
     } catch (e) {
       console.error('[PrintOrder] Failed:', e);
       setDlProgressMsg(`Fehler: ${e}`);
-      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 3000);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
     } finally {
       setPrintolinoLoading(false);
       setDlLoading(false);
     }
-  }, [selectedDigitalFormat, user, authHeaders, userOverlay, userPhotoImg]);
+  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {

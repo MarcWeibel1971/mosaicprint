@@ -130,17 +130,29 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
   // - size <= 128: use R2/tile128 (fast CDN, already 128px)
   // - size > 128 (zoom/print): ALWAYS use source_url first for full resolution
   //   Never fall back to tile128 for large sizes (would cause 128→400 upscale = blurry)
-  const url = size <= 128
-    ? (tileUrls.tile128Url || tileUrls.sourceUrl)
-    : (tileUrls.sourceUrl || tileUrls.tile128Url);
+  //   EXCEPTION: R2 tiles (tiles.mosaicprint.ch) are max 128px — return them at native
+  //   size rather than upscaling, since upscaling produces blurry results.
+  const isR2Tile = (tileUrls.tile128Url || '').includes('tiles.mosaicprint.ch') ||
+                   (tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch');
+  let url: string;
+  if (size <= 128) {
+    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+  } else if (isR2Tile) {
+    // R2 tiles are 128px max — serve at native 128px, no upscaling
+    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+  } else {
+    url = tileUrls.sourceUrl || tileUrls.tile128Url;
+  }
   if (!url) return null;
+  // For R2 tiles requested at size > 128: serve at native 128px (no upscaling)
+  const effectiveSize = (isR2Tile && size > 128) ? 128 : size;
 
   // 3. Handle data URLs
   if (url.startsWith('data:')) {
     try {
       const rawBuf = Buffer.from(url.split(',')[1], 'base64');
       const resized = await sharp(rawBuf)
-        .resize(size, size, { fit: 'cover', position: 'centre' })
+        .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
         .jpeg({ quality: 92 })
         .toBuffer();
       tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
@@ -158,10 +170,13 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     if (!resp.ok) return null;
     const buf = Buffer.from(await resp.arrayBuffer());
     const resized = await sharp(buf)
-      .resize(size, size, { fit: 'cover', position: 'centre' })
+      .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
       .jpeg({ quality: 92 })
       .toBuffer();
-    tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    // Cache with effectiveSize key so future requests at the same size hit cache
+    const effectiveCacheKey = effectiveSize !== size ? `${id}-${effectiveSize}` : cacheKey;
+    tileCacheMap.set(effectiveCacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    if (effectiveSize !== size) tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
     evictTileCache();
     return resized;
   } catch {
@@ -2005,7 +2020,7 @@ app.post('/api/debug/print-render-test', express.json({ limit: '5mb' }), async (
 // POST /api/orders/printolino – create a Printolino print order
 app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, res) => {
   try {
-    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams } = req.body;
+    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams, photoUrl, mosaicPreviewUrl } = req.body;
     if (!formatLabel || !materialLabel) {
       return res.status(400).json({ error: 'Missing format or material' });
     }
@@ -2017,11 +2032,102 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
       priceChf: priceChf ?? 0,
       customerEmail: customerEmail ?? null,
       renderParams: renderParams ?? {},
+      photoUrl: photoUrl ?? null,
+      mosaicPreviewUrl: mosaicPreviewUrl ?? null,
     });
     console.log(`[orders] Created Printolino order #${orderId}: ${formatLabel} / ${materialLabel}`);
     res.json({ ok: true, orderId });
   } catch (e) {
     console.error('[orders] Create failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/admin/orders/:id/render – server-side render print file for an order
+app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const pool = db.getPool();
+    const result = await pool.query('SELECT * FROM mosaic_orders WHERE id = $1', [orderId]);
+    const order = result.rows[0];
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const rp = order.render_params || {};
+    if (!rp.assignment || !rp.tileIds) {
+      return res.status(400).json({ error: 'Order has no render_params (assignment/tileIds missing). Cannot render server-side.' });
+    }
+    // Mark as rendering
+    await pool.query("UPDATE mosaic_orders SET status = 'rendering' WHERE id = $1", [orderId]);
+    // Trigger async render
+    (async () => {
+      try {
+        const { cols, rows, tilePx = 157, format = 'jpg', userOverlay = 0, colorEnhance = 0 } = rp;
+        const assignment: number[] = rp.assignment;
+        const tileIds: number[] = rp.tileIds;
+        const outW = cols * tilePx;
+        const outH = rows * tilePx;
+        console.log(`[admin-render] Order #${orderId}: ${cols}x${rows} tiles, ${outW}x${outH}px`);
+        // Load all unique tile images
+        const uniqueIds = [...new Set(tileIds)];
+        const tileBuffers = new Map<number, Buffer>();
+        await Promise.all(uniqueIds.map(async (id) => {
+          const buf = await loadTileBuffer(id, tilePx);
+          if (buf) tileBuffers.set(id, buf);
+        }));
+        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} tiles`);
+        // Compose mosaic using sharp
+        const compositeOps: sharp.OverlayOptions[] = [];
+        for (let i = 0; i < assignment.length; i++) {
+          const tileId = tileIds[assignment[i]];
+          const buf = tileBuffers.get(tileId);
+          if (!buf) continue;
+          const col = i % cols;
+          const row = Math.floor(i / cols);
+          compositeOps.push({ input: buf, left: col * tilePx, top: row * tilePx });
+        }
+        // Build base canvas
+        let canvas = sharp({
+          create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } }
+        }).jpeg({ quality: 92 });
+        // Composite in batches of 500
+        const BATCH = 500;
+        let baseBuf = await canvas.toBuffer();
+        for (let b = 0; b < compositeOps.length; b += BATCH) {
+          const batch = compositeOps.slice(b, b + BATCH);
+          baseBuf = await sharp(baseBuf).composite(batch).jpeg({ quality: 92 }).toBuffer();
+          console.log(`[admin-render] Composited batch ${b}-${b + batch.length}/${compositeOps.length}`);
+        }
+        // Upload to R2
+        const filename = `orders/order-${orderId}-${Date.now()}.jpg`;
+        const r2Url = await (async () => {
+          if (!isR2Configured()) return null;
+          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+          const s3 = new S3Client({
+            region: 'auto',
+            endpoint: process.env.R2_ENDPOINT,
+            credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID!, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY! },
+          });
+          await s3.send(new PutObjectCommand({
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: filename,
+            Body: baseBuf,
+            ContentType: 'image/jpeg',
+          }));
+          return `${process.env.R2_PUBLIC_URL}/${filename}`;
+        })();
+        if (r2Url) {
+          await pool.query("UPDATE mosaic_orders SET status = 'ready', download_token = $1 WHERE id = $2", [r2Url, orderId]);
+          console.log(`[admin-render] Order #${orderId} ready: ${r2Url}`);
+        } else {
+          await pool.query("UPDATE mosaic_orders SET status = 'render_error', admin_notes = 'R2 not configured' WHERE id = $1", [orderId]);
+        }
+      } catch (renderErr) {
+        console.error(`[admin-render] Order #${orderId} failed:`, renderErr);
+        await pool.query("UPDATE mosaic_orders SET status = 'render_error', admin_notes = $1 WHERE id = $2", [String(renderErr), orderId]);
+      }
+    })();
+    res.json({ ok: true, message: 'Rendering started', orderId });
+  } catch (e) {
+    console.error('[admin-render] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });
