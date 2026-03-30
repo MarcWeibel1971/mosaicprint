@@ -2110,6 +2110,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const outW = cols * tilePx;
         const outH = rows * tilePx;
         console.log(`[admin-render] Order #${orderId}: ${cols}x${rows} tiles, ${outW}x${outH}px`);
+        // Helper: update progress in DB so admin UI can poll it
+        const setProgress = async (pct: number, msg: string) => {
+          await pool.query("UPDATE mosaic_orders SET admin_notes = $1 WHERE id = $2", [`${pct}%|${msg}`, orderId]);
+        };
+        await setProgress(5, 'Tiles werden geladen...');
         // Load all unique tile images
         // assignment[i] = index into tileIds array; tileIds[idx] = actual DB tile ID
         const usedTileIds: number[] = assignment.map((idx: number) => tileIds[idx]);
@@ -2133,8 +2138,13 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
             const buf = await loadTileBuffer(id, tilePx);
             if (buf) tileBuffers.set(id, buf);
           }));
-          if (lb % 500 === 0) console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles...`);
+          if (lb % 500 === 0) {
+            const pct = Math.round(5 + (tileBuffers.size / Math.max(uniquePositiveIds.length, 1)) * 40);
+            await setProgress(pct, `Tiles laden: ${tileBuffers.size}/${uniquePositiveIds.length}`);
+            console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles...`);
+          }
         }
+        await setProgress(45, `${tileBuffers.size} Tiles geladen`);
         console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles`);
         // Load user tiles from R2 URLs
         if (uniqueNegativeIds.length > 0) {
@@ -2165,6 +2175,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
           }));
           console.log(`[admin-render] User tiles loaded: ${uniqueNegativeIds.filter(id => tileBuffers.has(id)).length}/${uniqueNegativeIds.length}`);
         }
+        await setProgress(50, 'Mosaik wird zusammengesetzt...');
         // Compose mosaic using sharp
         const compositeOps: sharp.OverlayOptions[] = [];
         for (let i = 0; i < assignment.length; i++) {
@@ -2185,8 +2196,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         for (let b = 0; b < compositeOps.length; b += BATCH) {
           const batch = compositeOps.slice(b, b + BATCH);
           baseBuf = await sharp(baseBuf).composite(batch).jpeg({ quality: 92 }).toBuffer();
+          const pct = Math.round(50 + ((b + batch.length) / compositeOps.length) * 40);
+          await setProgress(pct, `Compositing: ${b + batch.length}/${compositeOps.length} Tiles`);
           console.log(`[admin-render] Composited batch ${b}-${b + batch.length}/${compositeOps.length}`);
         }
+        await setProgress(92, 'Bild wird auf R2 hochgeladen...');
         // Upload to R2
         const filename = `orders/order-${orderId}-${Date.now()}.jpg`;
         const r2Url = await (async () => {

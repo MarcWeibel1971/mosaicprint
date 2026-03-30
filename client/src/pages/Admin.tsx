@@ -6356,18 +6356,26 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const [renderProgress, setRenderProgress] = useState(0)
   const [renderMsg, setRenderMsg] = useState('')
 
-  const fetchOrders = useCallback(async () => {
-    setLoading(true)
+  const fetchOrders = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const res = await fetch('/api/admin/orders', { headers: authHeaders() })
       const data = await res.json()
       if (data.ok) setOrders(data.orders ?? [])
     } catch {
-      onMessage({ text: 'Fehler beim Laden der Bestellungen', type: 'error' })
-    } finally { setLoading(false) }
+      if (!silent) onMessage({ text: 'Fehler beim Laden der Bestellungen', type: 'error' })
+    } finally { if (!silent) setLoading(false) }
   }, [onMessage])
 
   useEffect(() => { fetchOrders() }, [fetchOrders])
+
+  // Auto-poll every 4 seconds when any order is in 'rendering' state
+  useEffect(() => {
+    const hasRendering = orders.some(o => o.status === 'rendering')
+    if (!hasRendering) return
+    const interval = setInterval(() => fetchOrders(true), 4000)
+    return () => clearInterval(interval)
+  }, [orders, fetchOrders])
 
   const updateStatus = async (id: number, status: string) => {
     try {
@@ -6498,8 +6506,12 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                     order.status === 'rendering' ? 'bg-blue-100 text-blue-700' :
                     (statusColors[order.status] ?? 'bg-gray-100 text-gray-600')
                   }`}>
-                    {order.status === 'pending_render' ? '⏳ Wartet auf Rendering' :
-                     order.status === 'rendering' ? '⚙️ Rendering...' :
+                    {order.status === 'pending_render' ? '⏳ Bereit zum Rendern' :
+                     order.status === 'rendering' ? (() => {
+                       const notes = order.admin_notes ?? ''
+                       const pct = notes.match(/^(\d+)%\|/) ? notes.match(/^(\d+)%\|/)![1] : null
+                       return pct ? `⚙️ Rendering ${pct}%` : '⚙️ Rendering...'
+                     })() :
                      order.status === 'render_error' ? '❌ Render-Fehler' :
                      order.status}
                   </span>
@@ -6510,6 +6522,9 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 <p className="text-sm text-gray-600">{order.format_label} / {order.material_label}</p>
                 {order.customer_email && (
                   <p className="text-xs text-gray-400 mt-0.5">{order.customer_email}</p>
+                )}
+                {order.status === 'pending_render' && (
+                  <p className="text-xs text-yellow-700 mt-1">→ Klick auf „Printfile generieren“ startet die Verarbeitung</p>
                 )}
               </div>
               <div className="text-right">
@@ -6548,15 +6563,33 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               </div>
             )}
 
-            {/* Render progress bar */}
-            {renderingId === order.id && (
-              <div className="mb-3">
-                <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
-                  <div className="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${renderProgress}%` }} />
+            {/* Render progress bar – shown when rendering locally OR when DB status is 'rendering' */}
+            {(renderingId === order.id || order.status === 'rendering') && (() => {
+              // Parse progress from DB admin_notes (format: "45%|Mosaik wird zusammengesetzt...")
+              const notes = order.admin_notes ?? ''
+              const match = notes.match(/^(\d+)%\|(.+)$/)
+              const dbPct = match ? parseInt(match[1]) : null
+              const dbMsg = match ? match[2] : null
+              const pct = renderingId === order.id ? renderProgress : (dbPct ?? 0)
+              const msg = renderingId === order.id ? renderMsg : (dbMsg ?? 'Rendering läuft...')
+              return (
+                <div className="mb-3 bg-blue-50 rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-semibold text-blue-700">{msg}</span>
+                    <span className="text-xs font-bold text-blue-700">{pct}%</span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.max(pct, 3)}%` }}
+                    />
+                  </div>
+                  {order.status === 'rendering' && renderingId !== order.id && (
+                    <p className="text-xs text-blue-500 mt-1">Wird automatisch aktualisiert...</p>
+                  )}
                 </div>
-                <p className="text-xs text-gray-500">{renderMsg}</p>
-              </div>
-            )}
+              )
+            })()}
 
             {/* Actions */}
             <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
