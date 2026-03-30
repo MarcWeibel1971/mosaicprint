@@ -2764,10 +2764,11 @@ app.post('/api/admin/fix-quality-status', async (_req, res) => {
   try {
     const pool = db.getPool();
     // Set 'ok' for analyzed tiles that are not rejected
+    // Also covers tiles with ai_mosaic_score but missing ai_analyzed_at (imported with score but no timestamp)
     const okResult = await pool.query(`
       UPDATE mosaic_images
       SET quality_status = 'ok'
-      WHERE ai_analyzed_at IS NOT NULL
+      WHERE (ai_analyzed_at IS NOT NULL OR ai_mosaic_score IS NOT NULL)
         AND (ai_suitability IS NULL OR ai_suitability != 'reject')
         AND (quality_status = 'pending' OR quality_status IS NULL)
     `);
@@ -2782,17 +2783,27 @@ app.post('/api/admin/fix-quality-status', async (_req, res) => {
     `);
     const updatedRej = rejResult.rowCount ?? 0;
 
-    // Count remaining pending
+    // Count remaining pending (only those without any analysis)
     const pendingRes = await pool.query(`
       SELECT COUNT(*) as cnt FROM mosaic_images
-      WHERE quality_status = 'pending' OR quality_status IS NULL
+      WHERE (quality_status = 'pending' OR quality_status IS NULL)
+        AND ai_analyzed_at IS NULL AND ai_mosaic_score IS NULL
+    `);
+    // Also count NULL status separately
+    const nullStatusRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status IS NULL
+    `);
+    const pendingStatusRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status = 'pending'
     `);
 
     res.json({
       ok: true,
       updatedToOk: updatedOk,
       updatedToRejected: updatedRej,
-      remainingPending: parseInt(pendingRes.rows[0].cnt)
+      remainingPending: parseInt(pendingRes.rows[0].cnt),
+      nullStatusCount: parseInt(nullStatusRes.rows[0].cnt),
+      pendingStatusCount: parseInt(pendingStatusRes.rows[0].cnt)
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
