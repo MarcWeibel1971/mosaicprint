@@ -38,6 +38,11 @@ function getHighResUrl(url: string, size = 600, tile128Url?: string, tileId?: nu
   if (url.includes('cloudfront.net') || url.includes('amazonaws.com')) {
     return url
   }
+  // R2 tiles (tiles.mosaicprint.ch): use tile128Url directly - these are 128px max,
+  // no point in server-side upscaling which would produce blurry results
+  if (tile128Url && tile128Url.includes('tiles.mosaicprint.ch')) {
+    return tile128Url
+  }
   // Fallback: use server-side tile proxy for unknown sources (lhq, pixabay, etc.)
   // The /api/tile/:id endpoint resizes from source_url via sharp
   if (tileId && tileId > 0) return `/api/tile/${tileId}?size=${size}`
