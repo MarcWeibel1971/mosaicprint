@@ -117,9 +117,10 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
       const effectiveTile128 = row.r2_url || row.tile128_url || '';
       // For source_url: skip custom protocols (lhq://, etc.) that aren't fetchable URLs.
       // Fall back to tile256_url or r2_url for higher resolution.
+      // If none available (LHQ tiles without r2_url), fall back to tile128_url so size>128 still works.
       const rawSource = row.source_url || '';
       const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://') || rawSource.startsWith('data:');
-      const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || rawSource);
+      const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || row.tile128_url || rawSource);
       tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
     } catch { return null; }
@@ -2365,9 +2366,10 @@ const aiJobState = {
 async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, GEMINI_KEY: string) {
   const pool = db.getPool();
   // v7 re-analysis: always re-analyze all tiles since prompt changed significantly
+  // Include tiles with r2_url OR tile128_url (covers LHQ tiles that have no r2_url)
   const whereClause = forceReanalyze
-    ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
-    : `r2_url IS NOT NULL AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected'`;
+    ? `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND quality_status != 'rejected'`
+    : `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected'`;
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
   aiJobState.total = total;
@@ -2550,13 +2552,16 @@ Return ONLY the JSON object, no explanation, no markdown.`;
           const suitability = isReject ? 'reject' : mosaicScore >= 80 ? 'excellent' : mosaicScore >= 55 ? 'good' : 'poor';
           const isCalm      = calmScore >= 60; // calm_score >= 60 → calm tile
 
+          // Also update quality_status: 'rejected' for rejects, 'ok' for accepted tiles
+          const newQualityStatus = isReject ? 'rejected' : 'ok';
           await pool.query(
             `UPDATE mosaic_images SET
                ai_suitability = $1, ai_reject_reason = $2, ai_theme = $3,
                ai_has_face = $4, ai_face_pct = $5, ai_is_calm = $6,
                ai_content_tags = $7, ai_analyzed_at = NOW(), semantic_theme = $3,
                ai_mosaic_score = $9, ai_calm_score = $10,
-               ai_color_richness = $11, ai_fill_uniformity = $12, ai_has_text = $13
+               ai_color_richness = $11, ai_fill_uniformity = $12, ai_has_text = $13,
+               quality_status = $14
              WHERE id = $8`,
             [
               suitability,
@@ -2564,6 +2569,7 @@ Return ONLY the JSON object, no explanation, no markdown.`;
               mappedTheme, aiResult.has_face ?? false, aiResult.face_area_pct ?? 0,
               isCalm, JSON.stringify(aiResult.content_tags ?? []), tile.id,
               mosaicScore, calmScore, colorRich, fillUnif, aiResult.has_text ?? false,
+              newQualityStatus,
             ]
           );
 
@@ -2708,6 +2714,48 @@ app.post('/api/admin/ai-cleanup-rejects', async (req, res) => {
         total: deletedRejects + deletedLowScore + deletedPoor
       },
       remaining: parseInt(statsResult.rows[0].remaining)
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// ── Fix quality_status for already-analyzed tiles ───────────────────────────
+// One-time migration: set quality_status='ok' for all tiles that have ai_analyzed_at
+// but still have quality_status='pending' (AI job previously didn't update this field)
+app.post('/api/admin/fix-quality-status', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    // Set 'ok' for analyzed tiles that are not rejected
+    const okResult = await pool.query(`
+      UPDATE mosaic_images
+      SET quality_status = 'ok'
+      WHERE ai_analyzed_at IS NOT NULL
+        AND (ai_suitability IS NULL OR ai_suitability != 'reject')
+        AND (quality_status = 'pending' OR quality_status IS NULL)
+    `);
+    const updatedOk = okResult.rowCount ?? 0;
+
+    // Set 'rejected' for tiles with ai_suitability='reject'
+    const rejResult = await pool.query(`
+      UPDATE mosaic_images
+      SET quality_status = 'rejected'
+      WHERE ai_suitability = 'reject'
+        AND quality_status != 'rejected'
+    `);
+    const updatedRej = rejResult.rowCount ?? 0;
+
+    // Count remaining pending
+    const pendingRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE quality_status = 'pending' OR quality_status IS NULL
+    `);
+
+    res.json({
+      ok: true,
+      updatedToOk: updatedOk,
+      updatedToRejected: updatedRej,
+      remainingPending: parseInt(pendingRes.rows[0].cnt)
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
