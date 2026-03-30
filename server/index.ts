@@ -1502,6 +1502,108 @@ app.get('/api/print-job/:jobId', (req, res) => {
   res.json(job);
 });
 
+// Helper: LAB color transfer (matches client-side renderMosaicClientSide)
+// Applies per-tile LAB brightness scaling + AB color shift + contrast boost
+function applyLabColorTransfer(
+  pixelBuf: Buffer,
+  width: number, height: number,
+  tilePx: number,
+  cols: number, rows: number,
+  stripRowStart: number,
+  targetColors: number[],
+  edgeMap: number[],
+  faceMask: boolean[],
+  colorEnhance: number,  // 0-100
+): void {
+  if (!targetColors?.length || colorEnhance <= 0) return;
+
+  const labToRgb = (L: number, a: number, b: number): [number, number, number] => {
+    let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+    x = (x**3 > 0.008856 ? x**3 : (x - 16/116)/7.787) * 0.95047;
+    y = (y**3 > 0.008856 ? y**3 : (y - 16/116)/7.787) * 1.00000;
+    z = (z**3 > 0.008856 ? z**3 : (z - 16/116)/7.787) * 1.08883;
+    const r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+    const g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+    const bv = x * 0.0557 + y * -0.2040 + z * 1.0570;
+    const toSrgb = (c: number) => c > 0.0031308 ? 1.055 * c**(1/2.4) - 0.055 : 12.92 * c;
+    return [Math.round(Math.max(0,Math.min(255,toSrgb(r)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(g)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(bv)*255)))];
+  };
+  const rgbToLab = (r: number, g: number, b: number): [number, number, number] => {
+    const toLinear = (c: number) => { const s = c/255; return s > 0.04045 ? ((s+0.055)/1.055)**2.4 : s/12.92; };
+    const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
+    const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
+    const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
+    const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
+    const f = (t: number) => t > 0.008856 ? t**(1/3) : 7.787*t + 16/116;
+    return [116*f(y)-16, 500*(f(x)-f(y)), 200*(f(y)-f(z))];
+  };
+
+  const colorEnhanceVal = colorEnhance / 100;
+  const AB_BLEND = 0.12 * colorEnhanceVal;
+  const L_BLEND = 0.40;
+  const MAX_COLOR_SHIFT = 15;
+  const MAX_BLUE_SHIFT = 5;
+  const cBoost = 1.30;
+  const satBoost = 0.90 + cBoost * 0.15;
+  const REF_SAMPLES = 64;
+
+  const stripRows = Math.ceil(height / tilePx);
+  for (let lr = 0; lr < stripRows; lr++) {
+    const row = stripRowStart + lr;
+    if (row >= rows) break;
+    for (let col = 0; col < cols; col++) {
+      const ci = row * cols + col;
+      const tci = ci * 3;
+      const tR = targetColors[tci] ?? 128;
+      const tG = targetColors[tci+1] ?? 128;
+      const tBv = targetColors[tci+2] ?? 128;
+      const [tL, tA, tBlab] = rgbToLab(tR, tG, tBv);
+      const isShadowZone = tL < 40;
+      const shadowBoost = isShadowZone ? Math.max(0, (40-tL)/40) : 0;
+      const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+
+      const py0 = lr * tilePx, px0 = col * tilePx;
+      const py1 = Math.min(py0 + tilePx, height), px1 = Math.min(px0 + tilePx, width);
+      const totalPx = (px1-px0) * (py1-py0);
+      const step = Math.max(1, Math.floor(totalPx / REF_SAMPLES));
+      let sumL = 0, sampleCount = 0;
+      for (let si = 0; si < totalPx; si += step) {
+        const lx = px0 + (si % (px1-px0));
+        const ly = py0 + Math.floor(si / (px1-px0));
+        const pi = (ly * width + lx) * 3;
+        sumL += rgbToLab(pixelBuf[pi], pixelBuf[pi+1], pixelBuf[pi+2])[0];
+        sampleCount++;
+      }
+      const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
+      const rawLumScale = avgL > 1 ? tL / avgL : 1;
+      const clampedLumScale = Math.max(0.05, Math.min(4.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));
+      const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+      for (let py = py0; py < py1; py++) {
+        for (let px = px0; px < px1; px++) {
+          const pi = (py * width + px) * 3;
+          const [pl, pa, pb] = rgbToLab(pixelBuf[pi], pixelBuf[pi+1], pixelBuf[pi+2]);
+          let newL = Math.max(0, Math.min(100, pl * lumScale));
+          if (isShadowZone && shadowBoost > 0.05) {
+            const dev = pl - avgL;
+            newL = Math.max(0, Math.min(100, newL + dev * shadowBoost * 0.4));
+          }
+          if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+          const clampedDA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, (tA - pa) * AB_BLEND));
+          const rawDB = (tBlab - pb) * AB_BLEND;
+          const clampedDB = rawDB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDB) : Math.min(MAX_COLOR_SHIFT, rawDB);
+          const newA = Math.max(-128, Math.min(127, pa + clampedDA));
+          const newBv2 = Math.max(-128, Math.min(127, pb + clampedDB));
+          const contrastL = Math.max(0, Math.min(100, 50 + (newL-50)*cBoost));
+          const bSatBoost = newBv2 < 0 ? Math.min(satBoost, 1.0) : satBoost;
+          const [nr, ng, nb] = labToRgb(contrastL, Math.max(-128,Math.min(127,newA*satBoost)), Math.max(-128,Math.min(127,newBv2*bSatBoost)));
+          pixelBuf[pi] = nr; pixelBuf[pi+1] = ng; pixelBuf[pi+2] = nb;
+        }
+      }
+    }
+  }
+}
+
 // Helper: Apply overlay blending to a raw RGB pixel buffer (matches client-side Step 6)
 // Blends the original target photo over the mosaic tiles for better visual coherence.
 function applyOverlay(
@@ -1575,7 +1677,8 @@ function applyOverlay(
 
 app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) => {
   const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
-    overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
+    overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask,
+    colorEnhance: clientColorEnhance = 0
   } = req.body as {
     tileIds: number[];
     assignment: number[];
@@ -1590,6 +1693,7 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
     targetColors?: number[];
     edgeMap?: number[];
     faceMask?: boolean[];
+    colorEnhance?: number;
   };
 
   if (!tileIds?.length || !assignment?.length || !cols || !rows) {
@@ -1705,7 +1809,12 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
           create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
         }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
-        updateProgress(80, 'Overlay anwenden...');
+        updateProgress(80, 'Farbkorrektur + Overlay anwenden...');
+        // Apply LAB color transfer first (brightness + color shift per tile)
+        if (clientColorEnhance > 0 && targetColors?.length) {
+          applyLabColorTransfer(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+        }
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
@@ -1766,6 +1875,11 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
           create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
         }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
+        // Apply LAB color transfer first (brightness + color shift per tile)
+        if (clientColorEnhance > 0 && targetColors?.length) {
+          applyLabColorTransfer(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+        }
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
@@ -2098,6 +2212,10 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
     (async () => {
       try {
         const { cols, rows, format = 'jpg', userOverlay = 0, colorEnhance = 0 } = rp;
+        // Color correction data from client (required for quality)
+        const targetColors: number[] = rp.targetColors ?? [];
+        const edgeMap: number[] = rp.edgeMap ?? [];
+        const faceMask: boolean[] = rp.faceMask ?? [];
         // Use 128px tiles (max available from R2 without upscaling)
         // 128px tiles at 400 DPI = 0.81 cm/tile (very close to 1 cm/tile @ 315 DPI)
         // For best quality: use 128px which matches R2 tile resolution exactly
@@ -2176,30 +2294,168 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
           console.log(`[admin-render] User tiles loaded: ${uniqueNegativeIds.filter(id => tileBuffers.has(id)).length}/${uniqueNegativeIds.length}`);
         }
         await setProgress(50, 'Mosaik wird zusammengesetzt...');
-        // Compose mosaic using sharp
-        const compositeOps: sharp.OverlayOptions[] = [];
-        for (let i = 0; i < assignment.length; i++) {
-          const tileId = usedTileIds[i];
-          const buf = tileBuffers.get(tileId);
-          if (!buf) continue;
-          const col = i % cols;
-          const row = Math.floor(i / cols);
-          compositeOps.push({ input: buf, left: col * tilePx, top: row * tilePx });
+        // STRIP-BASED COMPOSITING: Process image in horizontal strips to avoid OOM
+        // Each strip = STRIP_ROWS tile rows. This keeps memory usage manageable (~60 MB/strip)
+        // and avoids repeated JPEG compression artifacts from batch compositing.
+        const STRIP_ROWS = 8; // rows of tiles per strip
+        const stripCount = Math.ceil(rows / STRIP_ROWS);
+
+        // LAB color transfer helper functions (same as client renderMosaicClientSide)
+        const labToRgbAdmin = (L: number, a: number, b: number): [number, number, number] => {
+          let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+          x = (x**3 > 0.008856 ? x**3 : (x - 16/116)/7.787) * 0.95047;
+          y = (y**3 > 0.008856 ? y**3 : (y - 16/116)/7.787) * 1.00000;
+          z = (z**3 > 0.008856 ? z**3 : (z - 16/116)/7.787) * 1.08883;
+          const r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+          const g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+          const bv = x * 0.0557 + y * -0.2040 + z * 1.0570;
+          const toSrgb = (c: number) => c > 0.0031308 ? 1.055 * c**(1/2.4) - 0.055 : 12.92 * c;
+          return [Math.round(Math.max(0,Math.min(255,toSrgb(r)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(g)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(bv)*255)))];
+        };
+        const rgbToLabAdmin = (r: number, g: number, b: number): [number, number, number] => {
+          const toLinear = (c: number) => { const s = c/255; return s > 0.04045 ? ((s+0.055)/1.055)**2.4 : s/12.92; };
+          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
+          const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
+          const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
+          const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
+          const f = (t: number) => t > 0.008856 ? t**(1/3) : 7.787*t + 16/116;
+          return [116*f(y)-16, 500*(f(x)-f(y)), 200*(f(y)-f(z))];
+        };
+        const softLightAdmin = (base: number, blend: number): number => {
+          const bv = blend/255, s = base/255;
+          return Math.round(Math.max(0,Math.min(255, (bv<0.5?s-(1-2*bv)*s*(1-s):s+(2*bv-1)*(Math.sqrt(s)-s))*255)));
+        };
+
+        // Color correction parameters (matching client renderMosaicClientSide)
+        const colorEnhanceVal = colorEnhance / 100;
+        const AB_BLEND_BASE = 0.12;
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;
+        const L_BLEND = 0.40;
+        const MAX_COLOR_SHIFT = 15;
+        const MAX_BLUE_SHIFT = 5;
+        const cBoost = 1.30;
+        const satBoost = 0.90 + cBoost * 0.15;
+        const BASE_OL = 0.15;
+        const EDGE_B = 0.20;
+        const hasColorCorrection = colorEnhance > 0 || targetColors.length > 0;
+
+        // Process each strip
+        const stripBuffers: Buffer[] = [];
+        for (let s = 0; s < stripCount; s++) {
+          const stripRowStart = s * STRIP_ROWS;
+          const stripRowEnd = Math.min(stripRowStart + STRIP_ROWS, rows);
+          const stripH = (stripRowEnd - stripRowStart) * tilePx;
+          // Collect composite ops for this strip
+          const stripOps: sharp.OverlayOptions[] = [];
+          for (let r2 = stripRowStart; r2 < stripRowEnd; r2++) {
+            for (let c2 = 0; c2 < cols; c2++) {
+              const ci = r2 * cols + c2;
+              const tileId = usedTileIds[ci];
+              const buf = tileBuffers.get(tileId);
+              if (!buf) continue;
+              stripOps.push({ input: buf, left: c2 * tilePx, top: (r2 - stripRowStart) * tilePx });
+            }
+          }
+
+          // Composite strip (lossless raw)
+          const stripRaw = await sharp({
+            create: { width: outW, height: stripH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+            limitInputPixels: false,
+          }).composite(stripOps).raw().toBuffer();
+
+          // Apply LAB color correction per tile cell in this strip
+          if (hasColorCorrection) {
+            const nCh = 3;
+            for (let r2 = stripRowStart; r2 < stripRowEnd; r2++) {
+              for (let c2 = 0; c2 < cols; c2++) {
+                const ci = r2 * cols + c2;
+                const tci = ci * 3;
+                const tR = targetColors[tci] ?? 128;
+                const tG = targetColors[tci+1] ?? 128;
+                const tBv = targetColors[tci+2] ?? 128;
+                const [tL, tA, tBlab] = rgbToLabAdmin(tR, tG, tBv);
+                const isShadowZone = tL < 40;
+                const shadowBoost = isShadowZone ? Math.max(0, (40-tL)/40) : 0;
+                const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+                const edge = edgeMap[ci] ?? 0;
+                const faceBoost = (faceMask[ci] ? 0.04 : 0);
+                const str = Math.min(0.30, BASE_OL + edge*EDGE_B + faceBoost);
+                const applyOl = str > 0.01 && targetColors.length > 0;
+
+                // Sample tile pixels for avgL
+                const px0 = c2 * tilePx, py0 = (r2 - stripRowStart) * tilePx;
+                const px1 = Math.min(px0 + tilePx, outW), py1 = Math.min(py0 + tilePx, stripH);
+                const totalPx = (px1-px0) * (py1-py0);
+                const step = Math.max(1, Math.floor(totalPx / 64));
+                let sumL = 0, sampleCount = 0;
+                for (let si = 0; si < totalPx; si += step) {
+                  const lx = px0 + (si % (px1-px0));
+                  const ly = py0 + Math.floor(si / (px1-px0));
+                  const pi = (ly * outW + lx) * nCh;
+                  sumL += rgbToLabAdmin(stripRaw[pi], stripRaw[pi+1], stripRaw[pi+2])[0];
+                  sampleCount++;
+                }
+                const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
+                const rawLumScale = avgL > 1 ? tL / avgL : 1;
+                const clampedLumScale = Math.max(0.05, Math.min(4.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));
+                const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+                // Apply per-pixel LAB transfer + overlay
+                for (let py = py0; py < py1; py++) {
+                  for (let px = px0; px < px1; px++) {
+                    const pi = (py * outW + px) * nCh;
+                    const [pl, pa, pb] = rgbToLabAdmin(stripRaw[pi], stripRaw[pi+1], stripRaw[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const dev = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + dev * (1.0 + shadowBoost*0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tBlab - pb) * AB_BLEND;
+                    const clampedDA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDA));
+                    const newBv2 = Math.max(-128, Math.min(127, pb + clampedDB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL-50)*cBoost));
+                    const bSatBoost = newBv2 < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    let [nr, ng, nb] = labToRgbAdmin(contrastL, Math.max(-128,Math.min(127,newA*satBoost)), Math.max(-128,Math.min(127,newBv2*bSatBoost)));
+                    if (applyOl) {
+                      nr = Math.round(nr*(1-str) + softLightAdmin(nr,tR)*str);
+                      ng = Math.round(ng*(1-str) + softLightAdmin(ng,tG)*str);
+                      nb = Math.round(nb*(1-str) + softLightAdmin(nb,tBv)*str);
+                    }
+                    stripRaw[pi] = nr; stripRaw[pi+1] = ng; stripRaw[pi+2] = nb;
+                  }
+                }
+              }
+            }
+          }
+
+          // Encode strip as JPEG for final assembly
+          const stripJpeg = await sharp(stripRaw, {
+            raw: { width: outW, height: stripH, channels: 3 },
+            limitInputPixels: false,
+          }).jpeg({ quality: 92 }).toBuffer();
+          stripBuffers.push(stripJpeg);
+
+          const pct = Math.round(50 + ((s + 1) / stripCount) * 40);
+          await setProgress(pct, `Rendering: Strip ${s + 1}/${stripCount}`);
+          console.log(`[admin-render] Strip ${s+1}/${stripCount} done (rows ${stripRowStart}-${stripRowEnd})`);
         }
-        // Build base canvas
-        let canvas = sharp({
-          create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } }
-        }).jpeg({ quality: 92 });
-        // Composite in batches of 500
-        const BATCH = 500;
-        let baseBuf = await canvas.toBuffer();
-        for (let b = 0; b < compositeOps.length; b += BATCH) {
-          const batch = compositeOps.slice(b, b + BATCH);
-          baseBuf = await sharp(baseBuf).composite(batch).jpeg({ quality: 92 }).toBuffer();
-          const pct = Math.round(50 + ((b + batch.length) / compositeOps.length) * 40);
-          await setProgress(pct, `Compositing: ${b + batch.length}/${compositeOps.length} Tiles`);
-          console.log(`[admin-render] Composited batch ${b}-${b + batch.length}/${compositeOps.length}`);
-        }
+
+        // Assemble all strips into final image
+        await setProgress(90, 'Strips werden zusammengesetzt...');
+        const stripCompositeOps: sharp.OverlayOptions[] = stripBuffers.map((buf, i) => ({
+          input: buf,
+          top: i * STRIP_ROWS * tilePx,
+          left: 0,
+        }));
+        let baseBuf = await sharp({
+          create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+          limitInputPixels: false,
+        }).composite(stripCompositeOps).jpeg({ quality: 92 }).toBuffer();
+        console.log(`[admin-render] All ${stripCount} strips assembled`);
         await setProgress(92, 'Bild wird auf R2 hochgeladen...');
         // Upload to R2
         const filename = `orders/order-${orderId}-${Date.now()}.jpg`;

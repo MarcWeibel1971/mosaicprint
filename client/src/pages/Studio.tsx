@@ -1008,6 +1008,7 @@ export default function Studio() {
           targetColors: targetColorsRef.current,
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
+          colorEnhance,
         }),
       });
       clearTimeout(timeoutId);
@@ -5331,9 +5332,12 @@ export default function Studio() {
             }
           }
 
-          // Restore user photo (skip auto-render: project already has rendered image)
+          // Restore user photo
+          // In admin mode (orderId param present): trigger full re-render so sliders work
+          // In normal mode: skip auto-render since project already has rendered image
+          const isAdminMode = !!searchParams.get('orderId');
           if (data.userPhoto) {
-            skipAutoRenderRef.current = true;
+            if (!isAdminMode) skipAutoRenderRef.current = true;
             const uImg = new Image();
             uImg.onload = () => {
               setUserPhotoImg(uImg);
@@ -5814,6 +5818,10 @@ export default function Studio() {
             // Full assignment and tileIds for server-side rendering by admin
             assignment: assignmentRef.current,
             tileIds: tileIdsRef.current,
+            // Color correction data for server-side LAB transfer + overlay (required for quality)
+            targetColors: targetColorsRef.current,
+            edgeMap: edgeMapRef.current,
+            faceMask: faceMaskRef.current,
             // R2 URLs for user-uploaded tiles (negative IDs) – required for server-side rendering
             ...(Object.keys(userTileUrls).length > 0 ? { userTileUrls } : {}),
           },
