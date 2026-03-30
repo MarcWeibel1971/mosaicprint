@@ -6524,21 +6524,25 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 {order.photo_url && (
                   <div className="flex-1">
                     <p className="text-xs text-gray-400 mb-1">Kundenfoto</p>
-                    <img
-                      src={order.photo_url}
-                      alt="Kundenfoto"
-                      className="w-full h-28 object-cover rounded-lg border border-gray-200"
-                    />
+                    <div className="w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden">
+                      <img
+                        src={order.photo_url}
+                        alt="Kundenfoto"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    </div>
                   </div>
                 )}
                 {order.mosaic_preview_url && (
                   <div className="flex-1">
                     <p className="text-xs text-gray-400 mb-1">Mosaik-Vorschau</p>
-                    <img
-                      src={order.mosaic_preview_url}
-                      alt="Mosaik-Vorschau"
-                      className="w-full h-28 object-cover rounded-lg border border-gray-200"
-                    />
+                    <div className="w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden">
+                      <img
+                        src={order.mosaic_preview_url}
+                        alt="Mosaik-Vorschau"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
@@ -6568,16 +6572,22 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 </a>
               )}
 
-              {/* Server-side render button for pending_render orders */}
-              {(order.status === 'pending_render' || order.status === 'render_error') && order.render_params?.assignment && (
+              {/* Server-side render button – available for all statuses when render_params exist */}
+              {order.render_params?.assignment && (
                 <button
                   onClick={() => renderAndDownload(order)}
                   disabled={renderingId !== null}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  {renderingId === order.id ? 'Rendering...' : 'Printfile generieren'}
+                  {renderingId === order.id ? 'Rendering...' : (order.status === 'ready' ? 'Neu rendern' : 'Printfile generieren')}
                 </button>
+              )}
+              {/* Fallback: no render_params = user-uploaded tiles, must use Studio */}
+              {!order.render_params?.assignment && order.project_id && (
+                <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg">
+                  ⚠️ Eigene Fotos – bitte im Studio rendern
+                </span>
               )}
 
               {/* Open in Studio button */}

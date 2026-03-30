@@ -2060,24 +2060,39 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
     // Trigger async render
     (async () => {
       try {
-        const { cols, rows, tilePx = 157, format = 'jpg', userOverlay = 0, colorEnhance = 0 } = rp;
+        const { cols, rows, format = 'jpg', userOverlay = 0, colorEnhance = 0 } = rp;
+        // Use 128px tiles (max available from R2 without upscaling)
+        // 128px tiles at 400 DPI = 0.81 cm/tile (very close to 1 cm/tile @ 315 DPI)
+        // For best quality: use 128px which matches R2 tile resolution exactly
+        const tilePx = 128;
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
         const outW = cols * tilePx;
         const outH = rows * tilePx;
         console.log(`[admin-render] Order #${orderId}: ${cols}x${rows} tiles, ${outW}x${outH}px`);
         // Load all unique tile images
-        const uniqueIds = [...new Set(tileIds)];
+        // assignment[i] = index into tileIds array; tileIds[idx] = actual DB tile ID
+        const usedTileIds: number[] = assignment.map((idx: number) => tileIds[idx]);
+        const uniqueIds = [...new Set(usedTileIds.filter((id: number) => id > 0))]; // skip negative (user-uploaded)
+        if (uniqueIds.length === 0) {
+          throw new Error('No valid tile IDs found. Order may use user-uploaded tiles which cannot be rendered server-side.');
+        }
         const tileBuffers = new Map<number, Buffer>();
-        await Promise.all(uniqueIds.map(async (id) => {
-          const buf = await loadTileBuffer(id, tilePx);
-          if (buf) tileBuffers.set(id, buf);
-        }));
-        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} tiles`);
+        // Load in batches of 50 to avoid overwhelming the tile proxy
+        const LOAD_BATCH = 50;
+        for (let lb = 0; lb < uniqueIds.length; lb += LOAD_BATCH) {
+          const batch = uniqueIds.slice(lb, lb + LOAD_BATCH);
+          await Promise.all(batch.map(async (id: number) => {
+            const buf = await loadTileBuffer(id, tilePx);
+            if (buf) tileBuffers.set(id, buf);
+          }));
+          if (lb % 500 === 0) console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} tiles...`);
+        }
+        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} unique tiles`);
         // Compose mosaic using sharp
         const compositeOps: sharp.OverlayOptions[] = [];
         for (let i = 0; i < assignment.length; i++) {
-          const tileId = tileIds[assignment[i]];
+          const tileId = usedTileIds[i];
           const buf = tileBuffers.get(tileId);
           if (!buf) continue;
           const col = i % cols;

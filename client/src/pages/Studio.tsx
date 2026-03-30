@@ -593,8 +593,40 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
 
 // Printolino-konforme Druckformate
 // Pixelgroesse bei 400 dpi (Ultra HD Druckqualitaet): px = cm x (400 / 2.54) = cm x 157.48
-// 400 DPI = 1 Kachel pro cm bei 157px Kachelgroesse → optimale Druckschaerfe
-// Kleinste sinnvolle Kachelgroesse: 40x40cm (darunter sind einzelne Kacheln zu klein)
+// Printolino Preiskatalog (Preise exkl. MWST, CHF)
+// Material-Typen: Alu-Dibond, Poster/Fotopapier, Leinwand, Acrylglas
+// Format: cols×rows cm (1 Kachel = 1 cm), Preis je nach Material
+
+// Printolino Alu-Dibond Preise (ohne Aufhängung, exkl. MWST)
+// Preisformel: Annäherung aus Preisliste 2022
+function getPrintPrice(cols: number, rows: number, materialIdx: number): number {
+  const area = cols * rows; // cm²
+  // Base price per material type (Alu-Dibond as reference)
+  // Alu-Dibond: ~0.022 CHF/cm² + 20 CHF Grundpreis
+  // Poster: ~0.006 CHF/cm² + 5 CHF
+  // Leinwand: ~0.015 CHF/cm² + 15 CHF
+  // Acrylglas: ~0.032 CHF/cm² + 25 CHF
+  const configs = [
+    { base: 20, perCm2: 0.022 },  // 0: Alu-Dibond
+    { base: 5,  perCm2: 0.006 },  // 1: Poster/Fotopapier
+    { base: 15, perCm2: 0.015 },  // 2: Leinwand
+    { base: 25, perCm2: 0.032 },  // 3: Acrylglas
+  ];
+  const cfg = configs[materialIdx] ?? configs[0];
+  const raw = cfg.base + area * cfg.perCm2;
+  // Round to nearest .90 (Printolino pricing convention)
+  return Math.round(raw / 10) * 10 - 0.10;
+}
+
+// Printolino Materialien
+const PRINT_MATERIALS = [
+  { label: 'Alu-Dibond', desc: '2mm Alu-Dibond, Fotopapier glänzend', icon: '🔲', quality: 'Premium' },
+  { label: 'Poster', desc: 'Fotopapier glänzend oder seidenmatt', icon: '📄', quality: 'Standard' },
+  { label: 'Leinwand', desc: 'Leinwanddruck auf Keilrahmen', icon: '🖼️', quality: 'Classic' },
+  { label: 'Acrylglas', desc: 'Direktdruck hinter Acrylglas 4mm', icon: '✨', quality: 'Premium+' },
+];
+
+// Legacy PRINT_FORMATS (used by Stripe/digital download flow)
 const PRINT_FORMATS = [
   { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 400, pxW: 6299, pxH: 6299 },
   { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 400, pxW: 7874, pxH: 11024 },
@@ -652,6 +684,7 @@ export default function Studio() {
   const [popOutMode, setPopOutMode] = useState(false);
   const [selectedFormat, setSelectedFormat] = useState(0); // 40x40 default (smallest available)
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
+  const [selectedPrintMaterial, setSelectedPrintMaterial] = useState(0); // 0=Alu-Dibond default
 
   // Tile source mode: 'pool' = our DB only (default), 'own' = user photos only, 'mix' = user + DB
   const [tileSourceMode, setTileSourceMode] = useState<'pool' | 'own' | 'mix'>('pool');
@@ -5688,13 +5721,15 @@ export default function Studio() {
       setDlProgress(50);
 
       // 3. Create order in DB with full render params (admin renders server-side)
+      const printMat = PRINT_MATERIALS[selectedPrintMaterial];
+      const printPrice = getPrintPrice(cols, rows, selectedPrintMaterial);
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           formatLabel: `${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()} px)`,
-          materialLabel: 'Alu-Dibond',
-          priceChf: 214,
+          materialLabel: printMat.label,
+          priceChf: printPrice,
           customerEmail: user?.email ?? null,
           userId: user?.id ?? null,
           projectId: savedProjectIdRef.current ?? null,
@@ -5729,7 +5764,7 @@ export default function Studio() {
       setPrintolinoLoading(false);
       setDlLoading(false);
     }
-  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto]);
+  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
@@ -6811,36 +6846,69 @@ export default function Studio() {
                 {(() => {
                   const printCols = mosaicParamsRef.current?.cols ?? 120;
                   const printRows = mosaicParamsRef.current?.rows ?? 90;
-                  // 1 tile = 1 cm → poster size in cm = cols × rows
-                  // tilePx at 400 DPI: 1 cm × (400/2.54) ≈ 157 px
                   const TILE_PX_400DPI = 157;
                   const outW = printCols * TILE_PX_400DPI;
                   const outH = printRows * TILE_PX_400DPI;
+                  const printPrice = getPrintPrice(printCols, printRows, selectedPrintMaterial);
+                  const printMat = PRINT_MATERIALS[selectedPrintMaterial];
                   return (
                     <>
                       {/* Blue info box: poster format derived from grid */}
-                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 text-sm">
-                        <p className="font-bold text-blue-800 mb-2">Druckqualitaet &amp; Poster-Groesse</p>
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 text-sm">
+                        <p className="font-bold text-blue-800 mb-2">Druckqualität &amp; Poster-Grösse</p>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                          <span className="text-blue-600 font-medium">Poster-Groesse:</span>
+                          <span className="text-blue-600 font-medium">Poster-Grösse:</span>
                           <span className="text-blue-900 font-bold">{printCols} × {printRows} cm</span>
-                          <span className="text-blue-600 font-medium">Kachel-Groesse:</span>
+                          <span className="text-blue-600 font-medium">Kachel-Grösse:</span>
                           <span className="text-blue-900 font-bold">10mm × 10mm ✓</span>
                           <span className="text-blue-600 font-medium">Anzahl Kacheln:</span>
                           <span className="text-blue-900 font-bold">{printCols} × {printRows} = {(printCols * printRows).toLocaleString('de-CH')}</span>
                           <span className="text-blue-600 font-medium">Ausgabe-Pixel:</span>
                           <span className="text-blue-900 font-bold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
                         </div>
-                        <p className="text-[10px] text-blue-500 mt-2">400 DPI Druckqualitaet · JPG · Ideal fuer 20–30 cm Betrachtungsabstand</p>
+                        <p className="text-[10px] text-blue-500 mt-2">400 DPI Druckqualität · JPG · Printolino-Druck in der Schweiz</p>
                       </div>
+
+                      {/* Material-Auswahl */}
+                      <div className="mb-4">
+                        <p className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Material wählen</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {PRINT_MATERIALS.map((mat, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => setSelectedPrintMaterial(idx)}
+                              className={`flex flex-col items-start p-3 rounded-xl border-2 text-left transition-all ${
+                                selectedPrintMaterial === idx
+                                  ? 'border-coral-500 bg-coral-50'
+                                  : 'border-gray-200 bg-white hover:border-gray-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className="text-base">{mat.icon}</span>
+                                <span className="font-semibold text-xs text-gray-900">{mat.label}</span>
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ml-auto ${
+                                  mat.quality === 'Premium+' ? 'bg-purple-100 text-purple-700' :
+                                  mat.quality === 'Premium' ? 'bg-blue-100 text-blue-700' :
+                                  mat.quality === 'Classic' ? 'bg-green-100 text-green-700' :
+                                  'bg-gray-100 text-gray-600'
+                                }`}>{mat.quality}</span>
+                              </div>
+                              <p className="text-[10px] text-gray-500 leading-tight">{mat.desc}</p>
+                              <p className="text-xs font-bold text-coral-700 mt-1.5">CHF {getPrintPrice(printCols, printRows, idx).toFixed(2)}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                       {/* Order summary */}
-                      <div className="bg-coral-50 rounded-xl p-4 mb-5">
+                      <div className="bg-coral-50 rounded-xl p-4 mb-4">
                         <div className="flex items-center justify-between">
                           <div>
-                            <p className="font-bold text-gray-900">Druck bestellen &ndash; {printCols}×{printRows} cm</p>
-                            <p className="text-sm text-gray-500">Hochauflösende Druckdatei · {outW.toLocaleString()}×{outH.toLocaleString()} px · JPG</p>
+                            <p className="font-bold text-gray-900">{printMat.icon} {printMat.label} – {printCols}×{printRows} cm</p>
+                            <p className="text-sm text-gray-500">{outW.toLocaleString()}×{outH.toLocaleString()} px · 400 DPI · JPG</p>
+                            <p className="text-[10px] text-gray-400 mt-0.5">Preis exkl. 8.1% MWST &amp; Versand</p>
                           </div>
-                          <div className="text-2xl font-extrabold text-coral-700">CHF 29</div>
+                          <div className="text-2xl font-extrabold text-coral-700">CHF {printPrice.toFixed(2)}</div>
                         </div>
                       </div>
                     </>
@@ -6861,7 +6929,13 @@ export default function Studio() {
                   className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
                 >
                   {(printolinoLoading || dlLoading) ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
-                  {`Druck bestellen · ${mosaicParamsRef.current?.cols ?? 120}×${mosaicParamsRef.current?.rows ?? 90} cm · CHF 29`}
+                  {(() => {
+                    const c = mosaicParamsRef.current?.cols ?? 120;
+                    const r = mosaicParamsRef.current?.rows ?? 90;
+                    const p = getPrintPrice(c, r, selectedPrintMaterial);
+                    const m = PRINT_MATERIALS[selectedPrintMaterial].label;
+                    return `${m} bestellen · ${c}×${r} cm · CHF ${p.toFixed(2)}`;
+                  })()}
                 </button>
 
                 <div className="flex items-center justify-between mt-3">
