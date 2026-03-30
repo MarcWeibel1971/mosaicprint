@@ -2681,10 +2681,24 @@ app.get('/api/admin/ai-pending-debug', async (_req, res) => {
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_analyzed_at IS NULL) as lhq_no_analyzed_at,
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'pending') as lhq_pending_status,
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'rejected') as lhq_rejected_status,
-        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status IS NULL) as lhq_null_status
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status IS NULL) as lhq_null_status,
+        -- Pending images breakdown
+        COUNT(*) FILTER (WHERE quality_status = 'pending') as total_pending,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NOT NULL) as pending_has_r2,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND tile128_url IS NOT NULL) as pending_has_tile128,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND source_url IS NOT NULL) as pending_has_source,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NULL AND tile128_url IS NULL AND source_url IS NULL) as pending_no_url,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NULL AND tile128_url IS NULL AND source_url IS NOT NULL) as pending_source_only
       FROM mosaic_images
     `);
-    res.json({ ok: true, debug: result.rows[0] });
+    // Also get a sample of pending images
+    const sample = await pool.query(`
+      SELECT id, source_url, tile128_url, r2_url, quality_status, ai_analyzed_at, ai_mosaic_score
+      FROM mosaic_images
+      WHERE quality_status = 'pending'
+      LIMIT 5
+    `);
+    res.json({ ok: true, debug: result.rows[0], sample: sample.rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
