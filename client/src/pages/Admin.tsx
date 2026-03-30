@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle,
-  Users, Link, Plus, QrCode
+  Users, Link, Plus, QrCode, Eye
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
