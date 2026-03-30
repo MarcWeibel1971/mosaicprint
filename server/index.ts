@@ -121,31 +121,38 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
       const rawSource = row.source_url || '';
       const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://') || rawSource.startsWith('data:');
       const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || row.tile128_url || rawSource);
-      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
+      // tile256Url: prefer tile256_url for print sizes (256px), fallback to r2_url/tile128_url
+      const tile256Url = row.tile256_url || '';
+      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, tile256Url, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
     } catch { return null; }
   }
 
   // URL selection strategy:
   // - size <= 128: use R2/tile128 (fast CDN, already 128px)
-  // - size > 128 (zoom/print): ALWAYS use source_url first for full resolution
-  //   Never fall back to tile128 for large sizes (would cause 128→400 upscale = blurry)
-  //   EXCEPTION: R2 tiles (tiles.mosaicprint.ch) are max 128px — return them at native
-  //   size rather than upscaling, since upscaling produces blurry results.
+  // - size > 128 (print): prefer source_url (Pexels/Unsplash original ~940px) for sharp output
+  //   For R2-only tiles (no source_url): use tile256_url if available, otherwise R2 at 128px
+  //   and allow Sharp to upscale (128→157px is only 1.2x, acceptable quality)
   const isR2Tile = (tileUrls.tile128Url || '').includes('tiles.mosaicprint.ch') ||
                    (tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch');
+  const hasExternalSource = (tileUrls.sourceUrl || '') !== '' &&
+    !((tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch'));
   let url: string;
   if (size <= 128) {
     url = tileUrls.tile128Url || tileUrls.sourceUrl;
-  } else if (isR2Tile) {
-    // R2 tiles are 128px max — serve at native 128px, no upscaling
-    url = tileUrls.tile128Url || tileUrls.sourceUrl;
-  } else {
+  } else if (hasExternalSource) {
+    // External source (Pexels/Unsplash): use full-res source for sharp print output
     url = tileUrls.sourceUrl || tileUrls.tile128Url;
+  } else if (tileUrls.tile256Url) {
+    // R2-only tile with 256px version: use it for better quality
+    url = tileUrls.tile256Url;
+  } else {
+    // R2-only tile without 256px: use 128px and let Sharp upscale (1.2x is acceptable)
+    url = tileUrls.tile128Url || tileUrls.sourceUrl;
   }
   if (!url) return null;
-  // For R2 tiles requested at size > 128: serve at native 128px (no upscaling)
-  const effectiveSize = (isR2Tile && size > 128) ? 128 : size;
+  // Always resize to requested size (Sharp handles upscaling gracefully)
+  const effectiveSize = size;
 
   // 3. Handle data URLs
   if (url.startsWith('data:')) {
@@ -185,7 +192,7 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
 }
 
 // 3. Tile URL cache: maps tile id → {tile128_url, source_url} to avoid DB per request
-const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; ts: number }>();
+const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; tile256Url?: string; ts: number }>();
 const TILE_URL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const TILE_URL_CACHE_MAX = 30000;
 

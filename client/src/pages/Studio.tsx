@@ -5637,7 +5637,7 @@ export default function Studio() {
       });
       const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
       forceDownloadBlob(blob, filename, mimeType3);
-      setDlProgressMsg(`✓ Download: ${filename} (${(blob3.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
@@ -5692,7 +5692,12 @@ export default function Studio() {
   const [printolinoLoading, setPrintolinoLoading] = useState(false);
   const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
   const handlePrintolinoOrder = useCallback(async () => {
-    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
+    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) {
+      console.warn('[PrintOrder] Guard failed: assignment.length=' + assignmentRef.current.length + ' tileIds.length=' + tileIdsRef.current.length + ' mosaicParams=' + JSON.stringify(mosaicParamsRef.current));
+      setDlProgressMsg('Fehler: Mosaik nicht bereit. Bitte zuerst ein Mosaik erstellen.');
+      setTimeout(() => setDlProgressMsg(''), 4000);
+      return;
+    }
     const { cols, rows } = mosaicParamsRef.current;
     // 1 tile = 1 cm @ 400 DPI → tilePx = 1 cm × (400/2.54) ≈ 157 px
     const TILE_PX_400DPI = 157;
@@ -7058,7 +7063,7 @@ export default function Studio() {
 
                 <button
                   onClick={handlePrintolinoOrder}
-                  disabled={printolinoLoading || dlLoading}
+                  disabled={printolinoLoading || dlLoading || !assignmentRef.current.length || !mosaicParamsRef.current}
                   className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
                 >
                   {(printolinoLoading || dlLoading) ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
