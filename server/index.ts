@@ -29,7 +29,7 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
-import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
+import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -2043,6 +2043,43 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
   }
 });
 
+// POST /api/orders/upload-user-tile – upload a user tile (base64 JPEG) to R2 for server-side rendering
+// Called during order creation when tileIds contain negative IDs (user-uploaded photos)
+app.post('/api/orders/upload-user-tile', express.json({ limit: '8mb' }), async (req, res) => {
+  try {
+    const { imageDataUrl, orderId, tileIndex } = req.body;
+    if (!imageDataUrl || typeof imageDataUrl !== 'string') {
+      return res.status(400).json({ error: 'imageDataUrl required' });
+    }
+    // Decode base64 data URL
+    const matches = imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!matches) return res.status(400).json({ error: 'Invalid data URL format' });
+    const contentType = matches[1];
+    const base64Data = matches[2];
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    // Resize to 128px for tile storage
+    const resizedBuffer = await sharp(imageBuffer)
+      .resize(128, 128, { fit: 'cover', position: 'centre' })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    // Upload to R2 under user-tiles/ prefix
+    const key = `user-tiles/order-${orderId ?? 'tmp'}-tile${tileIndex ?? Date.now()}-${Date.now()}.jpg`;
+    let r2Url: string | null = null;
+    if (isR2Configured()) {
+      r2Url = await uploadToR2(key, resizedBuffer, 'image/jpeg', 'public, max-age=31536000, immutable');
+    }
+    if (!r2Url) {
+      // Fallback: return data URL if R2 not configured
+      const fallbackDataUrl = `data:image/jpeg;base64,${resizedBuffer.toString('base64')}`;
+      return res.json({ ok: true, url: fallbackDataUrl, r2: false });
+    }
+    res.json({ ok: true, url: r2Url, r2: true });
+  } catch (e) {
+    console.error('[upload-user-tile] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/orders/:id/render – server-side render print file for an order
 app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (req, res) => {
   try {
@@ -2067,28 +2104,67 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const tilePx = 128;
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
+        // userTileUrls: mapping from negative tileId (as string) to R2 URL
+        // e.g. { "-1": "https://tiles.mosaicprint.ch/user-tiles/...", "-2": "..." }
+        const userTileUrls: Record<string, string> = rp.userTileUrls ?? {};
         const outW = cols * tilePx;
         const outH = rows * tilePx;
         console.log(`[admin-render] Order #${orderId}: ${cols}x${rows} tiles, ${outW}x${outH}px`);
         // Load all unique tile images
         // assignment[i] = index into tileIds array; tileIds[idx] = actual DB tile ID
         const usedTileIds: number[] = assignment.map((idx: number) => tileIds[idx]);
-        const uniqueIds = [...new Set(usedTileIds.filter((id: number) => id > 0))]; // skip negative (user-uploaded)
-        if (uniqueIds.length === 0) {
-          throw new Error('No valid tile IDs found. Order may use user-uploaded tiles which cannot be rendered server-side.');
+        // Separate positive DB tile IDs from negative user-uploaded tile IDs
+        const uniquePositiveIds = [...new Set(usedTileIds.filter((id: number) => id > 0))];
+        const uniqueNegativeIds = [...new Set(usedTileIds.filter((id: number) => id < 0))];
+        // Check if user tiles are available via userTileUrls
+        const missingUserTiles = uniqueNegativeIds.filter(id => !userTileUrls[String(id)]);
+        if (uniquePositiveIds.length === 0 && uniqueNegativeIds.length === 0) {
+          throw new Error('No valid tile IDs found in assignment.');
+        }
+        if (missingUserTiles.length > 0) {
+          console.warn(`[admin-render] Order #${orderId}: ${missingUserTiles.length} user tiles have no R2 URL: ${missingUserTiles.slice(0, 5).join(',')}`);
         }
         const tileBuffers = new Map<number, Buffer>();
-        // Load in batches of 50 to avoid overwhelming the tile proxy
+        // Load DB tiles in batches of 50
         const LOAD_BATCH = 50;
-        for (let lb = 0; lb < uniqueIds.length; lb += LOAD_BATCH) {
-          const batch = uniqueIds.slice(lb, lb + LOAD_BATCH);
+        for (let lb = 0; lb < uniquePositiveIds.length; lb += LOAD_BATCH) {
+          const batch = uniquePositiveIds.slice(lb, lb + LOAD_BATCH);
           await Promise.all(batch.map(async (id: number) => {
             const buf = await loadTileBuffer(id, tilePx);
             if (buf) tileBuffers.set(id, buf);
           }));
-          if (lb % 500 === 0) console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} tiles...`);
+          if (lb % 500 === 0) console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles...`);
         }
-        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniqueIds.length} unique tiles`);
+        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles`);
+        // Load user tiles from R2 URLs
+        if (uniqueNegativeIds.length > 0) {
+          console.log(`[admin-render] Loading ${uniqueNegativeIds.length} user tiles from R2...`);
+          await Promise.all(uniqueNegativeIds.map(async (id: number) => {
+            const url = userTileUrls[String(id)];
+            if (!url) return;
+            try {
+              let buf: Buffer;
+              if (url.startsWith('data:')) {
+                // Fallback: inline data URL (R2 not configured)
+                const base64 = url.split(',')[1];
+                buf = Buffer.from(base64, 'base64');
+              } else {
+                const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+                if (!resp.ok) { console.warn(`[admin-render] User tile ${id} fetch failed: ${resp.status}`); return; }
+                buf = Buffer.from(await resp.arrayBuffer());
+              }
+              // Resize to tilePx
+              const resized = await sharp(buf)
+                .resize(tilePx, tilePx, { fit: 'cover', position: 'centre' })
+                .jpeg({ quality: 90 })
+                .toBuffer();
+              tileBuffers.set(id, resized);
+            } catch (err) {
+              console.warn(`[admin-render] User tile ${id} load error:`, err);
+            }
+          }));
+          console.log(`[admin-render] User tiles loaded: ${uniqueNegativeIds.filter(id => tileBuffers.has(id)).length}/${uniqueNegativeIds.length}`);
+        }
         // Compose mosaic using sharp
         const compositeOps: sharp.OverlayOptions[] = [];
         for (let i = 0; i < assignment.length; i++) {

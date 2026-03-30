@@ -5720,7 +5720,58 @@ export default function Studio() {
 
       setDlProgress(50);
 
-      // 3. Create order in DB with full render params (admin renders server-side)
+      // 3. Upload user tiles (negative IDs) to R2 so server can render them later
+      // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
+      const currentTileIds = tileIdsRef.current;
+      const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
+      const userTileUrls: Record<string, string> = {};
+
+      if (uniqueNegativeIds.length > 0) {
+        setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
+        setDlProgress(55);
+        // For each unique negative tileId, get the corresponding user tile image
+        // tileId = -(index + 1), so index = Math.abs(tileId) - 1
+        // Use userTileOriginalRef for best quality, fall back to userTileHiResRef, then userTileImagesRef
+        const userOriginals = userTileOriginalRef.current;
+        const userHiRes = userTileHiResRef.current;
+        const userThumbs = userTileImagesRef.current;
+
+        let uploadedCount = 0;
+        await Promise.all(uniqueNegativeIds.map(async (tileId) => {
+          const idx = Math.abs(tileId) - 1;
+          const imgEl = userOriginals[idx] || userHiRes[idx] || userThumbs[idx];
+          if (!imgEl || !imgEl.src) return;
+          try {
+            // Get image data as JPEG data URL from the HTMLImageElement
+            const canvas = document.createElement('canvas');
+            canvas.width = imgEl.naturalWidth || imgEl.width;
+            canvas.height = imgEl.naturalHeight || imgEl.height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(imgEl, 0, 0);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+            // Upload to server which stores on R2
+            const uploadResp = await fetch('/api/orders/upload-user-tile', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify({ imageDataUrl: dataUrl, tileIndex: idx }),
+            });
+            if (uploadResp.ok) {
+              const uploadData = await uploadResp.json();
+              if (uploadData.ok && uploadData.url) {
+                userTileUrls[String(tileId)] = uploadData.url;
+                uploadedCount++;
+              }
+            }
+          } catch (err) {
+            console.warn(`[PrintOrder] User tile ${tileId} upload failed:`, err);
+          }
+        }));
+        console.log(`[PrintOrder] Uploaded ${uploadedCount}/${uniqueNegativeIds.length} user tiles to R2`);
+        setDlProgress(75);
+      }
+
+      // 4. Create order in DB with full render params (admin renders server-side)
       const printMat = PRINT_MATERIALS[selectedPrintMaterial];
       const printPrice = getPrintPrice(cols, rows, selectedPrintMaterial);
       const orderResp = await fetch('/api/orders/printolino', {
@@ -5746,6 +5797,8 @@ export default function Studio() {
             // Full assignment and tileIds for server-side rendering by admin
             assignment: assignmentRef.current,
             tileIds: tileIdsRef.current,
+            // R2 URLs for user-uploaded tiles (negative IDs) – required for server-side rendering
+            ...(Object.keys(userTileUrls).length > 0 ? { userTileUrls } : {}),
           },
         }),
       });
