@@ -2647,6 +2647,8 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
         COUNT(ai_analyzed_at) as analyzed,
         COUNT(*) FILTER (WHERE ai_mosaic_score IS NOT NULL) as analyzed_v7,
         COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status != 'rejected') as pending_lhq_only,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND quality_status != 'rejected') as pending_total,
         COUNT(*) FILTER (WHERE ai_suitability = 'excellent') as excellent,
         COUNT(*) FILTER (WHERE ai_suitability = 'good') as good,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor') as poor,
@@ -2662,6 +2664,27 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
       FROM mosaic_images
     `);
     res.json({ ok: true, stats: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// ── AI Pending Diagnose ──────────────────────────────────────────────────────
+app.get('/api/admin/ai-pending-debug', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected') as whereClause_count,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL) as lhq_only_count,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_mosaic_score IS NULL) as lhq_not_analyzed,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_analyzed_at IS NULL) as lhq_no_analyzed_at,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'pending') as lhq_pending_status,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'rejected') as lhq_rejected_status,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status IS NULL) as lhq_null_status
+      FROM mosaic_images
+    `);
+    res.json({ ok: true, debug: result.rows[0] });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
