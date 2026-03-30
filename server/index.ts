@@ -2691,14 +2691,26 @@ app.get('/api/admin/ai-pending-debug', async (_req, res) => {
         COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NULL AND tile128_url IS NULL AND source_url IS NOT NULL) as pending_source_only
       FROM mosaic_images
     `);
-    // Also get a sample of pending images
+    // Also get a sample of NULL-status images
     const sample = await pool.query(`
-      SELECT id, source_url, tile128_url, r2_url, quality_status, ai_analyzed_at, ai_mosaic_score
+      SELECT id, source_url, tile128_url, r2_url, quality_status, ai_analyzed_at, ai_mosaic_score, ai_suitability
       FROM mosaic_images
-      WHERE quality_status = 'pending'
+      WHERE quality_status IS NULL
       LIMIT 5
     `);
-    res.json({ ok: true, debug: result.rows[0], sample: sample.rows });
+    // Count NULL-status by ai_suitability
+    const nullBreakdown = await pool.query(`
+      SELECT
+        COALESCE(ai_suitability, 'NULL') as suitability,
+        COUNT(*) as cnt,
+        COUNT(ai_mosaic_score) as has_score,
+        COUNT(ai_analyzed_at) as has_analyzed_at
+      FROM mosaic_images
+      WHERE quality_status IS NULL
+      GROUP BY ai_suitability
+      ORDER BY cnt DESC
+    `);
+    res.json({ ok: true, debug: result.rows[0], sample: sample.rows, nullBreakdown: nullBreakdown.rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
