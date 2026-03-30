@@ -6453,7 +6453,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
 
   const openInStudio = (order: OrderItem) => {
     if (order.project_id) {
-      window.open(`/studio?projectId=${order.project_id}`, '_blank')
+      window.open(`/studio?project=${order.project_id}`, '_blank')
     } else {
       onMessage({ text: 'Kein Projekt verknüpft – Bestellung wurde ohne Login erstellt', type: 'info' })
     }
@@ -6493,6 +6493,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
         </div>
       )}
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
       {orders.map(order => (
         <div key={order.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="p-4 sm:p-5">
@@ -6538,26 +6539,26 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               <div className="flex gap-3 mb-3">
                 {order.photo_url && (
                   <div className="flex-1">
-                    <p className="text-xs text-gray-400 mb-1">Kundenfoto</p>
-                    <div className="w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden">
+                    <p className="text-xs text-gray-400 mb-1">Kundenfoto <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
+                    <a href={order.photo_url} target="_blank" rel="noopener noreferrer" className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
                       <img
                         src={order.photo_url}
                         alt="Kundenfoto"
                         className="max-w-full max-h-full object-contain"
                       />
-                    </div>
+                    </a>
                   </div>
                 )}
                 {order.mosaic_preview_url && (
                   <div className="flex-1">
-                    <p className="text-xs text-gray-400 mb-1">Mosaik-Vorschau</p>
-                    <div className="w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden">
+                    <p className="text-xs text-gray-400 mb-1">Mosaik-Vorschau <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
+                    <a href={order.mosaic_preview_url} target="_blank" rel="noopener noreferrer" className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
                       <img
                         src={order.mosaic_preview_url}
                         alt="Mosaik-Vorschau"
                         className="max-w-full max-h-full object-contain"
                       />
-                    </div>
+                    </a>
                   </div>
                 )}
               </div>
@@ -6679,6 +6680,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
           </div>
         </div>
       ))}
+      </div>
     </div>
   )
 }
