@@ -2367,9 +2367,11 @@ async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, 
   const pool = db.getPool();
   // v7 re-analysis: always re-analyze all tiles since prompt changed significantly
   // Include tiles with r2_url OR tile128_url (covers LHQ tiles that have no r2_url)
+  // IMPORTANT: In PostgreSQL, NULL != 'rejected' evaluates to NULL (not TRUE)!
+  // So we must use COALESCE or explicit NULL check to include tiles with quality_status IS NULL.
   const whereClause = forceReanalyze
-    ? `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND quality_status != 'rejected'`
-    : `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected'`;
+    ? `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (quality_status IS NULL OR quality_status != 'rejected')`
+    : `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (quality_status IS NULL OR quality_status != 'rejected')`;
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
   aiJobState.total = total;
@@ -2646,9 +2648,9 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
         COUNT(*) as total,
         COUNT(ai_analyzed_at) as analyzed,
         COUNT(*) FILTER (WHERE ai_mosaic_score IS NOT NULL) as analyzed_v7,
-        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
-        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status != 'rejected') as pending_lhq_only,
-        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND quality_status != 'rejected') as pending_total,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_with_r2,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND tile128_url IS NOT NULL AND r2_url IS NULL AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_lhq_only,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_total,
         COUNT(*) FILTER (WHERE ai_suitability = 'excellent') as excellent,
         COUNT(*) FILTER (WHERE ai_suitability = 'good') as good,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor') as poor,
@@ -2675,7 +2677,7 @@ app.get('/api/admin/ai-pending-debug', async (_req, res) => {
     const pool = db.getPool();
     const result = await pool.query(`
       SELECT
-        COUNT(*) FILTER (WHERE (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected') as whereClause_count,
+        COUNT(*) FILTER (WHERE (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (quality_status IS NULL OR quality_status != 'rejected')) as whereClause_count,
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL) as lhq_only_count,
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_mosaic_score IS NULL) as lhq_not_analyzed,
         COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_analyzed_at IS NULL) as lhq_no_analyzed_at,
