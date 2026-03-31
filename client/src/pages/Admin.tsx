@@ -483,12 +483,15 @@ function R2MigrationPanel() {
 
 function Tile256Backfill() {
   const { authHeaders } = useAuth();
-  const [status, setStatus] = React.useState<{ running: boolean; total: number; done: number; errors: number; finishedAt: string; errorDetails?: string[] } | null>(null);
+  const [status, setStatus] = React.useState<{ running: boolean; total: number; done: number; errors: number; finishedAt: string } | null>(null);
   const [starting, setStarting] = React.useState(false);
+  const [message, setMessage] = React.useState('');
+  const [error, setError] = React.useState('');
 
   const fetchStatus = React.useCallback(async () => {
     try {
       const r = await fetch('/api/admin/backfill-tile256', { headers: authHeaders() });
+      if (!r.ok) return;
       const d = await r.json();
       if (d.ok) setStatus(d);
     } catch { /* ignore */ }
@@ -502,15 +505,25 @@ function Tile256Backfill() {
 
   const start = async () => {
     setStarting(true);
+    setMessage('');
+    setError('');
     try {
-      await fetch('/api/admin/backfill-tile256', { method: 'POST', headers: authHeaders() });
-      fetchStatus();
-    } catch { /* ignore */ }
+      const r = await fetch('/api/admin/backfill-tile256', { method: 'POST', headers: authHeaders() });
+      const d = await r.json();
+      if (d.ok) {
+        setMessage(d.message || 'Backfill gestartet');
+      } else {
+        setError(d.error || 'Unbekannter Fehler');
+      }
+      setTimeout(fetchStatus, 500);
+    } catch (e) {
+      setError(String(e));
+    }
     setStarting(false);
   };
 
   const progress = status && status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
-  const isDone = status && !status.running && status.finishedAt && status.total > 0;
+  const isDone = status && !status.running && !!status.finishedAt && status.total > 0;
 
   return (
     <div className="mt-4 pt-4 border-t border-orange-100">
@@ -540,6 +553,13 @@ function Tile256Backfill() {
       >
         {status?.running ? '⏳ Backfill läuft...' : isDone ? '🔧 Erneut starten (neue Tiles)' : '🔧 Tile256 Backfill starten'}
       </button>
+
+      {message && (
+        <div className="mt-3 p-3 rounded-xl text-sm bg-green-50 text-green-800 border border-green-200">{message}</div>
+      )}
+      {error && (
+        <div className="mt-3 p-3 rounded-xl text-sm bg-red-50 text-red-800 border border-red-200">{error}</div>
+      )}
     </div>
   );
 }
