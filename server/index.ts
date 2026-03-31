@@ -947,107 +947,115 @@ app.post("/api/admin/migrate-r2-urls", async (_req, res) => {
 });
 
 // POST /api/admin/backfill-tile256  →  create 256px tiles for LHQ images and upload to R2
+// Runs in background to avoid Cloudflare 524 timeout. Use GET to poll status.
+const backfillStatus = { running: false, total: 0, done: 0, errors: 0, errorDetails: [] as string[], finishedAt: '' };
+
+app.get("/api/admin/backfill-tile256", (_req, res) => {
+  res.json({ ok: true, ...backfillStatus });
+});
+
 app.post("/api/admin/backfill-tile256", async (_req, res) => {
-  try {
-    if (!isR2Configured()) return res.status(400).json({ ok: false, error: 'R2 not configured' });
-    const pool = db.getPool();
+  if (backfillStatus.running) return res.json({ ok: true, message: 'Backfill läuft bereits...', ...backfillStatus });
+  if (!isR2Configured()) return res.status(400).json({ ok: false, error: 'R2 not configured' });
 
-    // Find LHQ tiles that have no tile256_url yet
-    const rows = (await pool.query(`
-      SELECT id, tile128_url, r2_url
-      FROM mosaic_images
-      WHERE source_url LIKE 'lhq://%'
-        AND tile256_url IS NULL
-        AND (tile128_url IS NOT NULL OR r2_url IS NOT NULL)
-    `)).rows;
+  const pool = db.getPool();
+  const rows = (await pool.query(`
+    SELECT id, tile128_url, r2_url
+    FROM mosaic_images
+    WHERE source_url LIKE 'lhq://%'
+      AND tile256_url IS NULL
+      AND (tile128_url IS NOT NULL OR r2_url IS NOT NULL)
+  `)).rows;
 
-    const total = rows.length;
-    if (total === 0) return res.json({ ok: true, total: 0, done: 0, errors: 0, message: 'Keine LHQ-Tiles ohne tile256_url gefunden.' });
+  const total = rows.length;
+  if (total === 0) return res.json({ ok: true, total: 0, done: 0, errors: 0, message: 'Keine LHQ-Tiles ohne tile256_url gefunden.' });
 
-    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
-    const s3 = new S3Client({
-      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID!, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY! },
-      region: 'auto',
-    });
-    const bucket = process.env.R2_BUCKET_NAME ?? 'mosaicprint-tiles';
-    const r2PublicUrl = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
+  // Respond immediately, process in background
+  backfillStatus.running = true;
+  backfillStatus.total = total;
+  backfillStatus.done = 0;
+  backfillStatus.errors = 0;
+  backfillStatus.errorDetails = [];
+  backfillStatus.finishedAt = '';
+  res.json({ ok: true, message: `Backfill gestartet für ${total} Tiles. Status per GET abrufbar.`, total });
 
-    let done = 0;
-    let errors = 0;
-    const errorDetails: string[] = [];
+  // Background processing
+  (async () => {
+    try {
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      const s3 = new S3Client({
+        endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID!, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY! },
+        region: 'auto',
+      });
+      const bucket = process.env.R2_BUCKET_NAME ?? 'mosaicprint-tiles';
+      const r2PublicUrl = (process.env.R2_PUBLIC_URL ?? '').replace(/\/$/, '');
 
-    for (const row of rows) {
-      try {
-        let srcBuffer: Buffer | null = null;
+      for (const row of rows) {
+        try {
+          let srcBuffer: Buffer | null = null;
 
-        // Try r2_url first (higher quality)
-        if (row.r2_url) {
-          try {
-            const resp = await fetch(row.r2_url);
-            if (resp.ok) srcBuffer = Buffer.from(await resp.arrayBuffer());
-          } catch { /* fall through */ }
-        }
+          // Try r2_url first (higher quality)
+          if (row.r2_url) {
+            try {
+              const resp = await fetch(row.r2_url);
+              if (resp.ok) srcBuffer = Buffer.from(await resp.arrayBuffer());
+            } catch { /* fall through */ }
+          }
 
-        // Fall back to tile128_url (data-URL)
-        if (!srcBuffer && row.tile128_url) {
-          const match = row.tile128_url.match(/^data:[^;]+;base64,(.+)$/);
-          if (match) {
-            srcBuffer = Buffer.from(match[1], 'base64');
+          // Fall back to tile128_url (data-URL)
+          if (!srcBuffer && row.tile128_url) {
+            const match = row.tile128_url.match(/^data:[^;]+;base64,(.+)$/);
+            if (match) {
+              srcBuffer = Buffer.from(match[1], 'base64');
+            }
+          }
+
+          if (!srcBuffer) {
+            backfillStatus.errors++;
+            backfillStatus.errorDetails.push(`ID ${row.id}: no source available`);
+            continue;
+          }
+
+          // Resize to 256x256 with Sharp
+          const resized = await sharp(srcBuffer)
+            .resize(256, 256, { fit: 'cover' })
+            .jpeg({ quality: 85 })
+            .toBuffer();
+
+          // Upload to R2
+          const key = `tiles/256/${row.id}.jpg`;
+          await s3.send(new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: resized,
+            ContentType: 'image/jpeg',
+            CacheControl: 'public, max-age=31536000',
+          }));
+
+          const tile256Url = `${r2PublicUrl}/${key}`;
+          await pool.query('UPDATE mosaic_images SET tile256_url = $1 WHERE id = $2', [tile256Url, row.id]);
+          backfillStatus.done++;
+        } catch (e) {
+          backfillStatus.errors++;
+          if (backfillStatus.errorDetails.length < 20) {
+            backfillStatus.errorDetails.push(`ID ${row.id}: ${String(e).slice(0, 100)}`);
           }
         }
-
-        if (!srcBuffer) {
-          errors++;
-          errorDetails.push(`ID ${row.id}: no source available`);
-          continue;
-        }
-
-        // Resize to 256x256 with Sharp
-        const resized = await sharp(srcBuffer)
-          .resize(256, 256, { fit: 'cover' })
-          .jpeg({ quality: 85 })
-          .toBuffer();
-
-        // Upload to R2
-        const key = `tiles/256/${row.id}.jpg`;
-        await s3.send(new PutObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          Body: resized,
-          ContentType: 'image/jpeg',
-          CacheControl: 'public, max-age=31536000',
-        }));
-
-        const tile256Url = `${r2PublicUrl}/${key}`;
-
-        // Update DB
-        await pool.query('UPDATE mosaic_images SET tile256_url = $1 WHERE id = $2', [tile256Url, row.id]);
-        done++;
-      } catch (e) {
-        errors++;
-        errorDetails.push(`ID ${row.id}: ${String(e).slice(0, 100)}`);
       }
+
+      // Invalidate caches
+      invalidateIndexCache();
+      tileUrlIndexCache.clear();
+      tileUrlCache.clear();
+      console.log(`[backfill-tile256] Done: ${backfillStatus.done}/${total}, errors: ${backfillStatus.errors}`);
+    } catch (e) {
+      console.error('[backfill-tile256] Fatal:', e);
+    } finally {
+      backfillStatus.running = false;
+      backfillStatus.finishedAt = new Date().toISOString();
     }
-
-    // Invalidate caches
-    invalidateIndexCache();
-    tileUrlIndexCache.clear();
-    tileUrlCache.clear();
-
-    console.log(`[backfill-tile256] Done: ${done}/${total}, errors: ${errors}`);
-    res.json({
-      ok: true,
-      total,
-      done,
-      errors,
-      errorDetails: errorDetails.slice(0, 20),
-      message: `${done}/${total} LHQ-Tiles auf 256px hochskaliert und auf R2 geladen. ${errors} Fehler.`,
-    });
-  } catch (e) {
-    console.error('[backfill-tile256] Failed:', e);
-    res.status(500).json({ ok: false, error: String(e) });
-  }
+  })();
 });
 
 // ── Gemini 2.5 Flash Image Analysis (replaces fal.ai Florence-2) ─────────────
