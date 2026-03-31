@@ -1341,13 +1341,14 @@ export default function Studio() {
         const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // Use same parameters as renderMosaic for visual consistency
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
-        // NOTE: Hi-res uses full-res source images (Pexels/Unsplash) which have stronger
-        // blue casts than the 128px thumbnails used in preview. Increase AB_BLEND and
-        // MAX_BLUE_SHIFT to compensate. Minimum blend of 0.18 even at 0% colorEnhance.
-        const AB_BLEND_BASE = 0.22 + 0.20 * blendFactor;  // increased from 0.12 for source_url images
-        const AB_BLEND = Math.max(0.18, AB_BLEND_BASE * colorEnhanceVal);
-        const MAX_COLOR_SHIFT = 18;
-        const MAX_BLUE_SHIFT = 14;  // increased from 5 – source images have stronger blue cast
+        // NOTE: Hi-res uses full-res source images (Pexels/Unsplash) which have much stronger
+        // blue/green casts than the 128px R2 thumbnails used in preview.
+        // The colorEnhance slider was designed for the low-cast thumbnails, so we IGNORE it
+        // here and always apply strong correction based on the target cell color.
+        // AB_BLEND = 0.55 means: shift 55% of the way from tile color to target color.
+        const AB_BLEND = 0.55;  // fixed strong correction – independent of colorEnhance slider
+        const MAX_COLOR_SHIFT = 40;  // allow large color shifts for full-res source images
+        const MAX_BLUE_SHIFT = 40;  // allow large blue correction (source images are very blue)
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         if (cellLabData.length > 0) {

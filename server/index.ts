@@ -2223,10 +2223,10 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const targetColors: number[] = rp.targetColors ?? [];
         const edgeMap: number[] = rp.edgeMap ?? [];
         const faceMask: boolean[] = rp.faceMask ?? [];
-        // Use 128px tiles (max available from R2 without upscaling)
-        // 128px tiles at 400 DPI = 0.81 cm/tile (very close to 1 cm/tile @ 315 DPI)
-        // For best quality: use 128px which matches R2 tile resolution exactly
-        const tilePx = 128;
+        // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
+        // for tiles with external sources, giving sharp output at any print size.
+        // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
+        const tilePx = 200;
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
         // userTileUrls: mapping from negative tileId (as string) to R2 URL
@@ -2333,18 +2333,21 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
           return Math.round(Math.max(0,Math.min(255, (bv<0.5?s-(1-2*bv)*s*(1-s):s+(2*bv-1)*(Math.sqrt(s)-s))*255)));
         };
 
-        // Color correction parameters (matching client renderMosaicClientSide)
-        const colorEnhanceVal = colorEnhance / 100;
-        const AB_BLEND_BASE = 0.12;
-        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;
+        // Color correction parameters for server-side print render.
+        // IMPORTANT: Server loads full-res source images (Pexels/Unsplash, ~940px) which have
+        // much stronger blue/green casts than the 128px R2 thumbnails used on the client.
+        // The client colorEnhance slider was calibrated for thumbnails – we IGNORE it here
+        // and always apply strong fixed correction to compensate for source image color casts.
+        const AB_BLEND = 0.55;  // fixed strong correction – independent of colorEnhance slider
         const L_BLEND = 0.40;
-        const MAX_COLOR_SHIFT = 15;
-        const MAX_BLUE_SHIFT = 5;
+        const MAX_COLOR_SHIFT = 40;  // allow large shifts for full-res source images
+        const MAX_BLUE_SHIFT = 40;   // allow large blue correction
         const cBoost = 1.30;
         const satBoost = 0.90 + cBoost * 0.15;
-        const BASE_OL = 0.15;
+        const BASE_OL = userOverlay > 0 ? userOverlay : 0.15;
         const EDGE_B = 0.20;
-        const hasColorCorrection = colorEnhance > 0 || targetColors.length > 0;
+        // Always apply color correction if targetColors are available
+        const hasColorCorrection = targetColors.length > 0;
 
         // Process each strip
         const stripBuffers: Buffer[] = [];
