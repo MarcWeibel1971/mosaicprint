@@ -116,10 +116,12 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
       const row = result.rows[0];
       const effectiveTile128 = row.r2_url || row.tile128_url || '';
       // For source_url: skip custom protocols (lhq://, etc.) that aren't fetchable URLs.
-      // Fall back to tile256_url or r2_url for higher resolution.
+      // Build a priority list: best available URL for hi-res rendering.
       const rawSource = row.source_url || '';
-      const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://') || rawSource.startsWith('data:');
-      const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || rawSource);
+      const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://');
+      // Priority for hi-res: valid HTTP source_url > tile256_url (256px R2) > r2_url (128px R2) > data URL
+      const effectiveSource = isValidHttpUrl ? rawSource
+        : (row.tile256_url || row.r2_url || (rawSource.startsWith('data:') ? rawSource : '') || effectiveTile128);
       tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
     } catch { return null; }
