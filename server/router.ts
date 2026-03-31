@@ -2422,14 +2422,16 @@ export const appRouter = router({
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
                   br_l=$13, br_a=$14, br_b=$15,
-                  tile_type=$17, edge_energy=$18
+                  tile_type=$17, edge_energy=$18,
+                  blur_score=$19, ai_mosaic_score=$20
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id, lab.tileType, lab.edgeDensity]
+                 row.id, lab.tileType, lab.edgeDensity,
+                 lab.blurScore, Math.round(lab.mosaicScore * 100)]
               );
               indexed++;
             }
@@ -2491,14 +2493,16 @@ export const appRouter = router({
                   tr_l=$7, tr_a=$8, tr_b=$9,
                   bl_l=$10, bl_a=$11, bl_b=$12,
                   br_l=$13, br_a=$14, br_b=$15,
-                  tile_type=$17, edge_energy=$18
+                  tile_type=$17, edge_energy=$18,
+                  blur_score=$19, ai_mosaic_score=$20
                 WHERE id=$16`,
                 [lab.L, lab.a, lab.b,
                  lab.tlL, lab.tlA, lab.tlB,
                  lab.trL, lab.trA, lab.trB,
                  lab.blL, lab.blA, lab.blB,
                  lab.brL, lab.brA, lab.brB,
-                 row.id, lab.tileType, lab.edgeDensity]
+                 row.id, lab.tileType, lab.edgeDensity,
+                 lab.blurScore, Math.round(lab.mosaicScore * 100)]
               );
               totalIndexed++;
             }
@@ -3515,8 +3519,8 @@ export const appRouter = router({
                 const lab = await computeLabFull(row.tile128_url);
                 if (lab) {
                   await alPool.query(
-                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,edge_energy=$18,indexed_at=NOW() WHERE id=$17',
-                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id,lab.edgeDensity]
+                    'UPDATE mosaic_images SET avg_l=$1,avg_a=$2,avg_b=$3,tl_l=$4,tl_a=$5,tl_b=$6,tr_l=$7,tr_a=$8,tr_b=$9,bl_l=$10,bl_a=$11,bl_b=$12,br_l=$13,br_a=$14,br_b=$15,tile_type=$16,edge_energy=$18,blur_score=$19,ai_mosaic_score=$20,indexed_at=NOW() WHERE id=$17',
+                    [lab.L,lab.a,lab.b,lab.tlL,lab.tlA,lab.tlB,lab.trL,lab.trA,lab.trB,lab.blL,lab.blA,lab.blB,lab.brL,lab.brA,lab.brB,lab.tileType,row.id,lab.edgeDensity,lab.blurScore,Math.round(lab.mosaicScore * 100)]
                   );
                   alIndexed++;
                 }
@@ -3587,15 +3591,27 @@ export const appRouter = router({
   getCleanupCandidates: adminProcedure.query(async () => {
     const pool = db.getPool();
 
-    // Alle Counts in einem einzigen Query (deutlich schneller auf grosser DB)
+    // URL-Duplikate: separate schnelle Query mit EXISTS (NOT IN ist O(n²) bei 100k+ Rows)
+    let urlDupCountFast = 0;
+    try {
+      const dupRes = await pool.query(`
+        SELECT COUNT(*) AS cnt FROM mosaic_images m
+        WHERE m.source_url IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM mosaic_images m2
+            WHERE m2.source_url = m.source_url AND m2.id < m.id
+          )
+      `);
+      urlDupCountFast = Number(dupRes.rows[0]?.cnt ?? 0);
+    } catch { /* ignore if slow */ }
+
+    // Alle anderen Counts in einem einzigen Query
     const statsRes = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE quality_status = 'rejected' OR ai_suitability = 'reject') AS rejected,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor'
           AND COALESCE(quality_status,'') != 'rejected') AS poor,
-        COUNT(*) FILTER (WHERE id NOT IN (
-          SELECT MIN(id) FROM mosaic_images GROUP BY source_url
-        )) AS url_duplicates,
+        0 AS url_duplicates,
         COUNT(*) FILTER (WHERE SQRT(avg_a*avg_a + avg_b*avg_b) < 3
           AND tile_type = 'busy'
           AND quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject') AS gray_busy,
@@ -3613,15 +3629,32 @@ export const appRouter = router({
     const s = statsRes.rows[0];
     const totalActive = Number(s.total_active);
     const rejectedCount = Number(s.rejected);
-    const urlDupCount = Number(s.url_duplicates);
+    const urlDupCount = urlDupCountFast; // computed separately with EXISTS for performance
     const grayBusyCount = Number(s.gray_busy);
     const nearWhiteCount = Number(s.near_white);
     const lowScoreCount = Number(s.low_score);
     const pixabayHotlinkCount = Number(s.pixabay_hotlink);
     const poorCount = Number(s.poor);
 
+    // Theme distribution (top 15)
+    let themeDistribution: Array<{ theme: string; count: number; pct: number }> = [];
+    try {
+      const themeRes = await pool.query(`
+        SELECT COALESCE(semantic_theme, '(kein Tag)') AS theme, COUNT(*) AS count
+        FROM mosaic_images
+        WHERE quality_status != 'rejected' AND COALESCE(ai_suitability,'') != 'reject'
+        GROUP BY semantic_theme ORDER BY count DESC LIMIT 15
+      `);
+      themeDistribution = themeRes.rows.map(r => ({
+        theme: r.theme,
+        count: Number(r.count),
+        pct: totalActive > 0 ? Math.round((Number(r.count) / totalActive) * 100) : 0,
+      }));
+    } catch { /* ignore theme errors */ }
+
     return {
       totalActive,
+      themeDistribution,
       stage1: {
         rejected: rejectedCount,
         poor: poorCount,
@@ -3657,7 +3690,8 @@ export const appRouter = router({
           whereClause = `ai_suitability = 'poor' AND COALESCE(quality_status,'') != 'rejected'`;
           break;
         case 'urlDuplicates':
-          whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
+          // Use NOT EXISTS instead of NOT IN for performance on large tables (O(n) vs O(n²))
+          whereClause = `EXISTS (SELECT 1 FROM mosaic_images m2 WHERE m2.source_url = mosaic_images.source_url AND m2.id < mosaic_images.id)`;
           break;
         case 'grayBusy':
           whereClause = `SQRT(avg_a*avg_a + avg_b*avg_b) < 3 AND tile_type = 'busy' AND quality_status != 'rejected'`;
@@ -3731,7 +3765,8 @@ export const appRouter = router({
           whereClause = `ai_suitability = 'poor' AND COALESCE(quality_status,'') != 'rejected'`;
           break;
         case 'urlDuplicates':
-          whereClause = `id NOT IN (SELECT MIN(id) FROM mosaic_images GROUP BY source_url)`;
+          // Use EXISTS instead of NOT IN for performance on large tables (O(n) vs O(n²))
+          whereClause = `EXISTS (SELECT 1 FROM mosaic_images m2 WHERE m2.source_url = mosaic_images.source_url AND m2.id < mosaic_images.id)`;
           break;
         case 'grayBusy':
           whereClause = `SQRT(avg_a*avg_a + avg_b*avg_b) < 3 AND tile_type = 'busy' AND quality_status != 'rejected'`;

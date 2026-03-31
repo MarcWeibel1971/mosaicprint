@@ -7,6 +7,10 @@ Improvements v2:
   - tile256_url uploaded to R2 (256px JPEG for better mosaic quality)
   - mosaic_score formula updated to use normalized edge_energy
 
+Improvements v3:
+  - 512px tile uploaded to R2 for sharp detail view (was 256px → blurry at 600px)
+  - tile256_url now stores the 512px URL (used by server for /api/tile/:id detail view)
+
 Usage:
   python3 scripts/import-lhq.py <image_dir> [--limit N] [--skip N] [--batch N]
 
@@ -234,21 +238,22 @@ def get_thread_r2():
     return _r2_local.client
 
 
-def upload_tiles_to_r2(tile_id: int, img_path: str) -> tuple[str | None, str | None]:
+def upload_tiles_to_r2(tile_id: int, img_path: str) -> tuple[str | None, str | None, str | None]:
     """
-    Upload 128px and 256px thumbnails to R2.
-    Returns (tile128_url, tile256_url) – either may be None on failure.
+    Upload 128px, 256px and 512px thumbnails to R2.
+    Returns (tile128_url, tile256_url, tile512_url) – any may be None on failure.
+    The 512px version serves as high-res source for the detail view (replaces lhq:// protocol).
     """
     try:
         r2 = get_thread_r2()
         img = Image.open(img_path).convert("RGB")
 
         results = {}
-        for size, key_suffix in [(128, "tiles"), (256, "tiles256")]:
+        for size, key_suffix, quality in [(128, "tiles", 88), (256, "tiles256", 88), (512, "tiles512", 90)]:
             resized = img.copy()
             resized.thumbnail((size, size), Image.LANCZOS)
             buf = io.BytesIO()
-            resized.save(buf, format="JPEG", quality=88, optimize=True)
+            resized.save(buf, format="JPEG", quality=quality, optimize=True)
             buf.seek(0)
             key = f"{key_suffix}/{tile_id}.jpg"
             r2.put_object(
@@ -260,10 +265,10 @@ def upload_tiles_to_r2(tile_id: int, img_path: str) -> tuple[str | None, str | N
             )
             results[size] = f"{R2_PUBLIC_URL}/{key}"
 
-        return results.get(128), results.get(256)
+        return results.get(128), results.get(256), results.get(512)
     except Exception as e:
         print(f"  ⚠️  R2 upload failed for tile {tile_id}: {e}", flush=True)
-        return None, None
+        return None, None, None
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
@@ -346,17 +351,20 @@ def insert_image(img_path: str, lab: dict) -> tuple[bool, int | None]:
         raise e
 
 
-def update_tile_urls(tile_id: int, tile128_url: str | None, tile256_url: str | None):
-    """Update tile URLs in DB after R2 upload."""
-    if not tile128_url and not tile256_url:
+def update_tile_urls(tile_id: int, tile128_url: str | None, tile256_url: str | None, tile512_url: str | None = None):
+    """Update tile URLs in DB after R2 upload.
+    tile512_url is stored as tile256_url so the server uses it for high-res detail views."""
+    if not tile128_url and not tile256_url and not tile512_url:
         return
     conn = get_thread_conn()
     try:
         with conn.cursor() as cur:
-            if tile256_url:
+            # Use the highest-res tile for tile256_url (server uses this for detail view)
+            best_hires = tile512_url or tile256_url
+            if best_hires:
                 cur.execute(
                     "UPDATE mosaic_images SET tile128_url=%s, r2_url=%s, tile256_url=%s WHERE id=%s",
-                    (tile128_url, tile128_url, tile256_url, tile_id)
+                    (tile128_url, tile128_url, best_hires, tile_id)
                 )
             else:
                 cur.execute(
@@ -438,16 +446,16 @@ def main():
             if not inserted or tile_id is None:
                 return "skip"  # duplicate
 
-            # Upload 128px + 256px to R2
-            t128, t256 = upload_tiles_to_r2(tile_id, str(img_path))
-            update_tile_urls(tile_id, t128, t256)
+            # Upload 128px + 256px + 512px to R2
+            t128, t256, t512 = upload_tiles_to_r2(tile_id, str(img_path))
+            update_tile_urls(tile_id, t128, t256, t512)
 
             return "inserted"
         except Exception as e:
             return "error"
 
-    print(f"\n🚀 Starting import v2 with {args.batch} parallel workers...\n")
-    print(f"   Improvements: blur_score stored, edge_energy on 64x64, tile256 uploaded\n")
+    print(f"\n🚀 Starting import v3 with {args.batch} parallel workers...\n")
+    print(f"   Improvements: blur_score stored, edge_energy on 64x64, tile512 uploaded for sharp detail view\n")
 
     with tqdm(total=len(files), unit="img", dynamic_ncols=True) as pbar:
         with ThreadPoolExecutor(max_workers=args.batch) as executor:

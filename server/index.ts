@@ -29,7 +29,7 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
-import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
+import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -116,32 +116,50 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
       const row = result.rows[0];
       const effectiveTile128 = row.r2_url || row.tile128_url || '';
       // For source_url: skip custom protocols (lhq://, etc.) that aren't fetchable URLs.
-      // Build a priority list: best available URL for hi-res rendering.
+      // Fall back to tile256_url or r2_url for higher resolution.
+      // If none available (LHQ tiles without r2_url), fall back to tile128_url so size>128 still works.
       const rawSource = row.source_url || '';
-      const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://');
-      // Priority for hi-res: valid HTTP source_url > tile256_url (256px R2) > r2_url (128px R2) > data URL
-      const effectiveSource = isValidHttpUrl ? rawSource
-        : (row.tile256_url || row.r2_url || (rawSource.startsWith('data:') ? rawSource : '') || effectiveTile128);
-      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, ts: Date.now() };
+      const isValidHttpUrl = rawSource.startsWith('http://') || rawSource.startsWith('https://') || rawSource.startsWith('data:');
+      const effectiveSource = isValidHttpUrl ? rawSource : (row.tile256_url || row.r2_url || row.tile128_url || rawSource);
+      // tile256Url: prefer tile256_url for print sizes (256px), fallback to r2_url/tile128_url
+      const tile256Url = row.tile256_url || '';
+      tileUrls = { tile128Url: effectiveTile128, sourceUrl: effectiveSource, tile256Url, ts: Date.now() };
       tileUrlCache.set(id, tileUrls);
     } catch { return null; }
   }
 
   // URL selection strategy:
   // - size <= 128: use R2/tile128 (fast CDN, already 128px)
-  // - size > 128 (zoom/print): ALWAYS use source_url first for full resolution
-  //   Never fall back to tile128 for large sizes (would cause 128→400 upscale = blurry)
-  const url = size <= 128
-    ? (tileUrls.tile128Url || tileUrls.sourceUrl)
-    : (tileUrls.sourceUrl || tileUrls.tile128Url);
+  // - size > 128 (print): prefer source_url (Pexels/Unsplash original ~940px) for sharp output
+  //   For R2-only tiles (no source_url): use tile256_url if available, otherwise R2 at 128px
+  //   and allow Sharp to upscale (128→157px is only 1.2x, acceptable quality)
+  const isR2Tile = (tileUrls.tile128Url || '').includes('tiles.mosaicprint.ch') ||
+                   (tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch');
+  const hasExternalSource = (tileUrls.sourceUrl || '') !== '' &&
+    !((tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch'));
+  let url: string;
+  if (size <= 128) {
+    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+  } else if (hasExternalSource) {
+    // External source (Pexels/Unsplash): use full-res source for sharp print output
+    url = tileUrls.sourceUrl || tileUrls.tile128Url;
+  } else if (tileUrls.tile256Url) {
+    // R2-only tile with 256px version: use it for better quality
+    url = tileUrls.tile256Url;
+  } else {
+    // R2-only tile without 256px: use 128px and let Sharp upscale (1.2x is acceptable)
+    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+  }
   if (!url) return null;
+  // Always resize to requested size (Sharp handles upscaling gracefully)
+  const effectiveSize = size;
 
   // 3. Handle data URLs
   if (url.startsWith('data:')) {
     try {
       const rawBuf = Buffer.from(url.split(',')[1], 'base64');
       const resized = await sharp(rawBuf)
-        .resize(size, size, { fit: 'cover', position: 'centre' })
+        .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
         .jpeg({ quality: 92 })
         .toBuffer();
       tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
@@ -159,10 +177,13 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     if (!resp.ok) return null;
     const buf = Buffer.from(await resp.arrayBuffer());
     const resized = await sharp(buf)
-      .resize(size, size, { fit: 'cover', position: 'centre' })
+      .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
       .jpeg({ quality: 92 })
       .toBuffer();
-    tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    // Cache with effectiveSize key so future requests at the same size hit cache
+    const effectiveCacheKey = effectiveSize !== size ? `${id}-${effectiveSize}` : cacheKey;
+    tileCacheMap.set(effectiveCacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    if (effectiveSize !== size) tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
     evictTileCache();
     return resized;
   } catch {
@@ -171,7 +192,7 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
 }
 
 // 3. Tile URL cache: maps tile id → {tile128_url, source_url} to avoid DB per request
-const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; ts: number }>();
+const tileUrlCache = new Map<number, { tile128Url: string; sourceUrl: string; tile256Url?: string; ts: number }>();
 const TILE_URL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const TILE_URL_CACHE_MAX = 30000;
 
@@ -443,12 +464,22 @@ app.get("/api/tile-urls", async (req, res) => {
       `SELECT id, tile128_url, source_url, r2_url FROM mosaic_images WHERE id = ANY($1)`,
       [ids]
     );
+    const isHttp = (url: string | null) => !!url && (url.startsWith('https://') || url.startsWith('http://'));
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
       if (wantHiRes) {
-        // For hi-res/print: prefer original source_url (full resolution from Pexels/Unsplash ~940px)
-        // R2 only stores 128px thumbnails - source_url gives much better zoom quality
-        urlMap[row.id] = row.source_url || row.r2_url || row.tile128_url || '';
+        // For hi-res zoom: prefer source_url (full ~940px from Pexels/Unsplash)
+        // SKIP non-HTTP protocols (lhq://, etc.) – browser can't load them.
+        // Fall back to r2_url (128px but loadable) or tile128_url.
+        // If nothing is loadable, omit entry → client uses /api/tile/:id proxy.
+        if (isHttp(row.source_url)) {
+          urlMap[row.id] = row.source_url;
+        } else if (isHttp(row.r2_url)) {
+          urlMap[row.id] = row.r2_url;
+        } else if (isHttp(row.tile128_url)) {
+          urlMap[row.id] = row.tile128_url;
+        }
+        // else: omit – client falls back to /api/tile/:id which handles lhq:// via server-side proxy
       } else if (row.r2_url) {
         // For screen preview: R2 URL is permanent and fast (128px thumbnail)
         urlMap[row.id] = row.r2_url;
@@ -1582,6 +1613,108 @@ app.get('/api/print-job/:jobId', (req, res) => {
   res.json(job);
 });
 
+// Helper: LAB color transfer (matches client-side renderMosaicClientSide)
+// Applies per-tile LAB brightness scaling + AB color shift + contrast boost
+function applyLabColorTransfer(
+  pixelBuf: Buffer,
+  width: number, height: number,
+  tilePx: number,
+  cols: number, rows: number,
+  stripRowStart: number,
+  targetColors: number[],
+  edgeMap: number[],
+  faceMask: boolean[],
+  colorEnhance: number,  // 0-100
+): void {
+  if (!targetColors?.length || colorEnhance <= 0) return;
+
+  const labToRgb = (L: number, a: number, b: number): [number, number, number] => {
+    let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+    x = (x**3 > 0.008856 ? x**3 : (x - 16/116)/7.787) * 0.95047;
+    y = (y**3 > 0.008856 ? y**3 : (y - 16/116)/7.787) * 1.00000;
+    z = (z**3 > 0.008856 ? z**3 : (z - 16/116)/7.787) * 1.08883;
+    const r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+    const g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+    const bv = x * 0.0557 + y * -0.2040 + z * 1.0570;
+    const toSrgb = (c: number) => c > 0.0031308 ? 1.055 * c**(1/2.4) - 0.055 : 12.92 * c;
+    return [Math.round(Math.max(0,Math.min(255,toSrgb(r)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(g)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(bv)*255)))];
+  };
+  const rgbToLab = (r: number, g: number, b: number): [number, number, number] => {
+    const toLinear = (c: number) => { const s = c/255; return s > 0.04045 ? ((s+0.055)/1.055)**2.4 : s/12.92; };
+    const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
+    const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
+    const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
+    const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
+    const f = (t: number) => t > 0.008856 ? t**(1/3) : 7.787*t + 16/116;
+    return [116*f(y)-16, 500*(f(x)-f(y)), 200*(f(y)-f(z))];
+  };
+
+  const colorEnhanceVal = colorEnhance / 100;
+  const AB_BLEND = 0.12 * colorEnhanceVal;
+  const L_BLEND = 0.40;
+  const MAX_COLOR_SHIFT = 15;
+  const MAX_BLUE_SHIFT = 5;
+  const cBoost = 1.30;
+  const satBoost = 0.90 + cBoost * 0.15;
+  const REF_SAMPLES = 64;
+
+  const stripRows = Math.ceil(height / tilePx);
+  for (let lr = 0; lr < stripRows; lr++) {
+    const row = stripRowStart + lr;
+    if (row >= rows) break;
+    for (let col = 0; col < cols; col++) {
+      const ci = row * cols + col;
+      const tci = ci * 3;
+      const tR = targetColors[tci] ?? 128;
+      const tG = targetColors[tci+1] ?? 128;
+      const tBv = targetColors[tci+2] ?? 128;
+      const [tL, tA, tBlab] = rgbToLab(tR, tG, tBv);
+      const isShadowZone = tL < 40;
+      const shadowBoost = isShadowZone ? Math.max(0, (40-tL)/40) : 0;
+      const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+
+      const py0 = lr * tilePx, px0 = col * tilePx;
+      const py1 = Math.min(py0 + tilePx, height), px1 = Math.min(px0 + tilePx, width);
+      const totalPx = (px1-px0) * (py1-py0);
+      const step = Math.max(1, Math.floor(totalPx / REF_SAMPLES));
+      let sumL = 0, sampleCount = 0;
+      for (let si = 0; si < totalPx; si += step) {
+        const lx = px0 + (si % (px1-px0));
+        const ly = py0 + Math.floor(si / (px1-px0));
+        const pi = (ly * width + lx) * 3;
+        sumL += rgbToLab(pixelBuf[pi], pixelBuf[pi+1], pixelBuf[pi+2])[0];
+        sampleCount++;
+      }
+      const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
+      const rawLumScale = avgL > 1 ? tL / avgL : 1;
+      const clampedLumScale = Math.max(0.05, Math.min(4.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));
+      const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+      for (let py = py0; py < py1; py++) {
+        for (let px = px0; px < px1; px++) {
+          const pi = (py * width + px) * 3;
+          const [pl, pa, pb] = rgbToLab(pixelBuf[pi], pixelBuf[pi+1], pixelBuf[pi+2]);
+          let newL = Math.max(0, Math.min(100, pl * lumScale));
+          if (isShadowZone && shadowBoost > 0.05) {
+            const dev = pl - avgL;
+            newL = Math.max(0, Math.min(100, newL + dev * shadowBoost * 0.4));
+          }
+          if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+          const clampedDA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, (tA - pa) * AB_BLEND));
+          const rawDB = (tBlab - pb) * AB_BLEND;
+          const clampedDB = rawDB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDB) : Math.min(MAX_COLOR_SHIFT, rawDB);
+          const newA = Math.max(-128, Math.min(127, pa + clampedDA));
+          const newBv2 = Math.max(-128, Math.min(127, pb + clampedDB));
+          const contrastL = Math.max(0, Math.min(100, 50 + (newL-50)*cBoost));
+          const bSatBoost = newBv2 < 0 ? Math.min(satBoost, 1.0) : satBoost;
+          const [nr, ng, nb] = labToRgb(contrastL, Math.max(-128,Math.min(127,newA*satBoost)), Math.max(-128,Math.min(127,newBv2*bSatBoost)));
+          pixelBuf[pi] = nr; pixelBuf[pi+1] = ng; pixelBuf[pi+2] = nb;
+        }
+      }
+    }
+  }
+}
+
 // Helper: Apply overlay blending to a raw RGB pixel buffer (matches client-side Step 6)
 // Blends the original target photo over the mosaic tiles for better visual coherence.
 function applyOverlay(
@@ -1655,7 +1788,8 @@ function applyOverlay(
 
 app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) => {
   const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
-    overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask
+    overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask,
+    colorEnhance: clientColorEnhance = 0
   } = req.body as {
     tileIds: number[];
     assignment: number[];
@@ -1670,6 +1804,7 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
     targetColors?: number[];
     edgeMap?: number[];
     faceMask?: boolean[];
+    colorEnhance?: number;
   };
 
   if (!tileIds?.length || !assignment?.length || !cols || !rows) {
@@ -1785,7 +1920,12 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
           create: { width: outW, height: outH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
         }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
-        updateProgress(80, 'Overlay anwenden...');
+        updateProgress(80, 'Farbkorrektur + Overlay anwenden...');
+        // Apply LAB color transfer first (brightness + color shift per tile)
+        if (clientColorEnhance > 0 && targetColors?.length) {
+          applyLabColorTransfer(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+        }
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
@@ -1846,6 +1986,11 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
           create: { width: outW, height: stripH, channels: 3, background: { r: 180, g: 180, b: 180 } },
           limitInputPixels: false,
         }).composite(compositeInputs).flatten({ background: { r: 180, g: 180, b: 180 } }).raw().toBuffer();
+        // Apply LAB color transfer first (brightness + color shift per tile)
+        if (clientColorEnhance > 0 && targetColors?.length) {
+          applyLabColorTransfer(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+        }
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',
           baseOverlay ?? 0.15, edgeBoost ?? 0.20,
@@ -2100,7 +2245,7 @@ app.post('/api/debug/print-render-test', express.json({ limit: '5mb' }), async (
 // POST /api/orders/printolino – create a Printolino print order
 app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, res) => {
   try {
-    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams } = req.body;
+    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams, photoUrl, mosaicPreviewUrl } = req.body;
     if (!formatLabel || !materialLabel) {
       return res.status(400).json({ error: 'Missing format or material' });
     }
@@ -2112,11 +2257,352 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
       priceChf: priceChf ?? 0,
       customerEmail: customerEmail ?? null,
       renderParams: renderParams ?? {},
+      photoUrl: photoUrl ?? null,
+      mosaicPreviewUrl: mosaicPreviewUrl ?? null,
     });
     console.log(`[orders] Created Printolino order #${orderId}: ${formatLabel} / ${materialLabel}`);
     res.json({ ok: true, orderId });
   } catch (e) {
     console.error('[orders] Create failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/orders/upload-user-tile – upload a user tile (base64 JPEG) to R2 for server-side rendering
+// Called during order creation when tileIds contain negative IDs (user-uploaded photos)
+app.post('/api/orders/upload-user-tile', express.json({ limit: '8mb' }), async (req, res) => {
+  try {
+    const { imageDataUrl, orderId, tileIndex } = req.body;
+    if (!imageDataUrl || typeof imageDataUrl !== 'string') {
+      return res.status(400).json({ error: 'imageDataUrl required' });
+    }
+    // Decode base64 data URL
+    const matches = imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!matches) return res.status(400).json({ error: 'Invalid data URL format' });
+    const contentType = matches[1];
+    const base64Data = matches[2];
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    // Resize to 128px for tile storage
+    const resizedBuffer = await sharp(imageBuffer)
+      .resize(128, 128, { fit: 'cover', position: 'centre' })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    // Upload to R2 under user-tiles/ prefix
+    const key = `user-tiles/order-${orderId ?? 'tmp'}-tile${tileIndex ?? Date.now()}-${Date.now()}.jpg`;
+    let r2Url: string | null = null;
+    if (isR2Configured()) {
+      r2Url = await uploadToR2(key, resizedBuffer, 'image/jpeg', 'public, max-age=31536000, immutable');
+    }
+    if (!r2Url) {
+      // Fallback: return data URL if R2 not configured
+      const fallbackDataUrl = `data:image/jpeg;base64,${resizedBuffer.toString('base64')}`;
+      return res.json({ ok: true, url: fallbackDataUrl, r2: false });
+    }
+    res.json({ ok: true, url: r2Url, r2: true });
+  } catch (e) {
+    console.error('[upload-user-tile] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/admin/orders/:id/render – server-side render print file for an order
+app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const pool = db.getPool();
+    const result = await pool.query('SELECT * FROM mosaic_orders WHERE id = $1', [orderId]);
+    const order = result.rows[0];
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const rp = order.render_params || {};
+    if (!rp.assignment || !rp.tileIds) {
+      return res.status(400).json({ error: 'Order has no render_params (assignment/tileIds missing). Cannot render server-side.' });
+    }
+    // Mark as rendering
+    await pool.query("UPDATE mosaic_orders SET status = 'rendering' WHERE id = $1", [orderId]);
+    // Trigger async render
+    (async () => {
+      try {
+        const { cols, rows, format = 'jpg', userOverlay = 0, colorEnhance = 0 } = rp;
+        // Color correction data from client (required for quality)
+        const targetColors: number[] = rp.targetColors ?? [];
+        const edgeMap: number[] = rp.edgeMap ?? [];
+        const faceMask: boolean[] = rp.faceMask ?? [];
+        // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
+        // for tiles with external sources, giving sharp output at any print size.
+        // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
+        const tilePx = 200;
+        const assignment: number[] = rp.assignment;
+        const tileIds: number[] = rp.tileIds;
+        // userTileUrls: mapping from negative tileId (as string) to R2 URL
+        // e.g. { "-1": "https://tiles.mosaicprint.ch/user-tiles/...", "-2": "..." }
+        const userTileUrls: Record<string, string> = rp.userTileUrls ?? {};
+        const outW = cols * tilePx;
+        const outH = rows * tilePx;
+        console.log(`[admin-render] Order #${orderId}: ${cols}x${rows} tiles, ${outW}x${outH}px`);
+        // Helper: update progress in DB so admin UI can poll it
+        const setProgress = async (pct: number, msg: string) => {
+          await pool.query("UPDATE mosaic_orders SET admin_notes = $1 WHERE id = $2", [`${pct}%|${msg}`, orderId]);
+        };
+        await setProgress(5, 'Tiles werden geladen...');
+        // Load all unique tile images
+        // assignment[i] = index into tileIds array; tileIds[idx] = actual DB tile ID
+        const usedTileIds: number[] = assignment.map((idx: number) => tileIds[idx]);
+        // Separate positive DB tile IDs from negative user-uploaded tile IDs
+        const uniquePositiveIds = [...new Set(usedTileIds.filter((id: number) => id > 0))];
+        const uniqueNegativeIds = [...new Set(usedTileIds.filter((id: number) => id < 0))];
+        // Check if user tiles are available via userTileUrls
+        const missingUserTiles = uniqueNegativeIds.filter(id => !userTileUrls[String(id)]);
+        if (uniquePositiveIds.length === 0 && uniqueNegativeIds.length === 0) {
+          throw new Error('No valid tile IDs found in assignment.');
+        }
+        if (missingUserTiles.length > 0) {
+          console.warn(`[admin-render] Order #${orderId}: ${missingUserTiles.length} user tiles have no R2 URL: ${missingUserTiles.slice(0, 5).join(',')}`);
+        }
+        const tileBuffers = new Map<number, Buffer>();
+        // Load DB tiles in batches of 50
+        const LOAD_BATCH = 50;
+        for (let lb = 0; lb < uniquePositiveIds.length; lb += LOAD_BATCH) {
+          const batch = uniquePositiveIds.slice(lb, lb + LOAD_BATCH);
+          await Promise.all(batch.map(async (id: number) => {
+            const buf = await loadTileBuffer(id, tilePx);
+            if (buf) tileBuffers.set(id, buf);
+          }));
+          if (lb % 500 === 0) {
+            const pct = Math.round(5 + (tileBuffers.size / Math.max(uniquePositiveIds.length, 1)) * 40);
+            await setProgress(pct, `Tiles laden: ${tileBuffers.size}/${uniquePositiveIds.length}`);
+            console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles...`);
+          }
+        }
+        await setProgress(45, `${tileBuffers.size} Tiles geladen`);
+        console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles`);
+        // Load user tiles from R2 URLs
+        if (uniqueNegativeIds.length > 0) {
+          console.log(`[admin-render] Loading ${uniqueNegativeIds.length} user tiles from R2...`);
+          await Promise.all(uniqueNegativeIds.map(async (id: number) => {
+            const url = userTileUrls[String(id)];
+            if (!url) return;
+            try {
+              let buf: Buffer;
+              if (url.startsWith('data:')) {
+                // Fallback: inline data URL (R2 not configured)
+                const base64 = url.split(',')[1];
+                buf = Buffer.from(base64, 'base64');
+              } else {
+                const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+                if (!resp.ok) { console.warn(`[admin-render] User tile ${id} fetch failed: ${resp.status}`); return; }
+                buf = Buffer.from(await resp.arrayBuffer());
+              }
+              // Resize to tilePx
+              const resized = await sharp(buf)
+                .resize(tilePx, tilePx, { fit: 'cover', position: 'centre' })
+                .jpeg({ quality: 90 })
+                .toBuffer();
+              tileBuffers.set(id, resized);
+            } catch (err) {
+              console.warn(`[admin-render] User tile ${id} load error:`, err);
+            }
+          }));
+          console.log(`[admin-render] User tiles loaded: ${uniqueNegativeIds.filter(id => tileBuffers.has(id)).length}/${uniqueNegativeIds.length}`);
+        }
+        await setProgress(50, 'Mosaik wird zusammengesetzt...');
+        // STRIP-BASED COMPOSITING: Process image in horizontal strips to avoid OOM
+        // Each strip = STRIP_ROWS tile rows. This keeps memory usage manageable (~60 MB/strip)
+        // and avoids repeated JPEG compression artifacts from batch compositing.
+        const STRIP_ROWS = 8; // rows of tiles per strip
+        const stripCount = Math.ceil(rows / STRIP_ROWS);
+
+        // LAB color transfer helper functions (same as client renderMosaicClientSide)
+        const labToRgbAdmin = (L: number, a: number, b: number): [number, number, number] => {
+          let y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+          x = (x**3 > 0.008856 ? x**3 : (x - 16/116)/7.787) * 0.95047;
+          y = (y**3 > 0.008856 ? y**3 : (y - 16/116)/7.787) * 1.00000;
+          z = (z**3 > 0.008856 ? z**3 : (z - 16/116)/7.787) * 1.08883;
+          const r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+          const g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+          const bv = x * 0.0557 + y * -0.2040 + z * 1.0570;
+          const toSrgb = (c: number) => c > 0.0031308 ? 1.055 * c**(1/2.4) - 0.055 : 12.92 * c;
+          return [Math.round(Math.max(0,Math.min(255,toSrgb(r)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(g)*255))), Math.round(Math.max(0,Math.min(255,toSrgb(bv)*255)))];
+        };
+        const rgbToLabAdmin = (r: number, g: number, b: number): [number, number, number] => {
+          const toLinear = (c: number) => { const s = c/255; return s > 0.04045 ? ((s+0.055)/1.055)**2.4 : s/12.92; };
+          const rl = toLinear(r), gl = toLinear(g), bl = toLinear(b);
+          const x = (rl*0.4124 + gl*0.3576 + bl*0.1805)/0.95047;
+          const y = (rl*0.2126 + gl*0.7152 + bl*0.0722)/1.00000;
+          const z = (rl*0.0193 + gl*0.1192 + bl*0.9505)/1.08883;
+          const f = (t: number) => t > 0.008856 ? t**(1/3) : 7.787*t + 16/116;
+          return [116*f(y)-16, 500*(f(x)-f(y)), 200*(f(y)-f(z))];
+        };
+        const softLightAdmin = (base: number, blend: number): number => {
+          const bv = blend/255, s = base/255;
+          return Math.round(Math.max(0,Math.min(255, (bv<0.5?s-(1-2*bv)*s*(1-s):s+(2*bv-1)*(Math.sqrt(s)-s))*255)));
+        };
+
+        // Color correction parameters for server-side print render.
+        // Goal: tiles should look like the client preview – keep tile texture, apply light color nudge.
+        // AB_BLEND = 0.20: gentle 20% push toward target color (preserves tile texture).
+        // Higher values (0.55) make tiles look like solid color blocks – avoid.
+        const colorEnhanceVal = Math.max(0.05, colorEnhance / 100); // min 5% even if slider=0
+        const AB_BLEND = Math.min(0.35, 0.10 + colorEnhanceVal * 0.25); // 0.10..0.35 range
+        const L_BLEND = 0.35;
+        const MAX_COLOR_SHIFT = 20;  // moderate clamp to preserve tile character
+        const MAX_BLUE_SHIFT = 20;   // moderate blue correction
+        const cBoost = 1.20;
+        const satBoost = 0.90 + cBoost * 0.10;
+        const BASE_OL = userOverlay > 0 ? userOverlay : 0.15;
+        const EDGE_B = 0.20;
+        // Apply color correction whenever targetColors are available
+        const hasColorCorrection = targetColors.length > 0;
+
+        // Process each strip
+        const stripBuffers: Buffer[] = [];
+        for (let s = 0; s < stripCount; s++) {
+          const stripRowStart = s * STRIP_ROWS;
+          const stripRowEnd = Math.min(stripRowStart + STRIP_ROWS, rows);
+          const stripH = (stripRowEnd - stripRowStart) * tilePx;
+          // Collect composite ops for this strip
+          const stripOps: sharp.OverlayOptions[] = [];
+          for (let r2 = stripRowStart; r2 < stripRowEnd; r2++) {
+            for (let c2 = 0; c2 < cols; c2++) {
+              const ci = r2 * cols + c2;
+              const tileId = usedTileIds[ci];
+              const buf = tileBuffers.get(tileId);
+              if (!buf) continue;
+              stripOps.push({ input: buf, left: c2 * tilePx, top: (r2 - stripRowStart) * tilePx });
+            }
+          }
+
+          // Composite strip (lossless raw)
+          const stripRaw = await sharp({
+            create: { width: outW, height: stripH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+            limitInputPixels: false,
+          }).composite(stripOps).raw().toBuffer();
+
+          // Apply LAB color correction per tile cell in this strip
+          if (hasColorCorrection) {
+            const nCh = 3;
+            for (let r2 = stripRowStart; r2 < stripRowEnd; r2++) {
+              for (let c2 = 0; c2 < cols; c2++) {
+                const ci = r2 * cols + c2;
+                const tci = ci * 3;
+                const tR = targetColors[tci] ?? 128;
+                const tG = targetColors[tci+1] ?? 128;
+                const tBv = targetColors[tci+2] ?? 128;
+                const [tL, tA, tBlab] = rgbToLabAdmin(tR, tG, tBv);
+                const isShadowZone = tL < 40;
+                const shadowBoost = isShadowZone ? Math.max(0, (40-tL)/40) : 0;
+                const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
+                const edge = edgeMap[ci] ?? 0;
+                const faceBoost = (faceMask[ci] ? 0.04 : 0);
+                const str = Math.min(0.30, BASE_OL + edge*EDGE_B + faceBoost);
+                const applyOl = str > 0.01 && targetColors.length > 0;
+
+                // Sample tile pixels for avgL
+                const px0 = c2 * tilePx, py0 = (r2 - stripRowStart) * tilePx;
+                const px1 = Math.min(px0 + tilePx, outW), py1 = Math.min(py0 + tilePx, stripH);
+                const totalPx = (px1-px0) * (py1-py0);
+                const step = Math.max(1, Math.floor(totalPx / 64));
+                let sumL = 0, sampleCount = 0;
+                for (let si = 0; si < totalPx; si += step) {
+                  const lx = px0 + (si % (px1-px0));
+                  const ly = py0 + Math.floor(si / (px1-px0));
+                  const pi = (ly * outW + lx) * nCh;
+                  sumL += rgbToLabAdmin(stripRaw[pi], stripRaw[pi+1], stripRaw[pi+2])[0];
+                  sampleCount++;
+                }
+                const avgL = sampleCount > 0 ? sumL / sampleCount : 50;
+                const rawLumScale = avgL > 1 ? tL / avgL : 1;
+                const clampedLumScale = Math.max(0.05, Math.min(4.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));
+                const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
+
+                // Apply per-pixel LAB transfer + overlay
+                for (let py = py0; py < py1; py++) {
+                  for (let px = px0; px < px1; px++) {
+                    const pi = (py * outW + px) * nCh;
+                    const [pl, pa, pb] = rgbToLabAdmin(stripRaw[pi], stripRaw[pi+1], stripRaw[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const dev = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + dev * (1.0 + shadowBoost*0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tBlab - pb) * AB_BLEND;
+                    const clampedDA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDA));
+                    const newBv2 = Math.max(-128, Math.min(127, pb + clampedDB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL-50)*cBoost));
+                    const bSatBoost = newBv2 < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    let [nr, ng, nb] = labToRgbAdmin(contrastL, Math.max(-128,Math.min(127,newA*satBoost)), Math.max(-128,Math.min(127,newBv2*bSatBoost)));
+                    if (applyOl) {
+                      nr = Math.round(nr*(1-str) + softLightAdmin(nr,tR)*str);
+                      ng = Math.round(ng*(1-str) + softLightAdmin(ng,tG)*str);
+                      nb = Math.round(nb*(1-str) + softLightAdmin(nb,tBv)*str);
+                    }
+                    stripRaw[pi] = nr; stripRaw[pi+1] = ng; stripRaw[pi+2] = nb;
+                  }
+                }
+              }
+            }
+          }
+
+          // Encode strip as JPEG for final assembly
+          const stripJpeg = await sharp(stripRaw, {
+            raw: { width: outW, height: stripH, channels: 3 },
+            limitInputPixels: false,
+          }).jpeg({ quality: 92 }).toBuffer();
+          stripBuffers.push(stripJpeg);
+
+          const pct = Math.round(50 + ((s + 1) / stripCount) * 40);
+          await setProgress(pct, `Rendering: Strip ${s + 1}/${stripCount}`);
+          console.log(`[admin-render] Strip ${s+1}/${stripCount} done (rows ${stripRowStart}-${stripRowEnd})`);
+        }
+
+        // Assemble all strips into final image
+        await setProgress(90, 'Strips werden zusammengesetzt...');
+        const stripCompositeOps: sharp.OverlayOptions[] = stripBuffers.map((buf, i) => ({
+          input: buf,
+          top: i * STRIP_ROWS * tilePx,
+          left: 0,
+        }));
+        let baseBuf = await sharp({
+          create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } },
+          limitInputPixels: false,
+        }).composite(stripCompositeOps).jpeg({ quality: 92 }).toBuffer();
+        console.log(`[admin-render] All ${stripCount} strips assembled`);
+        await setProgress(92, 'Bild wird auf R2 hochgeladen...');
+        // Upload to R2
+        const filename = `orders/order-${orderId}-${Date.now()}.jpg`;
+        const r2Url = await (async () => {
+          if (!isR2Configured()) return null;
+          const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+          const s3 = new S3Client({
+            region: 'auto',
+            endpoint: process.env.R2_ENDPOINT,
+            credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID!, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY! },
+          });
+          await s3.send(new PutObjectCommand({
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: filename,
+            Body: baseBuf,
+            ContentType: 'image/jpeg',
+          }));
+          return `${process.env.R2_PUBLIC_URL}/${filename}`;
+        })();
+        if (r2Url) {
+          await pool.query("UPDATE mosaic_orders SET status = 'ready', download_token = $1 WHERE id = $2", [r2Url, orderId]);
+          console.log(`[admin-render] Order #${orderId} ready: ${r2Url}`);
+        } else {
+          await pool.query("UPDATE mosaic_orders SET status = 'render_error', admin_notes = 'R2 not configured' WHERE id = $1", [orderId]);
+        }
+      } catch (renderErr) {
+        console.error(`[admin-render] Order #${orderId} failed:`, renderErr);
+        await pool.query("UPDATE mosaic_orders SET status = 'render_error', admin_notes = $1 WHERE id = $2", [String(renderErr), orderId]);
+      }
+    })();
+    res.json({ ok: true, message: 'Rendering started', orderId });
+  } catch (e) {
+    console.error('[admin-render] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -2131,13 +2617,63 @@ app.get('/api/admin/orders', async (_req, res) => {
   }
 });
 
+// GET /api/admin/orders/:id/download – proxy R2 file as attachment (avoids CORS issues)
+app.get('/api/admin/orders/:id/download', async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const pool = db.getPool();
+    const result = await pool.query('SELECT download_token FROM mosaic_orders WHERE id = $1', [orderId]);
+    const order = result.rows[0];
+    if (!order || !order.download_token || !order.download_token.startsWith('http')) {
+      return res.status(404).json({ error: 'Kein Download-Link für diese Bestellung' });
+    }
+    const url = order.download_token as string;
+    const ext = url.toLowerCase().includes('.png') ? 'png' : 'jpg';
+    const filename = `mosaicprint-bestellung-${orderId}.${ext}`;
+    // Fetch from R2 and stream to client as attachment
+    const r2Res = await fetch(url, { signal: AbortSignal.timeout(120000) });
+    if (!r2Res.ok) return res.status(502).json({ error: `R2 Fehler: ${r2Res.status}` });
+    const contentType = r2Res.headers.get('content-type') || (ext === 'png' ? 'image/png' : 'image/jpeg');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    const contentLength = r2Res.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    // Stream response body
+    if (r2Res.body) {
+      const reader = r2Res.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    res.end();
+  } catch (e) {
+    console.error('[download-proxy]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/orders/:id/status – update order status
 app.post('/api/admin/orders/:id/status', express.json(), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const { status } = req.body;
+    const { status, downloadToken } = req.body;
     if (!status) return res.status(400).json({ error: 'Missing status' });
-    await db.updateOrderStatus(orderId, status);
+    if (downloadToken) {
+      // Update status AND store the R2 download URL in download_token
+      const pool = db.getPool();
+      await pool.query(
+        'UPDATE mosaic_orders SET status = $1, download_token = $2 WHERE id = $3',
+        [status, downloadToken, orderId]
+      );
+    } else {
+      await db.updateOrderStatus(orderId, status);
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -2151,6 +2687,38 @@ app.post('/api/admin/orders/:id/notes', express.json(), async (req, res) => {
     const { notes } = req.body;
     await db.updateOrderNotes(orderId, notes ?? '');
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// POST /api/admin/orders/:id/preview-url – update mosaic_preview_url (after admin adjusts overlay in Studio)
+app.post('/api/admin/orders/:id/preview-url', express.json({ limit: '5mb' }), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { previewDataUrl } = req.body;
+    if (!previewDataUrl) return res.status(400).json({ error: 'Missing previewDataUrl' });
+
+    let finalUrl = previewDataUrl;
+
+    // If R2 is configured, upload the preview image to R2
+    if (isR2Configured()) {
+      try {
+        // Convert data URL to buffer
+        const base64 = previewDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        const buf = Buffer.from(base64, 'base64');
+        // Resize to max 1200px for preview
+        const resized = await sharp(buf).resize(1200, 1200, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
+        const key = `order-previews/order-${orderId}-preview-${Date.now()}.jpg`;
+        finalUrl = await uploadToR2(key, resized, 'image/jpeg', 'public, max-age=86400');
+      } catch (e) {
+        console.warn('[preview-url] R2 upload failed, storing data URL:', e);
+        // Fall back to storing data URL directly (not ideal but functional)
+      }
+    }
+
+    await db.updateOrderPreviewUrl(orderId, finalUrl);
+    res.json({ ok: true, url: finalUrl });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
@@ -2411,9 +2979,12 @@ const aiJobState = {
 async function runGeminiAnalysisJob(batchSize: number, forceReanalyze: boolean, GEMINI_KEY: string) {
   const pool = db.getPool();
   // v7 re-analysis: always re-analyze all tiles since prompt changed significantly
+  // Include tiles with r2_url OR tile128_url (covers LHQ tiles that have no r2_url)
+  // IMPORTANT: In PostgreSQL, NULL != 'rejected' evaluates to NULL (not TRUE)!
+  // So we must use COALESCE or explicit NULL check to include tiles with quality_status IS NULL.
   const whereClause = forceReanalyze
-    ? `r2_url IS NOT NULL AND quality_status != 'rejected'`
-    : `r2_url IS NOT NULL AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND quality_status != 'rejected'`;
+    ? `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (quality_status IS NULL OR quality_status != 'rejected')`
+    : `(r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (quality_status IS NULL OR quality_status != 'rejected')`;
   const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM mosaic_images WHERE ${whereClause}`);
   const total = Number(countRes.rows[0]?.cnt ?? 0);
   aiJobState.total = total;
@@ -2596,13 +3167,16 @@ Return ONLY the JSON object, no explanation, no markdown.`;
           const suitability = isReject ? 'reject' : mosaicScore >= 80 ? 'excellent' : mosaicScore >= 55 ? 'good' : 'poor';
           const isCalm      = calmScore >= 60; // calm_score >= 60 → calm tile
 
+          // Also update quality_status: 'rejected' for rejects, 'ok' for accepted tiles
+          const newQualityStatus = isReject ? 'rejected' : 'ok';
           await pool.query(
             `UPDATE mosaic_images SET
                ai_suitability = $1, ai_reject_reason = $2, ai_theme = $3,
                ai_has_face = $4, ai_face_pct = $5, ai_is_calm = $6,
                ai_content_tags = $7, ai_analyzed_at = NOW(), semantic_theme = $3,
                ai_mosaic_score = $9, ai_calm_score = $10,
-               ai_color_richness = $11, ai_fill_uniformity = $12, ai_has_text = $13
+               ai_color_richness = $11, ai_fill_uniformity = $12, ai_has_text = $13,
+               quality_status = $14
              WHERE id = $8`,
             [
               suitability,
@@ -2610,6 +3184,7 @@ Return ONLY the JSON object, no explanation, no markdown.`;
               mappedTheme, aiResult.has_face ?? false, aiResult.face_area_pct ?? 0,
               isCalm, JSON.stringify(aiResult.content_tags ?? []), tile.id,
               mosaicScore, calmScore, colorRich, fillUnif, aiResult.has_text ?? false,
+              newQualityStatus,
             ]
           );
 
@@ -2686,7 +3261,9 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
         COUNT(*) as total,
         COUNT(ai_analyzed_at) as analyzed,
         COUNT(*) FILTER (WHERE ai_mosaic_score IS NOT NULL) as analyzed_v7,
-        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND quality_status != 'rejected') as pending_with_r2,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND r2_url IS NOT NULL AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_with_r2,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND tile128_url IS NOT NULL AND r2_url IS NULL AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_lhq_only,
+        COUNT(*) FILTER (WHERE (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (quality_status IS NULL OR quality_status != 'rejected')) as pending_total,
         COUNT(*) FILTER (WHERE ai_suitability = 'excellent') as excellent,
         COUNT(*) FILTER (WHERE ai_suitability = 'good') as good,
         COUNT(*) FILTER (WHERE ai_suitability = 'poor') as poor,
@@ -2702,6 +3279,53 @@ app.get('/api/admin/ai-analyze-stats', async (_req, res) => {
       FROM mosaic_images
     `);
     res.json({ ok: true, stats: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// ── AI Pending Diagnose ──────────────────────────────────────────────────────
+app.get('/api/admin/ai-pending-debug', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE (r2_url IS NOT NULL OR tile128_url IS NOT NULL) AND (ai_analyzed_at IS NULL OR ai_mosaic_score IS NULL) AND (quality_status IS NULL OR quality_status != 'rejected')) as whereClause_count,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL) as lhq_only_count,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_mosaic_score IS NULL) as lhq_not_analyzed,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND ai_analyzed_at IS NULL) as lhq_no_analyzed_at,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'pending') as lhq_pending_status,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status = 'rejected') as lhq_rejected_status,
+        COUNT(*) FILTER (WHERE tile128_url IS NOT NULL AND r2_url IS NULL AND quality_status IS NULL) as lhq_null_status,
+        -- Pending images breakdown
+        COUNT(*) FILTER (WHERE quality_status = 'pending') as total_pending,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NOT NULL) as pending_has_r2,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND tile128_url IS NOT NULL) as pending_has_tile128,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND source_url IS NOT NULL) as pending_has_source,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NULL AND tile128_url IS NULL AND source_url IS NULL) as pending_no_url,
+        COUNT(*) FILTER (WHERE quality_status = 'pending' AND r2_url IS NULL AND tile128_url IS NULL AND source_url IS NOT NULL) as pending_source_only
+      FROM mosaic_images
+    `);
+    // Also get a sample of NULL-status images
+    const sample = await pool.query(`
+      SELECT id, source_url, tile128_url, r2_url, quality_status, ai_analyzed_at, ai_mosaic_score, ai_suitability
+      FROM mosaic_images
+      WHERE quality_status IS NULL
+      LIMIT 5
+    `);
+    // Count NULL-status by ai_suitability
+    const nullBreakdown = await pool.query(`
+      SELECT
+        COALESCE(ai_suitability, 'NULL') as suitability,
+        COUNT(*) as cnt,
+        COUNT(ai_mosaic_score) as has_score,
+        COUNT(ai_analyzed_at) as has_analyzed_at
+      FROM mosaic_images
+      WHERE quality_status IS NULL
+      GROUP BY ai_suitability
+      ORDER BY cnt DESC
+    `);
+    res.json({ ok: true, debug: result.rows[0], sample: sample.rows, nullBreakdown: nullBreakdown.rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
@@ -2754,6 +3378,59 @@ app.post('/api/admin/ai-cleanup-rejects', async (req, res) => {
         total: deletedRejects + deletedLowScore + deletedPoor
       },
       remaining: parseInt(statsResult.rows[0].remaining)
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// ── Fix quality_status for already-analyzed tiles ───────────────────────────
+// One-time migration: set quality_status='ok' for all tiles that have ai_analyzed_at
+// but still have quality_status='pending' (AI job previously didn't update this field)
+app.post('/api/admin/fix-quality-status', async (_req, res) => {
+  try {
+    const pool = db.getPool();
+    // Set 'ok' for analyzed tiles that are not rejected
+    // Also covers tiles with ai_mosaic_score but missing ai_analyzed_at (imported with score but no timestamp)
+    const okResult = await pool.query(`
+      UPDATE mosaic_images
+      SET quality_status = 'ok'
+      WHERE (ai_analyzed_at IS NOT NULL OR ai_mosaic_score IS NOT NULL)
+        AND (ai_suitability IS NULL OR ai_suitability != 'reject')
+        AND (quality_status = 'pending' OR quality_status IS NULL)
+    `);
+    const updatedOk = okResult.rowCount ?? 0;
+
+    // Set 'rejected' for tiles with ai_suitability='reject'
+    const rejResult = await pool.query(`
+      UPDATE mosaic_images
+      SET quality_status = 'rejected'
+      WHERE ai_suitability = 'reject'
+        AND quality_status != 'rejected'
+    `);
+    const updatedRej = rejResult.rowCount ?? 0;
+
+    // Count remaining pending (only those without any analysis)
+    const pendingRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images
+      WHERE (quality_status = 'pending' OR quality_status IS NULL)
+        AND ai_analyzed_at IS NULL AND ai_mosaic_score IS NULL
+    `);
+    // Also count NULL status separately
+    const nullStatusRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status IS NULL
+    `);
+    const pendingStatusRes = await pool.query(`
+      SELECT COUNT(*) as cnt FROM mosaic_images WHERE quality_status = 'pending'
+    `);
+
+    res.json({
+      ok: true,
+      updatedToOk: updatedOk,
+      updatedToRejected: updatedRej,
+      remainingPending: parseInt(pendingRes.rows[0].cnt),
+      nullStatusCount: parseInt(nullStatusRes.rows[0].cnt),
+      pendingStatusCount: parseInt(pendingStatusRes.rows[0].cnt)
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
@@ -3067,6 +3744,79 @@ app.post("/api/projects/:id/print-url", requireAuth, async (req, res) => {
     res.json({ ok: true, printUrl });
   } catch (e) {
     console.error('[PrintUrl] Upload failed:', e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ── Order Confirmation Email ───────────────────────────────────────────────
+// POST /api/projects/:id/send-confirmation
+// Sends a confirmation email with download link to the logged-in user
+app.post("/api/projects/:id/send-confirmation", requireAuth, async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const user = (req as any).user as AuthUser;
+    // Get project details
+    const projRes = await pool.query(
+      "SELECT id, name, print_url FROM projects WHERE id = $1 AND user_id = $2",
+      [req.params.id, user.id]
+    );
+    if (projRes.rows.length === 0) return res.status(404).json({ ok: false, error: 'Projekt nicht gefunden' });
+    const project = projRes.rows[0];
+    const printUrl = req.body?.printUrl || project.print_url;
+    if (!printUrl) return res.status(400).json({ ok: false, error: 'Keine Druckdatei-URL vorhanden' });
+    // Check SMTP config
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const smtpFrom = process.env.SMTP_FROM || smtpUser;
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      console.warn('[ConfirmEmail] SMTP not configured – skipping confirmation email');
+      return res.json({ ok: false, skipped: true, reason: 'SMTP nicht konfiguriert' });
+    }
+    const nodemailer = await import('nodemailer');
+    const transporter = nodemailer.default.createTransport({
+      host: smtpHost,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+    // Build absolute download URL (handle relative /prints/ paths)
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+    const absolutePrintUrl = printUrl.startsWith('http') ? printUrl : `${proto}://${host}${printUrl}`;
+    const projectName = project.name || 'Mein Mosaik';
+    const displayName = user.display_name || user.email.split('@')[0];
+    await transporter.sendMail({
+      from: `MosaicPrint <${smtpFrom}>`,
+      to: user.email,
+      subject: `Deine Druckdatei ist bereit: "${projectName}"`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
+          <div style="text-align: center; margin-bottom: 32px;">
+            <h1 style="color: #e05c3a; font-size: 28px; margin: 0;">MosaicPrint</h1>
+            <p style="color: #888; font-size: 13px; margin: 4px 0 0;">Dein Foto als Kunstwerk</p>
+          </div>
+          <h2 style="color: #1a1a1a; font-size: 22px;">Hallo ${displayName}!</h2>
+          <p style="color: #555; font-size: 16px; line-height: 1.6;">
+            Deine Druckdatei f&uuml;r das Projekt <strong>"${projectName}"</strong> wurde erfolgreich erstellt und ist jetzt zum Download bereit.
+          </p>
+          <div style="text-align: center; margin: 32px 0;">
+            <a href="${absolutePrintUrl}" style="background: #e05c3a; color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; display: inline-block;">Druckdatei herunterladen</a>
+          </div>
+          <p style="color: #555; font-size: 14px; line-height: 1.6;">
+            Du kannst deine Druckdatei auch jederzeit unter <strong>Projekte</strong> in deinem Konto herunterladen.
+          </p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            Erstellt mit MosaicPrint &mdash; Dein Foto als Kunstwerk &bull; <a href="https://mosaicprint.ch" style="color: #e05c3a;">mosaicprint.ch</a>
+          </p>
+        </div>
+      `,
+    });
+    console.log(`[ConfirmEmail] Sent to ${user.email} for project ${req.params.id}`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[ConfirmEmail] Failed:', e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
@@ -3799,6 +4549,7 @@ app.use("/prints", express.static(printsPath, {
     res.setHeader('Cache-Control', 'public, max-age=86400');
   }
 }));
+
 app.use(express.static(distPath));
 app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));

@@ -183,6 +183,8 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`ALTER TABLE mosaic_orders ADD COLUMN IF NOT EXISTS download_token TEXT`);
   await pool.query(`ALTER TABLE mosaic_orders ADD COLUMN IF NOT EXISTS render_params JSONB`);
   await pool.query(`ALTER TABLE mosaic_orders ADD COLUMN IF NOT EXISTS admin_notes TEXT`);
+  await pool.query(`ALTER TABLE mosaic_orders ADD COLUMN IF NOT EXISTS photo_url TEXT`); // Customer's original photo URL
+  await pool.query(`ALTER TABLE mosaic_orders ADD COLUMN IF NOT EXISTS mosaic_preview_url TEXT`); // Mosaic preview thumbnail URL
 
   // ── Algorithm profiles table (replaces localStorage) ──────────────────────
   await pool.query(`
@@ -826,13 +828,15 @@ export async function createPrintolinoOrder(data: {
   priceChf: number;
   customerEmail?: string | null;
   renderParams?: Record<string, any>;
+  photoUrl?: string | null;
+  mosaicPreviewUrl?: string | null;
 }): Promise<number> {
   const pool = getPool();
   const res = await pool.query(
-    `INSERT INTO mosaic_orders (order_type, user_id, project_id, format_label, material_label, price_chf, customer_email, status, render_params)
-     VALUES ('printolino', $1, $2, $3, $4, $5, $6, 'pending', $7)
+    `INSERT INTO mosaic_orders (order_type, user_id, project_id, format_label, material_label, price_chf, customer_email, status, render_params, photo_url, mosaic_preview_url)
+     VALUES ('printolino', $1, $2, $3, $4, $5, $6, 'pending_render', $7, $8, $9)
      RETURNING id`,
-    [data.userId ?? null, data.projectId ?? null, data.formatLabel, data.materialLabel, data.priceChf, data.customerEmail ?? null, JSON.stringify(data.renderParams ?? {})]
+    [data.userId ?? null, data.projectId ?? null, data.formatLabel, data.materialLabel, data.priceChf, data.customerEmail ?? null, JSON.stringify(data.renderParams ?? {}), data.photoUrl ?? null, data.mosaicPreviewUrl ?? null]
   );
   return Number(res.rows[0]?.id ?? 0);
 }
@@ -850,6 +854,14 @@ export async function updateOrderNotes(orderId: number, notes: string): Promise<
   await pool.query(
     "UPDATE mosaic_orders SET admin_notes = $1 WHERE id = $2",
     [notes, orderId]
+  );
+}
+
+export async function updateOrderPreviewUrl(orderId: number, previewUrl: string): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    "UPDATE mosaic_orders SET mosaic_preview_url = $1 WHERE id = $2",
+    [previewUrl, orderId]
   );
 }
 

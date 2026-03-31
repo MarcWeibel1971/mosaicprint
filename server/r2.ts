@@ -88,6 +88,34 @@ export function getTileR2Url(tileId: number): string | null {
 }
 
 /**
+ * Upload any file to R2 with a custom key.
+ * Returns the permanent public URL or null on failure.
+ */
+export async function uploadToR2(
+  key: string,
+  imageBuffer: Buffer,
+  contentType = "image/jpeg",
+  cacheControl = "public, max-age=86400"
+): Promise<string | null> {
+  const s3 = getS3();
+  if (!s3 || !R2_PUBLIC_URL) return null;
+
+  try {
+    await s3.send(new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      Body: imageBuffer,
+      ContentType: contentType,
+      CacheControl: cacheControl,
+    }));
+    return `${R2_PUBLIC_URL}/${key}`;
+  } catch (err) {
+    console.error(`[R2] Upload failed for key ${key}:`, err);
+    return null;
+  }
+}
+
+/**
  * Download an image from a URL and upload it to R2.
  * Returns the permanent R2 URL or null on failure.
  */

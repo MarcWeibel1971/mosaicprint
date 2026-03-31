@@ -1,0 +1,11 @@
+- [x] Bug: Gespeichertes Projekt laden → Overlay/Farbkorrektur-Einstellungen werden nicht wiederhergestellt (HD zeigt 0%/0%)
+- [x] Bug: Pop-Out-Kacheln im Hi-Res-Zoom sind unscharf (niedrige Auflösung)
+- [x] Bug: Pop-Out-Kacheln immer noch unscharf trotz 512px-Laden — erneut analysieren und beheben (512px Laden korrekt, Timing-Issue auf Screenshot)
+- [x] Bug: Pop-Out-Kacheln haben Blaustich — AB_BLEND mit colorEnhance skaliert
+- [x] Bug: Gesamtes Mosaik hat Blaustich — AB_BLEND Minimum von 0.12 auf 0 gesenkt, MAX_BLUE_SHIFT 10→5
+- [x] Bug: Blaustich im Mosaik-Hintergrund — LAB-Korrektur auf Mobile aktiviert (tile-by-tile)
+- [x] Bug: Hi-Res-Zoom bei 800% unscharf — LAB-Korrektur jetzt auch auf Mobile aktiv
+- [x] Bug: HD-Modus macht Bild zu dunkel — war anderes Foto (kein Code-Bug)
+- [x] Bug: Pop-Out-Kacheln unscharf — 512px immer laden (kein false-skip), Logging hinzugefügt
+- [x] Bug: 113'105 Bilder haben Status "pending" — quality_status wird jetzt im AI-Job gesetzt + fix-quality-status Endpunkt
+- [x] Bug: LHQ-Kacheln unscharf — loadTileBuffer fällt jetzt auf tile128_url zurück wenn kein besseres Bild verfügbar

@@ -173,15 +173,12 @@ async function forceDownloadBlob(blob: Blob, filename: string, mimeType: string)
     });
     if (response.ok) {
       const { token } = await response.json();
-      // Open the server download URL — server sets Content-Disposition: attachment
+      // Navigate directly to the server download URL.
+      // Server sets Content-Disposition: attachment + X-Content-Type-Options: nosniff
+      // Using window.location.href bypasses Adobe Acrobat extension completely
+      // (it only intercepts blob: URLs and synthetic <a> clicks, not real navigations)
       const downloadUrl = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`;
-      const dlLink = document.createElement('a');
-      dlLink.href = downloadUrl;
-      dlLink.download = filename;
-      dlLink.style.display = 'none';
-      document.body.appendChild(dlLink);
-      dlLink.click();
-      setTimeout(() => document.body.removeChild(dlLink), 5000);
+      window.location.href = downloadUrl;
       return;
     }
   } catch (e) {
@@ -216,13 +213,14 @@ async function renderMosaicClientSide(opts: {
   targetColors: number[]; edgeMap: number[]; faceMask: boolean[];
   cellLab?: [number, number, number][]; // LAB target per cell (blurred+original mix) for accurate color correction
   userOverlay?: number; // 0-100: how much original photo shows through (from Foto-Overlay slider)
+  colorEnhance?: number; // 0-100: color correction strength from Farbkorrektur slider
   userPhotoImg?: HTMLImageElement | null; // original user photo for overlay
   onProgress?: (pct: number, msg: string) => void;
 }): Promise<{ blob: Blob; width: number; height: number; filename: string }> {
   const { cols, rows, tilePx, format, assignment, rotations, tileIds, validImgs, hiResImgs,
     snapshot, origTilePx, targetColors: tc, edgeMap: em, faceMask: fm,
     cellLab: cellLabData,
-    userOverlay = 0, userPhotoImg = null, onProgress } = opts;
+    userOverlay = 0, colorEnhance: colorEnhanceParam = 0, userPhotoImg = null, onProgress } = opts;
   const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
 
   onProgress?.(2, 'Tiles prüfen...');
@@ -369,9 +367,11 @@ async function renderMosaicClientSide(opts: {
   // LAB parameters match preview exactly — avgL consistency is now ensured by 8x8 downsample
   // (same as preview which computes avgL on 64px thumbnails = equivalent low-freq reference)
   const L_BLEND  = 0.40 + 0.40 * blendFactor;  // matches preview
-  const AB_BLEND = 0.12 + 0.20 * blendFactor;  // matches preview
-  const MAX_COLOR_SHIFT = 18;  // matches preview
-  const MAX_BLUE_SHIFT = 10;   // matches preview
+  const colorEnhanceVal = colorEnhanceParam / 100; // 0.0 - 1.0
+  const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
+  const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by colorEnhance slider (0 at 0%)
+  const MAX_COLOR_SHIFT = 15;  // matches preview (reduced from 18)
+  const MAX_BLUE_SHIFT = 5;    // matches preview (reduced from 10)
 
   // Overlay parameters (needed inside tile loop for inline overlay application)
   const BASE_OL = algoSettings.baseOverlay ?? 0.15;
@@ -593,8 +593,40 @@ function labToRgb(L: number, a: number, b: number): [number, number, number] {
 
 // Printolino-konforme Druckformate
 // Pixelgroesse bei 400 dpi (Ultra HD Druckqualitaet): px = cm x (400 / 2.54) = cm x 157.48
-// 400 DPI = 1 Kachel pro cm bei 157px Kachelgroesse → optimale Druckschaerfe
-// Kleinste sinnvolle Kachelgroesse: 40x40cm (darunter sind einzelne Kacheln zu klein)
+// Printolino Preiskatalog (Preise exkl. MWST, CHF)
+// Material-Typen: Alu-Dibond, Poster/Fotopapier, Leinwand, Acrylglas
+// Format: cols×rows cm (1 Kachel = 1 cm), Preis je nach Material
+
+// Printolino Alu-Dibond Preise (ohne Aufhängung, exkl. MWST)
+// Preisformel: Annäherung aus Preisliste 2022
+function getPrintPrice(cols: number, rows: number, materialIdx: number): number {
+  const area = cols * rows; // cm²
+  // Base price per material type (Alu-Dibond as reference)
+  // Alu-Dibond: ~0.022 CHF/cm² + 20 CHF Grundpreis
+  // Poster: ~0.006 CHF/cm² + 5 CHF
+  // Leinwand: ~0.015 CHF/cm² + 15 CHF
+  // Acrylglas: ~0.032 CHF/cm² + 25 CHF
+  const configs = [
+    { base: 20, perCm2: 0.022 },  // 0: Alu-Dibond
+    { base: 5,  perCm2: 0.006 },  // 1: Poster/Fotopapier
+    { base: 15, perCm2: 0.015 },  // 2: Leinwand
+    { base: 25, perCm2: 0.032 },  // 3: Acrylglas
+  ];
+  const cfg = configs[materialIdx] ?? configs[0];
+  const raw = cfg.base + area * cfg.perCm2;
+  // Round to nearest .90 (Printolino pricing convention)
+  return Math.round(raw / 10) * 10 - 0.10;
+}
+
+// Printolino Materialien
+const PRINT_MATERIALS = [
+  { label: 'Alu-Dibond', desc: '2mm Alu-Dibond, Fotopapier glänzend', icon: '🔲', quality: 'Premium' },
+  { label: 'Poster', desc: 'Fotopapier glänzend oder seidenmatt', icon: '📄', quality: 'Standard' },
+  { label: 'Leinwand', desc: 'Leinwanddruck auf Keilrahmen', icon: '🖼️', quality: 'Classic' },
+  { label: 'Acrylglas', desc: 'Direktdruck hinter Acrylglas 4mm', icon: '✨', quality: 'Premium+' },
+];
+
+// Legacy PRINT_FORMATS (used by Stripe/digital download flow)
 const PRINT_FORMATS = [
   { label: "40x40 cm",   widthCm: 40,  heightCm: 40,  price: 69,  dpi: 400, pxW: 6299, pxH: 6299 },
   { label: "50x70 cm",   widthCm: 50,  heightCm: 70,  price: 99,  dpi: 400, pxW: 7874, pxH: 11024 },
@@ -609,16 +641,12 @@ const MATERIALS = [
   { label: "Fotopapier", surcharge: -10, icon: "📄" },
 ];
 
-// Digital download options (no physical print)
-// Tile sizes chosen so each tier produces visibly different output dimensions
-// even for large grids (120+ cols). Server MAX_DIM raised to 32000.
-// Max output per dimension: 16000px (server MAX_DIM). Tile sizes auto-capped for large grids.
-// For a typical 100x120 grid: 64px→6400x7680, 100px→10000x12000, 128px→12800x15360(capped~133px)
+// Download/Print formats – used for BOTH digital download and print order
+// tilePx determines output resolution: same rendering path for both use cases
 const DIGITAL_FORMATS = [
-  { label: "Standard", desc: "Fuer Social Media & Web", tilePx: 64, price: 9, format: 'jpg' as const },
-  { label: "HD", desc: "Hochauflösend fuer Bildschirm", tilePx: 100, price: 19, format: 'jpg' as const },
+  { label: "HD", desc: "Hochauflösend (ca. 10.000×12.000 px)", tilePx: 100, price: 19, format: 'jpg' as const },
   { label: "Ultra HD", desc: "Maximale Auflösung (1cm@400PPI)", tilePx: 157, price: 29, format: 'jpg' as const },
-  { label: "PNG Lossless", desc: "Verlustfrei fuer Profis", tilePx: 128, price: 39, format: 'png' as const },
+  { label: "PNG Lossless", desc: "Verlustfrei, maximale Qualität", tilePx: 157, price: 39, format: 'png' as const },
 ];
 
 export default function Studio() {
@@ -656,6 +684,7 @@ export default function Studio() {
   const [popOutMode, setPopOutMode] = useState(false);
   const [selectedFormat, setSelectedFormat] = useState(0); // 40x40 default (smallest available)
   const [selectedMaterial, setSelectedMaterial] = useState(0); // Leinwand default
+  const [selectedPrintMaterial, setSelectedPrintMaterial] = useState(0); // 0=Alu-Dibond default
 
   // Tile source mode: 'pool' = our DB only (default), 'own' = user photos only, 'mix' = user + DB
   const [tileSourceMode, setTileSourceMode] = useState<'pool' | 'own' | 'mix'>('pool');
@@ -670,7 +699,7 @@ export default function Studio() {
   const MIN_OWN_TILES = 20; // minimum tiles for 'own' mode
   const [showOrderPanel, setShowOrderPanel] = useState(false);
   const [orderMode, setOrderMode] = useState<'print' | 'digital'>('print');
-  const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(1); // HD default
+  const [selectedDigitalFormat, setSelectedDigitalFormat] = useState(0); // HD default (index 0 after removing Standard)
   const [showPhotoPreview, setShowPhotoPreview] = useState(false); // Modal for uploaded photo preview
   // Crop modal state
   const [cropModalOpen, setCropModalOpen] = useState(false);
@@ -774,6 +803,11 @@ export default function Studio() {
     tileUrl: string; cellColor: string;
   } | null>(null);
   const clickStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
+  // -- Admin Order Mode: orderId from URL param (for saving updated preview back to order) --
+  const adminOrderId = searchParams.get('orderId') ? Number(searchParams.get('orderId')) : null;
+  const [savingPreview, setSavingPreview] = useState(false);
+  const [savedPreviewMsg, setSavedPreviewMsg] = useState<string | null>(null);
 
   // -- Project Save/Restore (localStorage) ------------------------------------
   const savedProjectIdRef = useRef<number | null>(null); // ID of last saved project (for print upload)
@@ -974,6 +1008,7 @@ export default function Studio() {
           targetColors: targetColorsRef.current,
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
+          colorEnhance,
         }),
       });
       clearTimeout(timeoutId);
@@ -1046,7 +1081,22 @@ export default function Studio() {
   const triggerClientHiResRender = useCallback(async () => {
     const assignment = assignmentRef.current;
     const validImgs = validImgsRef.current;
-    const hiResImgs = validImgsHiResRef.current;
+    const tileIdsForHiRes = tileIdsRef.current;
+    // For user tiles (negative IDs), prefer userTileHiResRef (512px) over validImgsHiResRef
+    // (which may contain only 64px thumbnails if project was loaded from saved state).
+    // Build a merged hi-res array: for each tile index, use userTileHiRes if tileId < 0.
+    const rawHiResImgs = validImgsHiResRef.current;
+    const userHiRes = userTileHiResRef.current;
+    const hiResImgs: (HTMLImageElement | null)[] = rawHiResImgs.map((img, idx) => {
+      const tileId = tileIdsForHiRes[idx];
+      if (tileId !== undefined && tileId < 0) {
+        // Negative ID = user tile. Map back to user tile index (1-based negative → 0-based)
+        const userIdx = Math.abs(tileId) - 1;
+        const uhr = userHiRes[userIdx % Math.max(1, userHiRes.length)];
+        if (uhr && uhr.complete && uhr.naturalWidth > 0) return uhr;
+      }
+      return img;
+    });
     const params = mosaicParamsRef.current;
     const snapshot = snapshotRef.current;
     if (!assignment.length || !validImgs.length || !params) {
@@ -1065,13 +1115,17 @@ export default function Studio() {
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     // Mobile: use OffscreenCanvas or chunked rendering to allow larger tiles
     // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
-    const maxCanvasArea = isMob ? 50_000_000 : 200_000_000; // 50 MP mobile (chunked), 200 MP desktop
-    const maxCanvasDim = isMob ? 8192 : 16000;
+    // Desktop: cap at 80MP to keep toBlob() fast (< 5s). At 120×90 tiles:
+    //   128px → 176.9MP (too slow), 96px → 99.5MP (borderline), 80px → 69.1MP (fast)
+    // Mobile: cap at 50MP
+    const maxCanvasArea = isMob ? 50_000_000 : 80_000_000;
+    const maxCanvasDim = isMob ? 8192 : 12000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
-    // Mobile: 128px tiles (was 64) for much sharper zoom – fall back to 96 if canvas too large
+    // Desktop ideal: 96px (sharp but not too large). Mobile: 256px (chunked)
+    const idealDesktopTile = 96;
     const idealMobileTile = 256;
-    const HR_TILE = Math.min(isMob ? idealMobileTile : 128, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
+    const HR_TILE = Math.min(isMob ? idealMobileTile : idealDesktopTile, Math.max(32, Math.min(maxTileFromArea, maxTileFromDim)));
     const hrW = cols * HR_TILE;
     const hrH = rows * HR_TILE;
     console.log(`[ClientHiRes] ${cols}×${rows} grid, HR_TILE=${HR_TILE}px, canvas=${hrW}×${hrH} (${(hrW*hrH/1e6).toFixed(1)}MP, mobile=${isMob})`);
@@ -1270,12 +1324,15 @@ export default function Studio() {
       // The main render applies luminance scaling + AB color transfer per tile (Reinhard-style).
       // Hi-res uses original photos which are more saturated/different than 64px thumbnails.
       // We apply the same LAB correction here to ensure visual consistency between preview and zoom.
-      // Skip on mobile: getImageData on large canvas can crash mobile Safari.
-      if (!isMob) {
+      // On mobile: use tile-by-tile getImageData (smaller chunks) to avoid crashing Mobile Safari.
+      // On desktop: use full canvas getImageData for performance.
+      {
         const hrW = hrCanvas!.width;
         const hrH = hrCanvas!.height;
-        const hrImageData = hrCtx!.getImageData(0, 0, hrW, hrH);
-        const hd = hrImageData.data;
+        // Mobile: process tile-by-tile to avoid large getImageData crash
+        // Desktop: get full canvas at once for performance
+        const fullImageData = !isMob ? hrCtx!.getImageData(0, 0, hrW, hrH) : null;
+        const hd = fullImageData ? fullImageData.data : null;
         const cellLabData = cellLabRef.current;  // LAB target per cell
         const algoSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
         const blendFactor = Math.min(1.0, (algoSettings.histogramBlend ?? 0.0) / 0.10);
@@ -1284,15 +1341,20 @@ export default function Studio() {
         const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // Use same parameters as renderMosaic for visual consistency
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum
-        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12 minimum
-        const AB_BLEND = AB_BLEND_BASE * (0.5 + 0.5 * colorEnhanceVal); // scale by colorEnhance (50%-100% of base)
-        const MAX_COLOR_SHIFT = 18;
-        const MAX_BLUE_SHIFT = 10;
+        // NOTE: Hi-res uses full-res source images (Pexels/Unsplash) which have stronger
+        // color casts than the 128px R2 thumbnails used in preview.
+        // AB_BLEND: gentle nudge toward target color, preserving tile texture.
+        // Too high (0.55) = tiles become solid color blocks with no texture. Keep at 0.10-0.30.
+        const AB_BLEND = Math.min(0.30, 0.10 + colorEnhanceVal * 0.20); // 0.10..0.30 range
+        const MAX_COLOR_SHIFT = 20;  // moderate clamp to preserve tile character
+        const MAX_BLUE_SHIFT = 20;   // moderate blue correction
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         if (cellLabData.length > 0) {
-          console.log('[ClientHiRes] Applying LAB color correction (same as renderMosaic)');
+          console.log(`[ClientHiRes] Applying LAB color correction (mobile=${isMob})`);
           // Process each tile cell
+          // Mobile: tile-by-tile getImageData to avoid large buffer crash in Mobile Safari
+          // Desktop: use pre-fetched full canvas ImageData (hd) for performance
           for (let row = 0; row < rows; row++) {
             for (let col = 0; col < cols; col++) {
               const ci = row * cols + col;
@@ -1302,23 +1364,45 @@ export default function Studio() {
               const shadowBoost = isShadowZone ? Math.max(0, (40 - tL) / 40) : 0;
               const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
 
-              // Compute tile average L using 8x8 subsample for consistency with preview/print.
-              // Full-resolution avgL differs from preview (64px thumbnails) — causes color mismatch.
               const yStart = row * actualTile;
               const xStart = col * actualTile;
+              const yEnd = Math.min(yStart + actualTile, hrH);
+              const xEnd = Math.min(xStart + actualTile, hrW);
+              const tileW = xEnd - xStart;
+              const tileH = yEnd - yStart;
+              if (tileW <= 0 || tileH <= 0) continue;
+
+              // Get pixel data: mobile uses per-tile getImageData, desktop uses full buffer
+              let tileData: ImageData;
+              let td: Uint8ClampedArray;
+              if (isMob) {
+                try { tileData = hrCtx!.getImageData(xStart, yStart, tileW, tileH); }
+                catch { continue; } // skip tile if getImageData fails
+                td = tileData.data;
+              } else {
+                tileData = fullImageData!;
+                td = hd!;
+              }
+
+              // Compute tile average L using 8x8 subsample
               const REF_N = 8;
               const stepY = Math.max(1, Math.floor(actualTile / REF_N));
               const stepX = Math.max(1, Math.floor(actualTile / REF_N));
               let sumL = 0, pCount = 0;
               for (let sy = 0; sy < REF_N; sy++) {
                 for (let sx = 0; sx < REF_N; sx++) {
-                  const py = Math.min(yStart + sy * stepY, yStart + actualTile - 1);
-                  const px = Math.min(xStart + sx * stepX, xStart + actualTile - 1);
-                  if (py < hrH && px < hrW) {
+                  if (isMob) {
+                    const lx = Math.min(sx * stepX, tileW - 1);
+                    const ly = Math.min(sy * stepY, tileH - 1);
+                    const pi = (ly * tileW + lx) * 4;
+                    sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
+                  } else {
+                    const py = Math.min(yStart + sy * stepY, yEnd - 1);
+                    const px = Math.min(xStart + sx * stepX, xEnd - 1);
                     const pi = (py * hrW + px) * 4;
-                    sumL += rgbToLab(hd[pi], hd[pi+1], hd[pi+2])[0];
-                    pCount++;
+                    sumL += rgbToLab(td[pi], td[pi+1], td[pi+2])[0];
                   }
+                  pCount++;
                 }
               }
               const avgL = pCount > 0 ? sumL / pCount : 50;
@@ -1328,46 +1412,67 @@ export default function Studio() {
               const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
 
               // Apply per-pixel LAB correction
-              for (let py = yStart; py < yEnd; py++) {
-                for (let px = xStart; px < xEnd; px++) {
-                  const pi = (py * hrW + px) * 4;
-                  const [pl, pa, pb] = rgbToLab(hd[pi], hd[pi+1], hd[pi+2]);
-                  let newL = Math.max(0, Math.min(100, pl * lumScale));
-                  if (isShadowZone && shadowBoost > 0.05) {
-                    const deviation = pl - avgL;
-                    const stretchFactor = 1.0 + shadowBoost * 0.4;
-                    newL = Math.max(0, Math.min(100, (newL + deviation * (stretchFactor - 1.0))));
+              if (isMob) {
+                for (let ly = 0; ly < tileH; ly++) {
+                  for (let lx = 0; lx < tileW; lx++) {
+                    const pi = (ly * tileW + lx) * 4;
+                    const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const deviation = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + deviation * (1.0 + shadowBoost * 0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tB - pb) * AB_BLEND;
+                    const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDeltaB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+                    const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+                    const satBoost = 0.90 + cBoost * 0.15;
+                    const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+                    const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
+                    const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+                    td[pi] = nr; td[pi+1] = ng; td[pi+2] = nb;
                   }
-                  if (isShadowZone && newL > tL + 25) {
-                    newL = tL + 25 + (newL - tL - 25) * 0.2;
+                }
+                hrCtx!.putImageData(tileData, xStart, yStart);
+              } else {
+                for (let py = yStart; py < yEnd; py++) {
+                  for (let px = xStart; px < xEnd; px++) {
+                    const pi = (py * hrW + px) * 4;
+                    const [pl, pa, pb] = rgbToLab(td[pi], td[pi+1], td[pi+2]);
+                    let newL = Math.max(0, Math.min(100, pl * lumScale));
+                    if (isShadowZone && shadowBoost > 0.05) {
+                      const deviation = pl - avgL;
+                      newL = Math.max(0, Math.min(100, newL + deviation * (1.0 + shadowBoost * 0.4 - 1.0)));
+                    }
+                    if (isShadowZone && newL > tL + 25) newL = tL + 25 + (newL - tL - 25) * 0.2;
+                    const rawDeltaA = (tA - pa) * AB_BLEND;
+                    const rawDeltaB = (tB - pb) * AB_BLEND;
+                    const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
+                    const clampedDeltaB = rawDeltaB < 0 ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB) : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
+                    const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
+                    const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
+                    const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
+                    const satBoost = 0.90 + cBoost * 0.15;
+                    const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
+                    const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
+                    const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
+                    const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
+                    td[pi] = nr; td[pi+1] = ng; td[pi+2] = nb;
                   }
-                  const rawDeltaA = (tA - pa) * AB_BLEND;
-                  const rawDeltaB = (tB - pb) * AB_BLEND;
-                  const clampedDeltaA = Math.max(-MAX_COLOR_SHIFT, Math.min(MAX_COLOR_SHIFT, rawDeltaA));
-                  const clampedDeltaB = rawDeltaB < 0
-                    ? Math.max(-MAX_BLUE_SHIFT, rawDeltaB)
-                    : Math.min(MAX_COLOR_SHIFT, rawDeltaB);
-                  const newA = Math.max(-128, Math.min(127, pa + clampedDeltaA));
-                  const newB = Math.max(-128, Math.min(127, pb + clampedDeltaB));
-                  const contrastL = Math.max(0, Math.min(100, 50 + (newL - 50) * cBoost));
-                  const satBoost = 0.90 + cBoost * 0.15;
-                  const boostedA = Math.max(-128, Math.min(127, newA * satBoost));
-                  const bSatBoost = newB < 0 ? Math.min(satBoost, 1.0) : satBoost;
-                  const boostedB = Math.max(-128, Math.min(127, newB * bSatBoost));
-                  const [nr, ng, nb] = labToRgb(contrastL, boostedA, boostedB);
-                  hd[pi] = nr;
-                  hd[pi+1] = ng;
-                  hd[pi+2] = nb;
                 }
               }
             }
             // Yield to UI every few rows
             if (row % 10 === 0) await new Promise(r => setTimeout(r, 0));
           }
-          hrCtx!.putImageData(hrImageData, 0, 0);
+          if (!isMob && fullImageData) hrCtx!.putImageData(fullImageData, 0, 0);
         } else {
           // No cellLab data available (e.g. loaded from saved project without re-render)
-          // Fall back to simple contrast boost only
           console.log('[ClientHiRes] No cellLab data, skipping LAB correction');
         }
       }
@@ -4290,15 +4395,21 @@ export default function Studio() {
         // Mosaicer reference: NO overlay by default - tiles match naturally via precise color selection
         // Only apply subtle luminance correction to preserve face structure
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
+        // colorEnhance slider (0-100) scales the AB color transfer strength
+        // 0% = no color shift at all, 100% = full correction
+        const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
         // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
         // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
-        // AB_BLEND: minimum 0.12 (reduced from 0.20 to prevent blue tint accumulation)
-        // At histogramBlend=0.07 -> blendFactor=0.7 -> AB_BLEND=0.12+0.20*0.7=0.26
-        const AB_BLEND = 0.12 + 0.20 * blendFactor;  // 0.12 minimum, up to 0.32 at full blend
-        const MAX_COLOR_SHIFT = 18;            // wider clamp: allows stronger color correction for saturated areas
-        // Asymmetric blue clamp: limit blue shifts more aggressively (human eye is sensitive to blue tint)
-        const MAX_BLUE_SHIFT = 10;             // tighter clamp for negative b direction (toward blue)
+        // AB_BLEND: scaled by colorEnhance slider to prevent unwanted blue tint
+        // colorEnhance=0 → AB_BLEND=0 (no color shift, prevents blue tint)
+        // colorEnhance=50 → moderate color correction
+        // colorEnhance=100 → full strength
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // base: 0.12-0.32
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // scaled by slider (0 at 0%)
+        const MAX_COLOR_SHIFT = 15;            // reduced from 18 to prevent unnatural tinting
+        // Asymmetric blue clamp: limit blue shifts aggressively (human eye is very sensitive to blue tint)
+        const MAX_BLUE_SHIFT = 5;              // reduced from 10 to prevent visible blue tint
         const [tL, tA, tB] = cellLab[ci];
         // -- Shadow-Boost: in dark areas (tL < 35), stretch contrast to improve visibility --
         // Problem: tiles in shadow zones all look uniformly dark -> face structure lost
@@ -4579,6 +4690,8 @@ export default function Studio() {
       return;
     }
 
+    let cancelled = false;
+    (async () => {
     const params = mosaicParamsRef.current;
     const popContainer = popOutContainerRef.current;
     const canvas = canvasRef.current;
@@ -4625,6 +4738,52 @@ export default function Studio() {
     const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
     const numTiles = Math.min(isMob ? 15 : 30, totalCells); // fewer tiles on mobile to save memory
     const tileEls: HTMLCanvasElement[] = [];
+    const tileIds = tileIdsRef.current;
+
+    // Pre-load hi-res images for DB tiles that only have 64px thumbnails.
+    // This prevents blurry pop-out tiles (64px upscaled to 512px canvas).
+    const popOutLoadPromises: Promise<void>[] = [];
+    const popOutHiResCache: Record<number, HTMLImageElement> = {};
+    const popOutLoadedIdxs = new Set<number>();
+
+    for (let t = 0; t < numTiles; t++) {
+      const ci = indices[t];
+      if (!assignment) continue;
+      const tileIdx = assignment[ci];
+      if (popOutLoadedIdxs.has(tileIdx)) continue; // already queued
+      const dbId = tileIds?.[tileIdx];
+      if (!dbId || dbId <= 0) continue; // user tile — already has hi-res via userTileOriginalRef
+      // Always load 512px for DB tiles — validImgs only has 64px thumbnails
+      // Don't skip based on validImgsHiResRef (those are null for DB tiles)
+      popOutLoadedIdxs.add(tileIdx);
+      // Need to load hi-res for this DB tile
+      popOutLoadPromises.push(new Promise<void>(resolve => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        const timeout = setTimeout(() => { img.onload = img.onerror = null; resolve(); }, 8000);
+        img.onload = () => { clearTimeout(timeout); if (img.naturalWidth > 0) popOutHiResCache[tileIdx] = img; resolve(); };
+        img.onerror = () => { clearTimeout(timeout); resolve(); };
+        img.src = `/api/tile/${dbId}?size=512&t=${Date.now()}`;
+      }));
+    }
+    // Load all hi-res tiles in parallel (max ~30 tiles × ~50KB = ~1.5MB)
+    console.log(`[PopOut] tileIds.length=${tileIds?.length}, assignment=${assignment?.length}, numTiles=${numTiles}, loadPromises=${popOutLoadPromises.length}`);
+    if (popOutLoadPromises.length > 0) {
+      console.log(`[PopOut] Loading ${popOutLoadPromises.length} hi-res tiles for sharp pop-out...`);
+      await Promise.all(popOutLoadPromises);
+      if (cancelled) return;
+      console.log(`[PopOut] Loaded ${Object.keys(popOutHiResCache).length}/${popOutLoadPromises.length} hi-res tiles`);
+    } else {
+      // Debug: why no promises? Check first few tiles
+      for (let t2 = 0; t2 < Math.min(3, numTiles); t2++) {
+        const ci2 = indices[t2];
+        if (!assignment) break;
+        const tileIdx2 = assignment[ci2];
+        const dbId2 = tileIds?.[tileIdx2];
+        const hiImg2 = validImgsHiResRef.current?.[tileIdx2];
+        console.log(`[PopOut] tile t=${t2} ci=${ci2} tileIdx=${tileIdx2} dbId=${dbId2} hiImg=${hiImg2?.naturalWidth}px`);
+      }
+    }
 
     for (let t = 0; t < numTiles; t++) {
       const ci = indices[t];
@@ -4638,16 +4797,18 @@ export default function Studio() {
       tCtx.imageSmoothingEnabled = true;
       tCtx.imageSmoothingQuality = 'high';
 
-      // Draw from best available tile image: originals > hi-res > thumbnail > snapshot
+      // Draw from best available tile image: popOutHiRes > originals > hi-res > thumbnail > snapshot
       let drawn = false;
       if (assignment && validImgs) {
         const tileIdx = assignment[ci];
-        // Priority chain: user originals (full-res) > hi-res > thumbnail
+        // Priority chain: pop-out hi-res (freshly loaded 512px) > user originals (full-res) > hi-res > thumbnail
+        const popOutHi = popOutHiResCache[tileIdx];
         const userOriginals = userTileOriginalRef.current;
         const hiResImgs = validImgsHiResRef.current;
         const origImg = userOriginals?.[tileIdx >= 0 ? -1 : -(tileIdx + 1)]; // user tiles have negative IDs
         const hiImg = hiResImgs?.[tileIdx];
-        const bestImg = (origImg && origImg.complete && origImg.naturalWidth > 0) ? origImg
+        const bestImg = (popOutHi && popOutHi.complete && popOutHi.naturalWidth > 0) ? popOutHi
+          : (origImg && origImg.complete && origImg.naturalWidth > 0) ? origImg
           : (hiImg && hiImg.complete && hiImg.naturalWidth > 0) ? hiImg
           : validImgs[tileIdx];
         if (bestImg && bestImg.complete && bestImg.naturalWidth > 0) {
@@ -4704,6 +4865,8 @@ export default function Studio() {
     });
 
     popOutWaveTlRef.current = tl;
+    })(); // end async IIFE
+    return () => { cancelled = true; };
   }, [popOutMode, ready]);
 
   // Auto-start Hi-Res rendering in background once mosaic is ready
@@ -4873,6 +5036,9 @@ export default function Studio() {
         selectedMaterial,
         selectedTheme,
         tileSourceMode,
+        // Persist slider values so they are restored when loading the project
+        userOverlay,
+        colorEnhance,
       };
       // Save mosaic canvas as data URL
       let thumbnailUrl: string | undefined;
@@ -4931,7 +5097,7 @@ export default function Studio() {
     } finally {
       setSavingProject(false);
     }
-  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders]);
+  }, [userPhoto, qualityMetrics, selectedFormat, selectedMaterial, selectedTheme, tileSourceMode, user, authHeaders, userOverlay, colorEnhance]);
 
   // Project restore handler
   const restoreProject = useCallback(() => {
@@ -4949,6 +5115,9 @@ export default function Studio() {
       if (data.assignment) assignmentRef.current = data.assignment;
       if (data.tileIds) tileIdsRef.current = data.tileIds;
       if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+      // Restore slider values (Foto-Overlay & Farbkorrektur)
+      if (data.userOverlay !== undefined) setUserOverlay(data.userOverlay);
+      if (data.colorEnhance !== undefined) { setColorEnhance(data.colorEnhance); colorEnhanceRef.current = data.colorEnhance; }
 
       // Restore mosaic image to canvas
       if (data.mosaicImage && data.mosaicParams) {
@@ -5030,6 +5199,9 @@ export default function Studio() {
           if (data.assignment) assignmentRef.current = data.assignment;
           if (data.tileIds) tileIdsRef.current = data.tileIds;
           if (data.mosaicParams) mosaicParamsRef.current = data.mosaicParams;
+          // Restore slider values (Foto-Overlay & Farbkorrektur)
+          if (data.userOverlay !== undefined) setUserOverlay(data.userOverlay);
+          if (data.colorEnhance !== undefined) { setColorEnhance(data.colorEnhance); colorEnhanceRef.current = data.colorEnhance; }
 
           // Restore user tiles from project if available
           const savedTiles = result.project.user_tiles;
@@ -5163,11 +5335,26 @@ export default function Studio() {
             }
           }
 
-          // Restore user photo (skip auto-render: project already has rendered image)
+          // Restore user photo
+          // In admin mode (orderId param present): trigger full re-render so sliders work
+          // In normal mode: skip auto-render since project already has rendered image
+          const isAdminMode = !!searchParams.get('orderId');
           if (data.userPhoto) {
-            skipAutoRenderRef.current = true;
+            if (!isAdminMode) skipAutoRenderRef.current = true;
             const uImg = new Image();
-            uImg.onload = () => setUserPhotoImg(uImg);
+            uImg.onload = () => {
+              setUserPhotoImg(uImg);
+              // Build userOverlayUrl so the Foto-Overlay slider works immediately
+              // (normally built inside renderMosaic, but we skip rendering for loaded projects)
+              const canvas = canvasRef.current;
+              if (canvas && canvas.width > 0 && canvas.height > 0) {
+                const olCanvas = document.createElement('canvas');
+                olCanvas.width = canvas.width;
+                olCanvas.height = canvas.height;
+                olCanvas.getContext('2d')!.drawImage(uImg, 0, 0, canvas.width, canvas.height);
+                setUserOverlayUrl(olCanvas.toDataURL('image/jpeg', 0.92));
+              }
+            };
             uImg.src = data.userPhoto;
           }
         }
@@ -5250,12 +5437,44 @@ export default function Studio() {
             snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
             targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
             cellLab: cellLabRef.current,
-            userOverlay, userPhotoImg,
+            userOverlay, colorEnhance, userPhotoImg,
             onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
           });
 
-          // Force download with proper MIME type (bypasses Chrome PDF viewer)
+          // Upload print file to R2 BEFORE triggering download (same as hi-res path)
           const jpgBlob1 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+          if (savedProjectIdRef.current && user) {
+            try {
+              setDlProgressMsg('Druckdatei wird auf Server gespeichert...');
+              const uploadRes1 = await fetch(`/api/projects/${savedProjectIdRef.current}/print-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+                body: jpgBlob1,
+              });
+              const uploadResult1 = await uploadRes1.json();
+              if (uploadResult1.ok) {
+                setDlProgressMsg('✓ Druckdatei gespeichert – wird heruntergeladen...');
+                // Send confirmation email
+                try {
+                  await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify({ printUrl: uploadResult1.printUrl }),
+                  });
+                } catch (emailErr) {
+                  console.warn('[Email] Confirmation email failed:', emailErr);
+                }
+              } else {
+                setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
+              }
+            } catch (uploadErr) {
+              console.warn('[PrintUpload] Failed:', uploadErr);
+              setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wird lokal heruntergeladen.');
+            }
+          } else if (!savedProjectIdRef.current && user) {
+            setDlProgressMsg('✓ Download fertig. Tipp: Projekt speichern, um Druckdatei unter Projekte abzurufen.');
+          }
+          // Force download with proper MIME type (bypasses Chrome PDF viewer)
           forceDownloadBlob(jpgBlob1, printFilename, 'image/jpeg');
           setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob1.size / 1024 / 1024).toFixed(1)} MB)`);
           setDlProgress(100);
@@ -5282,17 +5501,13 @@ export default function Studio() {
           snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
           targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
           cellLab: cellLabRef.current, // Pass cellLab for accurate color correction (blurred+original mix)
-          userOverlay, userPhotoImg,
+          userOverlay, colorEnhance, userPhotoImg,
           onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
         });
 
-        // Force download with proper MIME type (bypasses Chrome PDF viewer)
-        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
-        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
-        setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
-
         setDlProgress(100);
-        // Upload print file to R2 and save URL in project
+        // Upload print file to R2 BEFORE triggering download
+        // (forceDownloadBlob navigates away via window.location.href, killing any code after it)
         if (savedProjectIdRef.current && user) {
           try {
             setDlProgressMsg('Druckdatei wird auf Server gespeichert...');
@@ -5303,17 +5518,33 @@ export default function Studio() {
             });
             const uploadResult = await uploadRes.json();
             if (uploadResult.ok) {
-              setDlProgressMsg('✓ Druckdatei gespeichert – abrufbar unter Projekte');
+              setDlProgressMsg('✓ Druckdatei gespeichert – wird heruntergeladen...');
+              // Send confirmation email
+              try {
+                await fetch(`/api/projects/${savedProjectIdRef.current}/send-confirmation`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                  body: JSON.stringify({ printUrl: uploadResult.printUrl }),
+                });
+              } catch (emailErr) {
+                console.warn('[Email] Confirmation email failed:', emailErr);
+              }
             } else {
               setDlProgressMsg('⚠ Druckdatei konnte nicht auf Server gespeichert werden.');
             }
           } catch (uploadErr) {
             console.warn('[PrintUpload] Failed:', uploadErr);
-            setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wurde lokal heruntergeladen.');
+            setDlProgressMsg('⚠ Upload fehlgeschlagen – Druckdatei wird lokal heruntergeladen.');
           }
         } else if (!savedProjectIdRef.current && user) {
           setDlProgressMsg('✓ Download fertig. Tipp: Projekt speichern, um Druckdatei unter Projekte abzurufen.');
         }
+
+        // Force download AFTER R2 upload (navigation via window.location.href kills subsequent code)
+        const jpgBlob2 = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+        forceDownloadBlob(jpgBlob2, printFilename, 'image/jpeg');
+        setDlProgressMsg(`✓ Download: ${printFilename} (${(jpgBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+
       } catch (e) {
         console.error('[Print] Server render failed:', e);
         setDlProgressMsg(`Server-Fehler: ${e}. Verwende Canvas-Fallback...`);
@@ -5372,9 +5603,7 @@ export default function Studio() {
     link.click();
   }, [selectedFormat]);
 
-  const totalPrice = orderMode === 'print'
-    ? PRINT_FORMATS[selectedFormat].price + MATERIALS[selectedMaterial].surcharge
-    : DIGITAL_FORMATS[selectedDigitalFormat].price;
+  const totalPrice = DIGITAL_FORMATS[selectedDigitalFormat].price;
 
   // Digital download handler: server-side render without watermark
   const handleDigitalDownload = useCallback(async () => {
@@ -5406,11 +5635,12 @@ export default function Studio() {
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        colorEnhance,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
       forceDownloadBlob(blob, filename, mimeType3);
-      setDlProgressMsg(`✓ Download: ${filename} (${(blob3.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e: any) {
       console.error('[Digital Download] Failed:', e);
@@ -5446,10 +5676,11 @@ export default function Studio() {
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+        colorEnhance,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       forceDownloadBlob(adminBlob, adminFilename, 'image/jpeg');
-      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob2.size / 1024 / 1024).toFixed(1)} MB)`);
+      setDlProgressMsg(`✓ Download: ${adminFilename} (${(adminBlob.size / 1024 / 1024).toFixed(1)} MB)`);
       setDlProgress(100);
     } catch (e) {
       console.error('[Admin Max Download] Failed:', e);
@@ -5460,97 +5691,166 @@ export default function Studio() {
     }
   }, []);
 
-  // Printolino order: create order + render file for admin fulfillment
+  // Druck bestellen: create order in DB + render file client-side for admin fulfillment
   const [printolinoLoading, setPrintolinoLoading] = useState(false);
   const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
   const handlePrintolinoOrder = useCallback(async () => {
-    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
-    const fmt = PRINT_FORMATS[selectedFormat];
-    const mat = MATERIALS[selectedMaterial];
+    if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) {
+      console.warn('[PrintOrder] Guard failed: assignment.length=' + assignmentRef.current.length + ' tileIds.length=' + tileIdsRef.current.length + ' mosaicParams=' + JSON.stringify(mosaicParamsRef.current));
+      setDlProgressMsg('Fehler: Mosaik nicht bereit. Bitte zuerst ein Mosaik erstellen.');
+      setTimeout(() => setDlProgressMsg(''), 4000);
+      return;
+    }
     const { cols, rows } = mosaicParamsRef.current;
+    // 1 tile = 1 cm @ 400 DPI → tilePx = 1 cm × (400/2.54) ≈ 157 px
+    const TILE_PX_400DPI = 157;
+    const SERVER_MAX_DIM = 16000;
+    let PRINT_TILE_PX = TILE_PX_400DPI;
+    if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
+      PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
+      PRINT_TILE_PX = Math.max(32, PRINT_TILE_PX);
+    }
+    const outW = cols * PRINT_TILE_PX;
+    const outH = rows * PRINT_TILE_PX;
 
     setPrintolinoLoading(true);
+    setDlLoading(true);
     try {
-      // 1. Calculate tilePx for the print format (matching handleDownload logic)
-      const PX_PER_CM = 400 / 2.54; // 400 DPI = 1 Kachel pro cm bei 157px
-      const tileSizeCm = fmt.widthCm / cols;
-      const naturalTilePx = Math.round(tileSizeCm * PX_PER_CM);
-      const PRINT_TILE_PX = Math.min(400, Math.max(64, naturalTilePx)); // cap at 400px (max API)
-      const dlSettings = (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })();
+      setDlProgressMsg('Bestellung wird angelegt...');
+      setDlProgress(20);
 
-      // 2. Create order in DB with render params
+      // 1. Capture mosaic preview thumbnail from canvas
+      let mosaicPreviewUrl: string | null = null;
+      if (canvasRef.current) {
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = 400;
+        thumbCanvas.height = Math.round(400 * (canvasRef.current.height / canvasRef.current.width));
+        const thumbCtx = thumbCanvas.getContext('2d');
+        if (thumbCtx) {
+          thumbCtx.drawImage(canvasRef.current, 0, 0, thumbCanvas.width, thumbCanvas.height);
+          mosaicPreviewUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
+        }
+      }
+
+      // 2. Capture customer photo thumbnail
+      let photoUrl: string | null = null;
+      if (userPhotoImg) {
+        const photoThumb = document.createElement('canvas');
+        photoThumb.width = 400;
+        photoThumb.height = Math.round(400 * (userPhotoImg.height / userPhotoImg.width));
+        const photoCtx = photoThumb.getContext('2d');
+        if (photoCtx) {
+          photoCtx.drawImage(userPhotoImg, 0, 0, photoThumb.width, photoThumb.height);
+          photoUrl = photoThumb.toDataURL('image/jpeg', 0.7);
+        }
+      } else if (userPhoto && typeof userPhoto === 'string') {
+        photoUrl = userPhoto;
+      }
+
+      setDlProgress(50);
+
+      // 3. Upload user tiles (negative IDs) to R2 so server can render them later
+      // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
+      const currentTileIds = tileIdsRef.current;
+      const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
+      const userTileUrls: Record<string, string> = {};
+
+      if (uniqueNegativeIds.length > 0) {
+        setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
+        setDlProgress(55);
+        // For each unique negative tileId, get the corresponding user tile image
+        // tileId = -(index + 1), so index = Math.abs(tileId) - 1
+        // Use userTileOriginalRef for best quality, fall back to userTileHiResRef, then userTileImagesRef
+        const userOriginals = userTileOriginalRef.current;
+        const userHiRes = userTileHiResRef.current;
+        const userThumbs = userTileImagesRef.current;
+
+        let uploadedCount = 0;
+        await Promise.all(uniqueNegativeIds.map(async (tileId) => {
+          const idx = Math.abs(tileId) - 1;
+          const imgEl = userOriginals[idx] || userHiRes[idx] || userThumbs[idx];
+          if (!imgEl || !imgEl.src) return;
+          try {
+            // Get image data as JPEG data URL from the HTMLImageElement
+            const canvas = document.createElement('canvas');
+            canvas.width = imgEl.naturalWidth || imgEl.width;
+            canvas.height = imgEl.naturalHeight || imgEl.height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(imgEl, 0, 0);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+            // Upload to server which stores on R2
+            const uploadResp = await fetch('/api/orders/upload-user-tile', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify({ imageDataUrl: dataUrl, tileIndex: idx }),
+            });
+            if (uploadResp.ok) {
+              const uploadData = await uploadResp.json();
+              if (uploadData.ok && uploadData.url) {
+                userTileUrls[String(tileId)] = uploadData.url;
+                uploadedCount++;
+              }
+            }
+          } catch (err) {
+            console.warn(`[PrintOrder] User tile ${tileId} upload failed:`, err);
+          }
+        }));
+        console.log(`[PrintOrder] Uploaded ${uploadedCount}/${uniqueNegativeIds.length} user tiles to R2`);
+        setDlProgress(75);
+      }
+
+      // 4. Create order in DB with full render params (admin renders server-side)
+      const printMat = PRINT_MATERIALS[selectedPrintMaterial];
+      const printPrice = getPrintPrice(cols, rows, selectedPrintMaterial);
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
-          formatLabel: fmt.label,
-          materialLabel: mat.label,
-          priceChf: fmt.price + mat.surcharge,
+          formatLabel: `${cols}x${rows} cm (${outW.toLocaleString()}x${outH.toLocaleString()} px)`,
+          materialLabel: printMat.label,
+          priceChf: printPrice,
           customerEmail: user?.email ?? null,
           userId: user?.id ?? null,
+          projectId: savedProjectIdRef.current ?? null,
+          photoUrl,
+          mosaicPreviewUrl,
           renderParams: {
-            tileIds: tileIdsRef.current,
-            assignment: assignmentRef.current,
             cols, rows,
             tilePx: PRINT_TILE_PX,
-            overlayMode: dlSettings.overlayMode ?? 'softlight',
-            baseOverlay: dlSettings.baseOverlay ?? 0.15,
-            edgeBoost: dlSettings.edgeBoost ?? 0.20,
+            format: 'jpg',
+            outputWidth: outW,
+            outputHeight: outH,
+            userOverlay,
+            colorEnhance,
+            // Full assignment and tileIds for server-side rendering by admin
+            assignment: assignmentRef.current,
+            tileIds: tileIdsRef.current,
+            // Color correction data for server-side LAB transfer + overlay (required for quality)
             targetColors: targetColorsRef.current,
             edgeMap: edgeMapRef.current,
             faceMask: faceMaskRef.current,
+            // R2 URLs for user-uploaded tiles (negative IDs) – required for server-side rendering
+            ...(Object.keys(userTileUrls).length > 0 ? { userTileUrls } : {}),
           },
         }),
       });
       const orderData = await orderResp.json();
       if (!orderData.ok) throw new Error(orderData.error || 'Order creation failed');
 
-      // 3. Now render the file for this order
-      setProgressMsg(`Rendere Druckdatei fuer Printolino (${fmt.label})...`);
-      setProgress(10);
-      const jobId = `prt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const renderResp = await fetch('/api/print-render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tileIds: tileIdsRef.current,
-          assignment: assignmentRef.current,
-          cols, rows,
-          tilePx: PRINT_TILE_PX,
-          format: 'jpg',
-          jobId,
-          overlayMode: dlSettings.overlayMode ?? 'softlight',
-          baseOverlay: dlSettings.baseOverlay ?? 0.15,
-          edgeBoost: dlSettings.edgeBoost ?? 0.20,
-          targetColors: targetColorsRef.current,
-          edgeMap: edgeMapRef.current,
-          faceMask: faceMaskRef.current,
-        }),
-      });
-      if (!renderResp.ok) throw new Error('Render failed');
-      // Poll for completion
-      const prtResult = await pollForResult(jobId, setProgress, setProgressMsg);
-      const { token } = prtResult;
-
-      // 4. Update order with download token
-      await fetch(`/api/admin/orders/${orderData.orderId}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'ready', downloadToken: token }),
-      });
-
+      setDlProgress(100);
+      setDlProgressMsg(`✓ Bestellung #${orderData.orderId} eingegangen! Wir bereiten Ihre Druckdatei vor und melden uns per E-Mail.`);
       setPrintolinoSuccess(true);
-      setProgressMsg('Bestellung erfolgreich erstellt!');
-      setProgress(100);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); setPrintolinoSuccess(false); }, 5000);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); setPrintolinoSuccess(false); }, 10000);
     } catch (e) {
-      console.error('[Printolino] Order failed:', e);
-      setProgressMsg(`Fehler: ${e}`);
-      setTimeout(() => { setProgressMsg(''); setProgress(0); }, 3000);
+      console.error('[PrintOrder] Failed:', e);
+      setDlProgressMsg(`Fehler: ${e}`);
+      setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
     } finally {
       setPrintolinoLoading(false);
+      setDlLoading(false);
     }
-  }, [selectedFormat, selectedMaterial, user]);
+  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
@@ -6179,6 +6479,61 @@ export default function Studio() {
               </div>
             )}
 
+            {/* Admin: Vorschau in Bestellung speichern */}
+            {adminOrderId && ready && (
+              <div className="flex items-center gap-3 mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                <div className="flex-1">
+                  <p className="text-xs font-semibold text-amber-800">Admin-Modus: Bestellung #{adminOrderId}</p>
+                  <p className="text-xs text-amber-600">Overlay/Farbkorrektur anpassen, dann Vorschau speichern</p>
+                  {savedPreviewMsg && <p className="text-xs text-green-700 font-medium mt-0.5">{savedPreviewMsg}</p>}
+                </div>
+                <button
+                  disabled={savingPreview}
+                  onClick={async () => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+                    setSavingPreview(true);
+                    setSavedPreviewMsg(null);
+                    try {
+                      const out = document.createElement('canvas');
+                      out.width = canvas.width; out.height = canvas.height;
+                      const ctx = out.getContext('2d')!;
+                      ctx.drawImage(canvas, 0, 0);
+                      if (colorEnhance > 0 && colorEnhanceUrl) {
+                        const ceImg = new Image(); ceImg.src = colorEnhanceUrl;
+                        await new Promise<void>(r => { ceImg.onload = () => r(); ceImg.onerror = () => r(); });
+                        ctx.globalAlpha = colorEnhance / 100; ctx.drawImage(ceImg, 0, 0, out.width, out.height); ctx.globalAlpha = 1;
+                      }
+                      if (userOverlay > 0 && userOverlayUrl) {
+                        const olImg = new Image(); olImg.src = userOverlayUrl;
+                        await new Promise<void>(r => { olImg.onload = () => r(); olImg.onerror = () => r(); });
+                        ctx.globalAlpha = userOverlay / 100; ctx.drawImage(olImg, 0, 0, out.width, out.height); ctx.globalAlpha = 1;
+                      }
+                      const dataUrl = out.toDataURL('image/jpeg', 0.88);
+                      const resp = await fetch(`/api/admin/orders/${adminOrderId}/preview-url`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                        body: JSON.stringify({ previewDataUrl: dataUrl }),
+                      });
+                      const result = await resp.json();
+                      if (result.ok) {
+                        setSavedPreviewMsg('Vorschau gespeichert - im Admin-Panel sichtbar');
+                      } else {
+                        setSavedPreviewMsg('Fehler: ' + (result.error || 'Unbekannt'));
+                      }
+                    } catch (e) {
+                      setSavedPreviewMsg('Fehler: ' + String(e));
+                    } finally {
+                      setSavingPreview(false);
+                    }
+                  }}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap"
+                >
+                  {savingPreview ? 'Speichert...' : 'Vorschau speichern'}
+                </button>
+              </div>
+            )}
+
             {/* Statistiken & Einstellungen Modal */}
             {showStatsModal && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={() => setShowStatsModal(false)}>
@@ -6628,205 +6983,102 @@ export default function Studio() {
             {/* ===== PRINT MODE ===== */}
             {orderMode === 'print' && (
               <>
-                {/* Format selection */}
-                <div className="mb-5">
-                  <p className="text-sm font-bold text-gray-700 mb-3">Druckformat waehlen</p>
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                    {PRINT_FORMATS.map(({ label, price, widthCm }, idx) => {
-                      const cols = mosaicParamsRef.current?.cols ?? 60;
-                      const tileMm = Math.round((widthCm / cols) * 10); // tile size in mm
-                      // Quality rating: <5mm = tiles too small, 5-7mm = ok, 8-12mm = ideal, >12mm = tiles dominate
-                      const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
-                      const qualityColor = quality === 'ideal' ? 'text-green-600' : quality === 'ok' ? 'text-blue-500' : quality === 'small' ? 'text-amber-600' : 'text-gray-500';
-                      const qualityLabel = quality === 'ideal' ? 'Optimal' : quality === 'ok' ? 'Gut' : quality === 'small' ? 'Kacheln klein' : 'Kacheln gross';
-                      const tooSmall = tileMm < 5; // tiles under 5mm are not individually recognizable
-                      return (
-                        <button
-                          key={label}
-                          onClick={() => setSelectedFormat(idx)}
-                          className={`relative p-2.5 rounded-xl border-2 text-center transition-all ${
-                            selectedFormat === idx
-                              ? "border-coral-500 bg-coral-50"
-                              : tooSmall ? "border-amber-200 hover:border-coral-200 bg-amber-50/30" : "border-gray-100 hover:border-coral-200"
-                          }`}
-                        >
-                          {idx === 1 && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-coral-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">Top</div>}
-                          <div className="text-xs font-bold text-gray-900">{label}</div>
-                          <div className="text-[9px] text-gray-400 mt-0.5">Kachel: {tileMm}mm</div>
-                          <div className={`text-[9px] font-semibold mt-0.5 ${qualityColor}`}>{qualityLabel}</div>
-                          <div className="text-xs text-coral-700 font-semibold mt-0.5">CHF {price}</div>
-                          {selectedFormat === idx && <Check className="w-3 h-3 text-coral-600 absolute top-1 right-1" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Material selection */}
-                <div className="mb-6">
-                  <p className="text-sm font-bold text-gray-700 mb-3">Material waehlen</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {MATERIALS.map(({ label, surcharge, icon }, idx) => (
-                      <button
-                        key={label}
-                        onClick={() => setSelectedMaterial(idx)}
-                        className={`p-3 rounded-xl border-2 text-left transition-all ${
-                          selectedMaterial === idx
-                            ? "border-coral-500 bg-coral-50"
-                            : "border-gray-100 hover:border-coral-200"
-                        }`}
-                      >
-                        <div className="text-xl mb-1">{icon}</div>
-                        <div className="text-xs font-bold text-gray-900">{label}</div>
-                        <div className="text-xs text-gray-500">
-                          {surcharge > 0 ? `+CHF ${surcharge}` : surcharge < 0 ? `-CHF ${Math.abs(surcharge)}` : "Inklusive"}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Order summary */}
-                <div className="bg-coral-50 rounded-xl p-4 mb-5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-gray-900">{PRINT_FORMATS[selectedFormat].label} . {MATERIALS[selectedMaterial].label}</p>
-                      <p className="text-sm text-gray-500">inkl. MwSt., Druck & Lieferung CH</p>
-                    </div>
-                    <div className="text-2xl font-extrabold text-coral-700">CHF {totalPrice}</div>
-                  </div>
-                </div>
-
-                {/* Printolino-Info-Box with quality analysis */}
+                {/* Print info: format derived from grid (cols cm × rows cm @ 1cm/tile, 400 DPI) */}
                 {(() => {
-                  const fmt = PRINT_FORMATS[selectedFormat];
-                  const cols = mosaicParamsRef.current?.cols ?? 60;
-                  const rows = mosaicParamsRef.current?.rows ?? 80;
-                  const PX_PER_CM = 400 / 2.54; // 400 DPI Ultra HD
-                  const tileSizeCm = fmt.widthCm / cols;
-                  const tileMm = Math.round(tileSizeCm * 10);
-                  const naturalTilePx2 = Math.round(tileSizeCm * PX_PER_CM);
-                  // Match actual download handler: min 64, max 400, then clamp to MAX_DIM=16000
-                  let printTilePx = Math.min(400, Math.max(64, naturalTilePx2));
-                  const SERVER_MAX_DIM2 = 16000;
-                  if (cols * printTilePx > SERVER_MAX_DIM2 || rows * printTilePx > SERVER_MAX_DIM2) {
-                    printTilePx = Math.min(Math.floor(SERVER_MAX_DIM2 / cols), Math.floor(SERVER_MAX_DIM2 / rows), printTilePx);
-                    printTilePx = Math.max(32, printTilePx);
-                  }
-                  const outW = cols * printTilePx;
-                  const outH = rows * printTilePx;
-                  const posterW = (cols * tileSizeCm).toFixed(0);
-                  const posterH = (rows * tileSizeCm).toFixed(0);
-                  // Quality assessment
-                  const quality = tileMm < 5 ? 'small' : tileMm < 8 ? 'ok' : tileMm <= 12 ? 'ideal' : 'large';
-                  // Compute optimal baseTiles for ~9mm tiles in this format
-                  // 1cm/Kachel Regel: für 70x70cm = 70x70 Kacheln, für 40x40cm = 40x40 Kacheln
-                  const TARGET_TILE_CM = 1.0; // 1 Kachel pro cm (optimal für 20-30cm Betrachtungsabstand)
-                  const targetTileMm = Math.round(TARGET_TILE_CM * 10); // = 10mm
-                  // 1cm/Kachel: targetCols = widthCm, targetRows = heightCm (direkt vom Format)
-                  const targetCols = Math.round(fmt.widthCm / TARGET_TILE_CM);  // 70cm → 70 Kacheln
-                  const targetRows = Math.round(fmt.heightCm / TARGET_TILE_CM); // 70cm → 70 Kacheln
-                  // baseTiles = längere Seite (wie renderMosaic es erwartet)
-                  const optimalBaseTiles = Math.max(targetCols, targetRows);
-                  const isAlreadyOptimal = cols === targetCols && rows === targetRows;
-                  const needsOptimize = !isAlreadyOptimal;
-                  // Re-render handler: update baseTiles and trigger renderMosaic
-                  const handleOptimizeForFormat = () => {
-                    if (!userPhotoImg) return;
-                    try {
-                      const current = JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}');
-                      current.baseTiles = optimalBaseTiles;
-                      localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(current));
-                    } catch { /* ignore */ }
-                    setReady(false); setLoading(true); setProgress(0);
-                    renderMosaic(userPhotoImg);
-                  };
+                  const printCols = mosaicParamsRef.current?.cols ?? 120;
+                  const printRows = mosaicParamsRef.current?.rows ?? 90;
+                  const TILE_PX_400DPI = 157;
+                  const outW = printCols * TILE_PX_400DPI;
+                  const outH = printRows * TILE_PX_400DPI;
+                  const printPrice = getPrintPrice(printCols, printRows, selectedPrintMaterial);
+                  const printMat = PRINT_MATERIALS[selectedPrintMaterial];
                   return (
-                    <div className={`rounded-xl p-3 mb-4 text-xs ${quality === 'small' ? 'bg-amber-50 border border-amber-300 text-amber-900' : quality === 'large' ? 'bg-amber-50 border border-amber-300 text-amber-900' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
-                      <p className="font-bold mb-1">Druckqualitaet & Poster-Groesse</p>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Poster-Groesse:</span>
-                        <span className="font-semibold">{posterW} × {posterH} cm</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Kachel-Groesse:</span>
-                        <span className="font-semibold">{tileMm}mm × {tileMm}mm {quality === 'ideal' ? '✓' : needsOptimize ? '⚠' : ''}</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Anzahl Kacheln:</span>
-                        <span className="font-semibold">{cols} × {rows} = {(cols*rows).toLocaleString()}</span>
-                        <span className={needsOptimize ? 'text-amber-600' : 'text-blue-600'}>Ausgabe-Pixel:</span>
-                        <span className="font-semibold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
+                    <>
+                      {/* Blue info box: poster format derived from grid */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 text-sm">
+                        <p className="font-bold text-blue-800 mb-2">Druckqualität &amp; Poster-Grösse</p>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                          <span className="text-blue-600 font-medium">Poster-Grösse:</span>
+                          <span className="text-blue-900 font-bold">{printCols} × {printRows} cm</span>
+                          <span className="text-blue-600 font-medium">Kachel-Grösse:</span>
+                          <span className="text-blue-900 font-bold">10mm × 10mm ✓</span>
+                          <span className="text-blue-600 font-medium">Anzahl Kacheln:</span>
+                          <span className="text-blue-900 font-bold">{printCols} × {printRows} = {(printCols * printRows).toLocaleString('de-CH')}</span>
+                          <span className="text-blue-600 font-medium">Ausgabe-Pixel:</span>
+                          <span className="text-blue-900 font-bold">{outW.toLocaleString()} × {outH.toLocaleString()} px</span>
+                        </div>
+                        <p className="text-[10px] text-blue-500 mt-2">400 DPI Druckqualität · JPG · Printolino-Druck in der Schweiz</p>
                       </div>
-                      {/* 1cm/Kachel Optimieren-Button: immer anzeigen */}
-                      <div className="mt-2">
-                        {isAlreadyOptimal ? (
-                          <p className="text-green-700 font-medium">
-                            ✓ Optimal für {fmt.label}: {cols}×{rows} Kacheln (1 cm/Kachel, ideal für 20–30 cm Abstand)
-                          </p>
-                        ) : (
-                          <>
-                            <p className="text-blue-700 font-medium mb-2">
-                              Für {fmt.label} empfehlen wir <strong>{targetCols}×{targetRows} Kacheln</strong> (1 cm/Kachel, optimal für 20–30 cm Abstand).
-                              Aktuell: {cols}×{rows} Kacheln ({tileMm}mm/Kachel).
-                            </p>
+
+                      {/* Material-Auswahl */}
+                      <div className="mb-4">
+                        <p className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Material wählen</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {PRINT_MATERIALS.map((mat, idx) => (
                             <button
-                              onClick={handleOptimizeForFormat}
-                              disabled={loading}
-                              className="w-full py-2 px-3 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                              key={idx}
+                              onClick={() => setSelectedPrintMaterial(idx)}
+                              className={`flex flex-col items-start p-3 rounded-xl border-2 text-left transition-all ${
+                                selectedPrintMaterial === idx
+                                  ? 'border-coral-500 bg-coral-50'
+                                  : 'border-gray-200 bg-white hover:border-gray-300'
+                              }`}
                             >
-                              Neu rendern für {fmt.label} → {targetCols}×{targetRows} Kacheln (1 cm/Kachel)
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <span className="text-base">{mat.icon}</span>
+                                <span className="font-semibold text-xs text-gray-900">{mat.label}</span>
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ml-auto ${
+                                  mat.quality === 'Premium+' ? 'bg-purple-100 text-purple-700' :
+                                  mat.quality === 'Premium' ? 'bg-blue-100 text-blue-700' :
+                                  mat.quality === 'Classic' ? 'bg-green-100 text-green-700' :
+                                  'bg-gray-100 text-gray-600'
+                                }`}>{mat.quality}</span>
+                              </div>
+                              <p className="text-[10px] text-gray-500 leading-tight">{mat.desc}</p>
+                              <p className="text-xs font-bold text-coral-700 mt-1.5">CHF {getPrintPrice(printCols, printRows, idx).toFixed(2)}</p>
                             </button>
-                          </>
-                        )}
+                          ))}
+                        </div>
                       </div>
-                    </div>
+
+                      {/* Order summary */}
+                      <div className="bg-coral-50 rounded-xl p-4 mb-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-bold text-gray-900">{printMat.icon} {printMat.label} – {printCols}×{printRows} cm</p>
+                            <p className="text-sm text-gray-500">{outW.toLocaleString()}×{outH.toLocaleString()} px · 400 DPI · JPG</p>
+                            <p className="text-[10px] text-gray-400 mt-0.5">Preis exkl. 8.1% MWST &amp; Versand</p>
+                          </div>
+                          <div className="text-2xl font-extrabold text-coral-700">CHF {printPrice.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    </>
                   );
                 })()}
 
-                {/* Payment success banner */}
-                {paymentSuccess && (
-                  <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 flex items-center gap-2 text-green-800 text-sm font-semibold">
-                    <Check className="w-4 h-4 text-green-600" />
-                    Zahlung erfolgreich! Lade jetzt deine druckbereite Datei herunter.
-                    <button
-                      onClick={() => handleDownload(true)}
-                      className="ml-auto flex items-center gap-1 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Herunterladen
-                    </button>
-                  </div>
-                )}
-
-                {/* Printolino order success banner */}
+                {/* Order success banner */}
                 {printolinoSuccess && (
                   <div className="mb-4 bg-green-50 border border-green-200 rounded-xl p-3 text-green-800 text-sm font-semibold">
                     <Check className="w-4 h-4 text-green-600 inline mr-2" />
-                    Printolino-Bestellung erstellt! Die Druckdatei wird vorbereitet und erscheint im Admin-Bereich unter "Kundenbestellungen".
+                    Bestellung erstellt! Die Druckdatei erscheint im Admin-Bereich unter &quot;Kundenbestellungen&quot;.
                   </div>
                 )}
 
-                {paymentError && (
-                  <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800 text-xs">
-                    {paymentError}
-                  </div>
-                )}
+                <button
+                  onClick={handlePrintolinoOrder}
+                  disabled={printolinoLoading || dlLoading || !assignmentRef.current.length || !mosaicParamsRef.current}
+                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
+                >
+                  {(printolinoLoading || dlLoading) ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
+                  {(() => {
+                    const c = mosaicParamsRef.current?.cols ?? 120;
+                    const r = mosaicParamsRef.current?.rows ?? 90;
+                    const p = getPrintPrice(c, r, selectedPrintMaterial);
+                    const m = PRINT_MATERIALS[selectedPrintMaterial].label;
+                    return `${m} bestellen · ${c}×${r} cm · CHF ${p.toFixed(2)}`;
+                  })()}
+                </button>
 
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <button
-                    onClick={() => setShowPayModal(true)}
-                    disabled={paymentLoading}
-                    className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-coral-500 to-coral-600 hover:from-coral-600 hover:to-coral-700 text-white font-bold py-3.5 rounded-xl shadow-md hover:shadow-lg transition-all disabled:opacity-60"
-                  >
-                    {paymentLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                    Mosaik kaufen . CHF {totalPrice}
-                  </button>
-                  <button
-                    onClick={handlePrintolinoOrder}
-                    disabled={printolinoLoading}
-                    className="flex items-center justify-center gap-2 bg-white border-2 border-coral-200 text-coral-700 hover:bg-coral-50 font-semibold py-3.5 px-5 rounded-xl transition-all disabled:opacity-60"
-                  >
-                    {printolinoLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
-                    Bei Printolino bestellen
-                  </button>
-                </div>
                 <div className="flex items-center justify-between mt-3">
                   <button
                     onClick={() => handleDownload(false)}
@@ -6845,7 +7097,7 @@ export default function Studio() {
                   )}
                 </div>
 
-                {/* Inline Download Progress (Print) */}
+                                {/* Inline Download Progress (Print) */}
                 {(dlLoading || dlProgressMsg) && (
                   <div className="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
                     <div className="flex items-center justify-between mb-2">

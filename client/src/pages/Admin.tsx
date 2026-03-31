@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle,
-  Users, Link, Plus, QrCode
+  Users, Link, Plus, QrCode, Eye
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -37,6 +37,11 @@ function getHighResUrl(url: string, size = 600, tile128Url?: string, tileId?: nu
   // CloudFront / S3 tile URLs: use tile128Url directly (already a working image)
   if (url.includes('cloudfront.net') || url.includes('amazonaws.com')) {
     return url
+  }
+  // R2 tiles (tiles.mosaicprint.ch): use tile128Url directly - these are 128px max,
+  // no point in server-side upscaling which would produce blurry results
+  if (tile128Url && tile128Url.includes('tiles.mosaicprint.ch')) {
+    return tile128Url
   }
   // Fallback: use server-side tile proxy for unknown sources (lhq, pixabay, etc.)
   // The /api/tile/:id endpoint resizes from source_url via sharp
@@ -6387,6 +6392,9 @@ interface OrderItem {
   render_params: Record<string, any> | null
   created_at: string
   paid_at: string | null
+  photo_url: string | null
+  mosaic_preview_url: string | null
+  project_id: number | null
 }
 
 function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'success' | 'error' | 'info' }) => void }) {
@@ -6396,19 +6404,28 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const [renderingId, setRenderingId] = useState<number | null>(null)
   const [renderProgress, setRenderProgress] = useState(0)
   const [renderMsg, setRenderMsg] = useState('')
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
 
-  const fetchOrders = useCallback(async () => {
-    setLoading(true)
+  const fetchOrders = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const res = await fetch('/api/admin/orders', { headers: authHeaders() })
       const data = await res.json()
       if (data.ok) setOrders(data.orders ?? [])
     } catch {
-      onMessage({ text: 'Fehler beim Laden der Bestellungen', type: 'error' })
-    } finally { setLoading(false) }
+      if (!silent) onMessage({ text: 'Fehler beim Laden der Bestellungen', type: 'error' })
+    } finally { if (!silent) setLoading(false) }
   }, [onMessage])
 
   useEffect(() => { fetchOrders() }, [fetchOrders])
+
+  // Auto-poll every 4 seconds when any order is in 'rendering' state
+  useEffect(() => {
+    const hasRendering = orders.some(o => o.status === 'rendering')
+    if (!hasRendering) return
+    const interval = setInterval(() => fetchOrders(true), 4000)
+    return () => clearInterval(interval)
+  }, [orders, fetchOrders])
 
   const updateStatus = async (id: number, status: string) => {
     try {
@@ -6435,69 +6452,69 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   }
 
   const renderAndDownload = async (order: OrderItem) => {
-    if (!order.render_params) {
-      onMessage({ text: 'Keine Render-Parameter vorhanden', type: 'error' })
+    if (!order.render_params?.assignment || !order.render_params?.tileIds) {
+      onMessage({ text: 'Keine Render-Parameter vorhanden (assignment/tileIds fehlen)', type: 'error' })
       return
     }
     setRenderingId(order.id)
     setRenderProgress(5)
-    setRenderMsg('Starte Render...')
-
-    const jobId = `admin-order-${order.id}-${Date.now()}`
-    let sseSource: EventSource | null = null
+    setRenderMsg('Server-Rendering gestartet...')
+    const renderStartTime = Date.now()
     try {
-      sseSource = new EventSource(`/api/print-progress/${jobId}`)
-      sseSource.onmessage = (ev) => {
-        try {
-          const d = JSON.parse(ev.data)
-          if (d.progress) setRenderProgress(d.progress)
-          if (d.message) setRenderMsg(d.message)
-        } catch { /* ignore */ }
-      }
-    } catch { /* SSE not critical */ }
-
-    try {
-      const rp = order.render_params
-      const resp = await fetch('/api/print-render', {
+      // Use new server-side render endpoint (async, polls for completion)
+      const resp = await fetch(`/api/admin/orders/${order.id}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-          tileIds: rp.tileIds,
-          assignment: rp.assignment,
-          cols: rp.cols,
-          rows: rp.rows,
-          tilePx: rp.tilePx ?? 200,
-          format: 'jpg',
-          jobId,
-          overlayMode: rp.overlayMode ?? 'softlight',
-          baseOverlay: rp.baseOverlay ?? 0.15,
-          edgeBoost: rp.edgeBoost ?? 0.20,
-          targetColors: rp.targetColors ?? [],
-          edgeMap: rp.edgeMap ?? [],
-          faceMask: rp.faceMask ?? [],
-        }),
       })
-      if (sseSource) sseSource.close()
       if (!resp.ok) throw new Error(`Render failed: ${resp.status}`)
-      const { token, filename } = await resp.json()
-
-      // Download the file
-      const dlLink = document.createElement('a')
-      dlLink.href = `/api/print-download/${token}?filename=${encodeURIComponent(filename)}`
-      dlLink.download = filename
-      dlLink.style.display = 'none'
-      document.body.appendChild(dlLink)
-      dlLink.click()
-      setTimeout(() => document.body.removeChild(dlLink), 2000)
-
-      onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' })
+      setRenderProgress(15)
+      setRenderMsg('Rendering läuft auf Server... (kann einige Minuten dauern)')
+      // Poll for completion
+      const deadline = Date.now() + 20 * 60 * 1000 // 20 min max
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 3000))
+        const statusResp = await fetch('/api/admin/orders', { headers: authHeaders() })
+        const statusData = await statusResp.json()
+        const updatedOrder = statusData.orders?.find((o: OrderItem) => o.id === order.id)
+        if (updatedOrder?.status === 'ready' && updatedOrder?.download_token) {
+          setRenderProgress(100)
+          setRenderMsg('Rendering abgeschlossen!')
+          fetchOrders()
+          onMessage({ text: `Bestellung #${order.id}: Printfile bereit zum Download`, type: 'success' })
+          return
+        }
+        if (updatedOrder?.status === 'render_error') {
+          throw new Error(updatedOrder.admin_notes || 'Render-Fehler')
+        }
+        // Update progress: use server-reported percentage from admin_notes (format: "66%|message")
+        // Fallback: monotonically increasing estimate based on elapsed time (no modulo reset)
+        const notes = updatedOrder?.admin_notes ?? ''
+        const serverPct = notes.match(/^(\d+)%/)
+        if (serverPct) {
+          const pct = parseInt(serverPct[1], 10)
+          setRenderProgress(Math.max(15, Math.min(95, pct)))
+          const msg = notes.split('|')[1] ?? ''
+          if (msg) setRenderMsg(`Server: ${msg}`)
+        } else {
+          const elapsed = Date.now() - renderStartTime
+          setRenderProgress(Math.min(90, 15 + Math.floor(elapsed / 10000))) // +1% every 10s, never resets
+        }
+      }
+      throw new Error('Zeitüberschreitung (20 Min)')
     } catch (e) {
       onMessage({ text: `Render-Fehler: ${e}`, type: 'error' })
     } finally {
-      if (sseSource) sseSource.close()
       setRenderingId(null)
       setRenderProgress(0)
       setRenderMsg('')
+    }
+  }
+
+  const openInStudio = (order: OrderItem) => {
+    if (order.project_id) {
+      window.open(`/studio?project=${order.project_id}&orderId=${order.id}`, '_blank')
+    } else {
+      onMessage({ text: 'Kein Projekt verknüpft – Bestellung wurde ohne Login erstellt', type: 'info' })
     }
   }
 
@@ -6531,19 +6548,54 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
         <div className="text-center py-12 bg-gray-50 rounded-xl border border-gray-200">
           <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500 font-medium">Noch keine Bestellungen</p>
-          <p className="text-gray-400 text-sm mt-1">Kundenbestellungen erscheinen hier, sobald ein Kunde "Bei Printolino bestellen" klickt.</p>
+          <p className="text-gray-400 text-sm mt-1">Kundenbestellungen erscheinen hier, sobald ein Kunde auf "Druck bestellen" klickt.</p>
         </div>
       )}
 
+      {/* Lightbox Overlay */}
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <div className="relative max-w-5xl max-h-full" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={() => setLightboxUrl(null)}
+              className="absolute -top-10 right-0 text-white text-sm font-semibold hover:text-gray-300 flex items-center gap-1"
+            >
+              <X className="w-5 h-5" /> Schliessen
+            </button>
+            <img
+              src={lightboxUrl}
+              alt="Vollbild"
+              className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
       {orders.map(order => (
         <div key={order.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="p-4 sm:p-5">
+            {/* Header: ID, Status, Preis */}
             <div className="flex items-start justify-between mb-3">
               <div>
                 <div className="flex items-center gap-2 mb-1">
                   <span className="font-bold text-gray-900">#{order.id}</span>
-                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColors[order.status] ?? 'bg-gray-100 text-gray-600'}`}>
-                    {order.status}
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                    order.status === 'pending_render' ? 'bg-yellow-100 text-yellow-800' :
+                    order.status === 'rendering' ? 'bg-blue-100 text-blue-700' :
+                    (statusColors[order.status] ?? 'bg-gray-100 text-gray-600')
+                  }`}>
+                    {order.status === 'pending_render' ? '⏳ Bereit zum Rendern' :
+                     order.status === 'rendering' ? (() => {
+                       const notes = order.admin_notes ?? ''
+                       const pct = notes.match(/^(\d+)%\|/) ? notes.match(/^(\d+)%\|/)![1] : null
+                       return pct ? `⚙️ Rendering ${pct}%` : '⚙️ Rendering...'
+                     })() :
+                     order.status === 'render_error' ? '❌ Render-Fehler' :
+                     order.status}
                   </span>
                   {order.order_type === 'printolino' && (
                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">Printolino</span>
@@ -6553,6 +6605,9 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 {order.customer_email && (
                   <p className="text-xs text-gray-400 mt-0.5">{order.customer_email}</p>
                 )}
+                {order.status === 'pending_render' && (
+                  <p className="text-xs text-yellow-700 mt-1">→ Klick auf „Printfile generieren“ startet die Verarbeitung</p>
+                )}
               </div>
               <div className="text-right">
                 <p className="font-bold text-orange-700">CHF {order.price_chf?.toFixed(2) ?? '0.00'}</p>
@@ -6560,38 +6615,121 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               </div>
             </div>
 
-            {/* Render progress bar */}
-            {renderingId === order.id && (
-              <div className="mb-3">
-                <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
-                  <div className="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${renderProgress}%` }} />
-                </div>
-                <p className="text-xs text-gray-500">{renderMsg}</p>
+            {/* Photo + Mosaic Preview */}
+            {(order.photo_url || order.mosaic_preview_url) && (
+              <div className="flex gap-3 mb-3">
+                {order.photo_url && (
+                  <div className="flex-1">
+                    <p className="text-xs text-gray-400 mb-1">Kundenfoto <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
+                    <div onClick={() => setLightboxUrl(order.photo_url)} className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
+                      <img
+                        src={order.photo_url}
+                        alt="Kundenfoto"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    </div>
+                  </div>
+                )}
+                {order.mosaic_preview_url && (
+                  <div className="flex-1">
+                    <p className="text-xs text-gray-400 mb-1">Mosaik-Vorschau <span className="text-blue-400">(klicken zum Vergrössern)</span></p>
+                    <div onClick={() => setLightboxUrl(order.mosaic_preview_url)} className="block w-full h-36 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-center overflow-hidden hover:border-blue-400 hover:shadow-md transition-all cursor-zoom-in">
+                      <img
+                        src={order.mosaic_preview_url}
+                        alt="Mosaik-Vorschau"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
+            {/* Render progress bar – shown when rendering locally OR when DB status is 'rendering' */}
+            {(renderingId === order.id || order.status === 'rendering') && (() => {
+              // Parse progress from DB admin_notes (format: "45%|Mosaik wird zusammengesetzt...")
+              const notes = order.admin_notes ?? ''
+              const match = notes.match(/^(\d+)%\|(.+)$/)
+              const dbPct = match ? parseInt(match[1]) : null
+              const dbMsg = match ? match[2] : null
+              const pct = renderingId === order.id ? renderProgress : (dbPct ?? 0)
+              const msg = renderingId === order.id ? renderMsg : (dbMsg ?? 'Rendering läuft...')
+              return (
+                <div className="mb-3 bg-blue-50 rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-semibold text-blue-700">{msg}</span>
+                    <span className="text-xs font-bold text-blue-700">{pct}%</span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.max(pct, 3)}%` }}
+                    />
+                  </div>
+                  {order.status === 'rendering' && renderingId !== order.id && (
+                    <p className="text-xs text-blue-500 mt-1">Wird automatisch aktualisiert...</p>
+                  )}
+                </div>
+              )
+            })()}
+
             {/* Actions */}
             <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-gray-100">
-              {order.render_params && (
+              {/* Direct download via server proxy (avoids CORS issues with R2 URLs) */}
+              {order.download_token && order.download_token.startsWith('http') && (
+                <a
+                  href={`/api/admin/orders/${order.id}/download`}
+                  onClick={() => onMessage({ text: `Bestellung #${order.id}: Download gestartet`, type: 'success' })}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-lg hover:bg-green-700 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Druckdatei herunterladen
+                </a>
+              )}
+
+              {/* Server-side render button – available for all statuses when render_params exist */}
+              {order.render_params?.assignment && (
                 <button
                   onClick={() => renderAndDownload(order)}
                   disabled={renderingId !== null}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Druckdatei herunterladen
+                  {renderingId === order.id ? 'Rendering...' : (order.status === 'ready' ? 'Neu rendern' : 'Printfile generieren')}
+                </button>
+              )}
+              {/* Fallback: no render_params = user-uploaded tiles, must use Studio */}
+              {!order.render_params?.assignment && order.project_id && (
+                <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg">
+                  ⚠️ Eigene Fotos – bitte im Studio rendern
+                </span>
+              )}
+
+              {/* Open in Studio button */}
+              {order.project_id && (
+                <button
+                  onClick={() => openInStudio(order)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Im Studio öffnen
                 </button>
               )}
 
-              {/* Status buttons */}
-              {order.status === 'pending' && (
-                <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
-                  Als "bestellt" markieren
-                </button>
+              {/* Show render_params info */}
+              {order.render_params && (
+                <span className="text-xs text-gray-400">
+                  {order.render_params.outputWidth && order.render_params.outputHeight
+                    ? `${order.render_params.outputWidth.toLocaleString()}x${order.render_params.outputHeight.toLocaleString()}px · ${order.render_params.format?.toUpperCase() ?? 'JPG'}`
+                    : `${order.render_params.cols ?? '?'}x${order.render_params.rows ?? '?'} Kacheln`
+                  }
+                </span>
               )}
-              {order.status === 'ready' && (
+
+              {/* Status buttons – forward flow */}
+              {(order.status === 'pending' || order.status === 'ready') && (
                 <button onClick={() => updateStatus(order.id, 'ordered')} className="px-3 py-1.5 bg-purple-100 text-purple-700 text-xs font-semibold rounded-lg hover:bg-purple-200">
-                  Bei Printolino bestellt
+                  Bei Printolino bestellt ✓
                 </button>
               )}
               {(order.status === 'ordered' || order.status === 'ready') && (
@@ -6602,6 +6740,12 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
               {order.status === 'shipped' && (
                 <button onClick={() => updateStatus(order.id, 'completed')} className="px-3 py-1.5 bg-green-100 text-green-700 text-xs font-semibold rounded-lg hover:bg-green-200">
                   Abgeschlossen
+                </button>
+              )}
+              {/* Reset to pending_render */}
+              {order.status !== 'pending_render' && (
+                <button onClick={() => updateStatus(order.id, 'pending_render')} className="px-3 py-1.5 bg-gray-100 text-gray-500 text-xs font-semibold rounded-lg hover:bg-gray-200">
+                  ↩ Bestellung offen
                 </button>
               )}
 
@@ -6617,6 +6761,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
           </div>
         </div>
       ))}
+      </div>
     </div>
   )
 }
