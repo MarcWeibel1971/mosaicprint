@@ -2334,19 +2334,19 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         };
 
         // Color correction parameters for server-side print render.
-        // IMPORTANT: Server loads full-res source images (Pexels/Unsplash, ~940px) which have
-        // much stronger blue/green casts than the 128px R2 thumbnails used on the client.
-        // The client colorEnhance slider was calibrated for thumbnails – we IGNORE it here
-        // and always apply strong fixed correction to compensate for source image color casts.
-        const AB_BLEND = 0.55;  // fixed strong correction – independent of colorEnhance slider
-        const L_BLEND = 0.40;
-        const MAX_COLOR_SHIFT = 40;  // allow large shifts for full-res source images
-        const MAX_BLUE_SHIFT = 40;   // allow large blue correction
-        const cBoost = 1.30;
-        const satBoost = 0.90 + cBoost * 0.15;
+        // Goal: tiles should look like the client preview – keep tile texture, apply light color nudge.
+        // AB_BLEND = 0.20: gentle 20% push toward target color (preserves tile texture).
+        // Higher values (0.55) make tiles look like solid color blocks – avoid.
+        const colorEnhanceVal = Math.max(0.05, colorEnhance / 100); // min 5% even if slider=0
+        const AB_BLEND = Math.min(0.35, 0.10 + colorEnhanceVal * 0.25); // 0.10..0.35 range
+        const L_BLEND = 0.35;
+        const MAX_COLOR_SHIFT = 20;  // moderate clamp to preserve tile character
+        const MAX_BLUE_SHIFT = 20;   // moderate blue correction
+        const cBoost = 1.20;
+        const satBoost = 0.90 + cBoost * 0.10;
         const BASE_OL = userOverlay > 0 ? userOverlay : 0.15;
         const EDGE_B = 0.20;
-        // Always apply color correction if targetColors are available
+        // Apply color correction whenever targetColors are available
         const hasColorCorrection = targetColors.length > 0;
 
         // Process each strip
