@@ -6636,13 +6636,22 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                   {order.order_type === 'printolino' && (
                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">Printolino</span>
                   )}
+                  {order.admin_notes?.startsWith('📱 MOBILE-BESTELLUNG') && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">📱 Mobile</span>
+                  )}
                 </div>
                 <p className="text-sm text-gray-600">{order.format_label} / {order.material_label}</p>
                 {order.customer_email && (
                   <p className="text-xs text-gray-400 mt-0.5">{order.customer_email}</p>
                 )}
-                {order.status === 'pending_render' && (
+                {order.status === 'pending_render' && !order.admin_notes?.startsWith('📱 MOBILE-BESTELLUNG') && (
                   <p className="text-xs text-yellow-700 mt-1">→ Klick auf „Printfile generieren“ startet die Verarbeitung</p>
+                )}
+                {order.admin_notes?.startsWith('📱 MOBILE-BESTELLUNG') && (
+                  <div className="mt-1 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                    <p className="text-xs text-blue-800 font-medium">📱 Mobile-Bestellung – Printfile muss auf Desktop neu gerendert werden</p>
+                    <p className="text-xs text-blue-600 mt-0.5">Kunden kontaktieren und Mosaik auf Desktop neu erstellen, dann Printfile generieren.</p>
+                  </div>
                 )}
               </div>
               <div className="text-right">

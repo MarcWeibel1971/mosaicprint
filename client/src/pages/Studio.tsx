@@ -5748,14 +5748,14 @@ export default function Studio() {
       }
 
       setDlProgress(50);
-
       // 3. Upload user tiles (negative IDs) to R2 so server can render them later
       // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
+      // MOBILE: Skip upload to prevent Memory-Crash – admin will re-render on desktop
+      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
       const currentTileIds = tileIdsRef.current;
       const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
       const userTileUrls: Record<string, string> = {};
-
-      if (uniqueNegativeIds.length > 0) {
+      if (uniqueNegativeIds.length > 0 && !isMobileDevice) {
         setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
         setDlProgress(55);
         // For each unique negative tileId, get the corresponding user tile image
@@ -5772,12 +5772,19 @@ export default function Studio() {
           if (!imgEl || !imgEl.src) return;
           try {
             // Get image data as JPEG data URL from the HTMLImageElement
+            // IMPORTANT: Cap at 512px to prevent Memory-Crash on Mobile (original images can be 4000x3000px)
+            const MAX_UPLOAD_PX = 512;
+            const srcW = imgEl.naturalWidth || imgEl.width;
+            const srcH = imgEl.naturalHeight || imgEl.height;
+            const scale = Math.min(1, MAX_UPLOAD_PX / Math.max(srcW, srcH, 1));
             const canvas = document.createElement('canvas');
-            canvas.width = imgEl.naturalWidth || imgEl.width;
-            canvas.height = imgEl.naturalHeight || imgEl.height;
+            canvas.width = Math.round(srcW * scale);
+            canvas.height = Math.round(srcH * scale);
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
-            ctx.drawImage(imgEl, 0, 0);
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
             const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
             // Upload to server which stores on R2
             const uploadResp = await fetch('/api/orders/upload-user-tile', {
@@ -5815,6 +5822,8 @@ export default function Studio() {
           projectId: savedProjectIdRef.current ?? null,
           photoUrl,
           mosaicPreviewUrl,
+          // Mobile-Bestellung: Admin muss Printfile auf Desktop neu rendern
+          adminNotes: isMobileDevice ? `📱 MOBILE-BESTELLUNG – Printfile muss auf Desktop neu gerendert werden. Eigene Fotos (${uniqueNegativeIds.length} Tiles) wurden nicht hochgeladen. Bitte Kunden kontaktieren oder Mosaik auf Desktop neu erstellen.` : null,
           renderParams: {
             cols, rows,
             tilePx: PRINT_TILE_PX,

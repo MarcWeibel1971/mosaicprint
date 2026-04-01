@@ -2253,7 +2253,7 @@ app.post('/api/debug/print-render-test', express.json({ limit: '5mb' }), async (
 // POST /api/orders/printolino – create a Printolino print order
 app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, res) => {
   try {
-    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams, photoUrl, mosaicPreviewUrl } = req.body;
+    const { formatLabel, materialLabel, priceChf, customerEmail, userId, projectId, renderParams, photoUrl, mosaicPreviewUrl, adminNotes } = req.body;
     if (!formatLabel || !materialLabel) {
       return res.status(400).json({ error: 'Missing format or material' });
     }
@@ -2268,7 +2268,11 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
       photoUrl: photoUrl ?? null,
       mosaicPreviewUrl: mosaicPreviewUrl ?? null,
     });
-    console.log(`[orders] Created Printolino order #${orderId}: ${formatLabel} / ${materialLabel}`);
+    // Set admin notes if provided (e.g., mobile order warning)
+    if (adminNotes && orderId) {
+      await db.updateOrderNotes(orderId, String(adminNotes));
+    }
+    console.log(`[orders] Created Printolino order #${orderId}: ${formatLabel} / ${materialLabel}${adminNotes ? ' [MOBILE]' : ''}`);
     res.json({ ok: true, orderId });
   } catch (e) {
     console.error('[orders] Create failed:', e);
