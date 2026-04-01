@@ -4897,7 +4897,8 @@ export default function Studio() {
 
     // Always use client-side hi-res render for zoom preview (fast, no downloads needed).
     // Server render is reserved for actual print downloads to avoid gray tiles from failed URL fetches.
-    if (newZ > 1.5 && !hiResReadyRef.current && !hiResLoadingRef.current) {
+    // Trigger hi-res at zoom > 1.0 (was 1.5) so tiles are sharp before they become visibly pixelated
+    if (newZ > 1.0 && !hiResReadyRef.current && !hiResLoadingRef.current) {
       triggerClientHiResRender();
     }
 
@@ -4952,10 +4953,12 @@ export default function Studio() {
 
     // Get tile URL – try multiple sources for best quality
     let tileUrl = '';
-    const tileId = tileIdsRef.current[tileIdx];
+    const tileId = tileIdsRef.current?.[tileIdx];
     if (tileId && tileId > 0) {
-      // DB tile – load from server at high resolution (400px = 1cm @ 400 PPI, scharf im Detail-Modal)
-      tileUrl = `/api/tile/${tileId}?size=400`;
+      // DB tile – load from server at high resolution (512px for sharp detail view)
+      tileUrl = `/api/tile/${tileId}?size=512&t=${Date.now()}`;
+    } else if (!tileId) {
+      console.warn(`[TileDetail] Invalid tileId for tileIdx=${tileIdx}, tileIdsRef.length=${tileIdsRef.current?.length}`);
     } else {
       // User-uploaded tile (negative ID) – use hi-res version if available
       const hiRes = validImgsHiResRef.current[tileIdx];
@@ -5720,11 +5723,14 @@ export default function Studio() {
       setDlProgress(20);
 
       // 1. Capture mosaic preview thumbnail from canvas
+      // MOBILE: Use smaller thumbnails (200px) to prevent Memory-Crash with large canvases
+      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+      const THUMB_SIZE = isMobileDevice ? 200 : 400;
       let mosaicPreviewUrl: string | null = null;
       if (canvasRef.current) {
         const thumbCanvas = document.createElement('canvas');
-        thumbCanvas.width = 400;
-        thumbCanvas.height = Math.round(400 * (canvasRef.current.height / canvasRef.current.width));
+        thumbCanvas.width = THUMB_SIZE;
+        thumbCanvas.height = Math.round(THUMB_SIZE * (canvasRef.current.height / canvasRef.current.width));
         const thumbCtx = thumbCanvas.getContext('2d');
         if (thumbCtx) {
           thumbCtx.drawImage(canvasRef.current, 0, 0, thumbCanvas.width, thumbCanvas.height);
@@ -5736,8 +5742,8 @@ export default function Studio() {
       let photoUrl: string | null = null;
       if (userPhotoImg) {
         const photoThumb = document.createElement('canvas');
-        photoThumb.width = 400;
-        photoThumb.height = Math.round(400 * (userPhotoImg.height / userPhotoImg.width));
+        photoThumb.width = THUMB_SIZE;
+        photoThumb.height = Math.round(THUMB_SIZE * (userPhotoImg.height / userPhotoImg.width));
         const photoCtx = photoThumb.getContext('2d');
         if (photoCtx) {
           photoCtx.drawImage(userPhotoImg, 0, 0, photoThumb.width, photoThumb.height);
@@ -5751,7 +5757,6 @@ export default function Studio() {
       // 3. Upload user tiles (negative IDs) to R2 so server can render them later
       // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
       // MOBILE: Skip upload to prevent Memory-Crash – admin will re-render on desktop
-      const isMobileDevice = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
       const currentTileIds = tileIdsRef.current;
       const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
       const userTileUrls: Record<string, string> = {};
@@ -6319,9 +6324,9 @@ export default function Studio() {
                     }}
                   />
                   {/* Hi-Res image overlay - sharp zoom
-                      Desktop: show from zoom > 1.5 (main canvas is always intact)
+                      Desktop: show from zoom > 1.0 (was 1.5) so tiles are sharp immediately when zooming
                       Mobile: show always when ready (main canvas may be evicted by memory pressure) */}
-                  {hiResImgUrl && hiResReady && (isMobile || zoom > 1.5) && (
+                  {hiResImgUrl && hiResReady && (isMobile || zoom > 1.0) && (
                     <img
                       src={hiResImgUrl}
                       alt=""
@@ -6344,7 +6349,7 @@ export default function Studio() {
                   {colorEnhance > 0 && ready && colorEnhanceUrl && (() => {
                     // Disable color enhance overlay when hi-res is active: hi-res render already
                     // has per-pixel color correction built in. Overlay on top causes color patches.
-                    if (hiResReady && (isMobile || zoom > 1.5)) return null;
+                    if (hiResReady && (isMobile || zoom > 1.0)) return null;
                     // Gentle zoom fade: full strength at <=100%, fades out quickly at zoom >1.2
                     // At zoom=1.5 without hi-res: 25% strength; at zoom=2.0: 0%
                     const zoomFade = zoom <= 1.0 ? 1.0 : Math.max(0.0, 1.0 - (zoom - 1.0) / 2.0);
@@ -7368,10 +7373,10 @@ export default function Studio() {
                     const img = e.currentTarget;
                     if (img.dataset.retried) return;
                     img.dataset.retried = 'true';
-                    // Try source_url via tile API with size=original
-                    const tileId = tileIdsRef.current[tileDetail.tileIdx];
+                    // Try fallback with 512px (was 256px)
+                    const tileId = tileIdsRef.current?.[tileDetail.tileIdx];
                     if (tileId && tileId > 0) {
-                      img.src = `/api/tile/${tileId}?size=256`;
+                      img.src = `/api/tile/${tileId}?size=512&t=${Date.now()}`;
                       return;
                     }
                     // Last resort: extract from canvas (16px upscaled, blurry but better than nothing)
