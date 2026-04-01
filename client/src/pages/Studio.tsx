@@ -808,6 +808,9 @@ export default function Studio() {
   const adminOrderId = searchParams.get('orderId') ? Number(searchParams.get('orderId')) : null;
   const [savingPreview, setSavingPreview] = useState(false);
   const [savedPreviewMsg, setSavedPreviewMsg] = useState<string | null>(null);
+  const [generatingAdminPrint, setGeneratingAdminPrint] = useState(false);
+  const [adminPrintMsg, setAdminPrintMsg] = useState<string | null>(null);
+  const [adminPrintProgress, setAdminPrintProgress] = useState(0);
 
   // -- Project Save/Restore (localStorage) ------------------------------------
   const savedProjectIdRef = useRef<number | null>(null); // ID of last saved project (for print upload)
@@ -6565,17 +6568,90 @@ export default function Studio() {
               </div>
             )}
 
-            {/* Admin: Vorschau in Bestellung speichern */}
+            {/* Admin: Vorschau in Bestellung speichern + Printfile generieren */}
             {adminOrderId && ready && (
-              <div className="flex items-center gap-3 mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
-                <div className="flex-1">
+              <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
+                <div>
                   <p className="text-xs font-semibold text-amber-800">Admin-Modus: Bestellung #{adminOrderId}</p>
-                  <p className="text-xs text-amber-600">Overlay/Farbkorrektur anpassen, dann Vorschau speichern</p>
-                  {savedPreviewMsg && <p className="text-xs text-green-700 font-medium mt-0.5">{savedPreviewMsg}</p>}
+                  <p className="text-xs text-amber-600">Overlay/Farbkorrektur anpassen, dann Printfile generieren oder Vorschau speichern</p>
                 </div>
-                <button
-                  disabled={savingPreview}
-                  onClick={async () => {
+
+                {/* Printfile generieren & auf R2 speichern */}
+                <div className="flex flex-col gap-2">
+                  {adminPrintMsg && (
+                    <p className={`text-xs font-medium ${adminPrintMsg.startsWith('✓') ? 'text-green-700' : adminPrintMsg.startsWith('Fehler') ? 'text-red-600' : 'text-blue-700'}`}>{adminPrintMsg}</p>
+                  )}
+                  {generatingAdminPrint && adminPrintProgress > 0 && (
+                    <div className="w-full bg-amber-200 rounded-full h-1.5">
+                      <div className="bg-amber-600 h-1.5 rounded-full transition-all" style={{ width: `${adminPrintProgress}%` }} />
+                    </div>
+                  )}
+                  <button
+                    disabled={generatingAdminPrint || !assignmentRef.current.length}
+                    onClick={async () => {
+                      if (!mosaicParamsRef.current || !assignmentRef.current.length) return;
+                      setGeneratingAdminPrint(true);
+                      setAdminPrintMsg('Printfile wird gerendert...');
+                      setAdminPrintProgress(5);
+                      try {
+                        const { cols, rows } = mosaicParamsRef.current;
+                        // 1 tile = 1cm @ 400DPI = 157px; cap at 400px
+                        const TILE_PX_400DPI = 157;
+                        const SERVER_MAX_DIM = 16000;
+                        let PRINT_TILE_PX = TILE_PX_400DPI;
+                        if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
+                          PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
+                          PRINT_TILE_PX = Math.max(32, PRINT_TILE_PX);
+                        }
+                        const outW = cols * PRINT_TILE_PX;
+                        const outH = rows * PRINT_TILE_PX;
+                        setAdminPrintMsg(`Rendere ${outW}x${outH}px (${PRINT_TILE_PX}px/Tile)...`);
+                        const { blob: printBlob } = await renderMosaicClientSide({
+                          cols, rows, tilePx: PRINT_TILE_PX, format: 'jpg',
+                          assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
+                          validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
+                          snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
+                          targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
+                          cellLab: cellLabRef.current,
+                          userOverlay, colorEnhance, userPhotoImg,
+                          onProgress: (pct, msg) => { setAdminPrintProgress(Math.round(5 + pct * 0.85)); setAdminPrintMsg(msg || 'Rendering...'); },
+                        });
+                        setAdminPrintProgress(92);
+                        setAdminPrintMsg('Wird auf Server hochgeladen...');
+                        const jpgBlob = new Blob([await printBlob.arrayBuffer()], { type: 'image/jpeg' });
+                        const uploadResp = await fetch(`/api/admin/orders/${adminOrderId}/print-url`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'image/jpeg', ...authHeaders() },
+                          body: jpgBlob,
+                        });
+                        const uploadResult = await uploadResp.json();
+                        if (uploadResult.ok) {
+                          setAdminPrintProgress(100);
+                          setAdminPrintMsg(`✓ Printfile gespeichert (${(jpgBlob.size / 1024 / 1024).toFixed(1)} MB) – Bestellung auf "ready" gesetzt`);
+                        } else {
+                          setAdminPrintMsg(`Fehler beim Upload: ${uploadResult.error || 'Unbekannt'}`);
+                        }
+                      } catch (e) {
+                        setAdminPrintMsg(`Fehler: ${String(e)}`);
+                      } finally {
+                        setGeneratingAdminPrint(false);
+                        setTimeout(() => { setAdminPrintMsg(null); setAdminPrintProgress(0); }, 15000);
+                      }
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
+                  >
+                    {generatingAdminPrint ? `Rendering... ${adminPrintProgress}%` : '🖨️ Printfile generieren & speichern'}
+                  </button>
+                </div>
+
+                {/* Vorschau speichern */}
+                <div className="flex items-center gap-3 pt-2 border-t border-amber-200">
+                  <div className="flex-1">
+                    {savedPreviewMsg && <p className="text-xs text-green-700 font-medium">{savedPreviewMsg}</p>}
+                  </div>
+                  <button
+                    disabled={savingPreview}
+                    onClick={async () => {
                     const canvas = canvasRef.current;
                     if (!canvas) return;
                     setSavingPreview(true);

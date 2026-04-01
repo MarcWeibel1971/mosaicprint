@@ -2804,6 +2804,36 @@ app.post('/api/admin/orders/:id/preview-url', express.json({ limit: '5mb' }), as
   }
 });
 
+// POST /api/admin/orders/:id/print-url – receive client-rendered print file, upload to R2, mark order as ready
+// Called from Studio admin mode after renderMosaicClientSide completes
+app.post('/api/admin/orders/:id/print-url', express.raw({ type: 'image/jpeg', limit: '200mb' }), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const pool = db.getPool();
+    const result = await pool.query('SELECT id FROM mosaic_orders WHERE id = $1', [orderId]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Order not found' });
+
+    const buf: Buffer = req.body;
+    if (!buf || buf.length < 1000) return res.status(400).json({ error: 'Empty or invalid JPEG body' });
+
+    let printUrl: string | null = null;
+    if (isR2Configured()) {
+      const filename = `orders/order-${orderId}-print-${Date.now()}.jpg`;
+      printUrl = await uploadToR2(filename, buf, 'image/jpeg', 'public, max-age=31536000, immutable');
+    }
+
+    if (printUrl) {
+      await pool.query("UPDATE mosaic_orders SET status = 'ready', download_token = $1 WHERE id = $2", [printUrl, orderId]);
+      res.json({ ok: true, printUrl });
+    } else {
+      res.status(500).json({ error: 'R2 not configured – cannot store print file' });
+    }
+  } catch (e) {
+    console.error('[admin/print-url] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage
 // Runs in background, returns job status via GET /api/admin/migrate-to-r2/status
 const r2MigrationStatus = {
