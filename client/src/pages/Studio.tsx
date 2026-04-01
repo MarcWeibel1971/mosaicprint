@@ -5835,7 +5835,7 @@ export default function Studio() {
       const currentTileIds = tileIdsRef.current;
       const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
       const userTileUrls: Record<string, string> = {};
-      if (uniqueNegativeIds.length > 0 && !isMobileDevice) {
+      if (uniqueNegativeIds.length > 0) {
         setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
         setDlProgress(55);
         // For each unique negative tileId, get the corresponding user tile image
@@ -5902,8 +5902,6 @@ export default function Studio() {
           projectId: savedProjectIdRef.current ?? null,
           photoUrl,
           mosaicPreviewUrl,
-          // Mobile-Bestellung: Admin muss Printfile auf Desktop neu rendern
-          adminNotes: isMobileDevice ? `📱 MOBILE-BESTELLUNG – Printfile muss auf Desktop neu gerendert werden. Eigene Fotos (${uniqueNegativeIds.length} Tiles) wurden nicht hochgeladen. Bitte Kunden kontaktieren oder Mosaik auf Desktop neu erstellen.` : null,
           renderParams: {
             cols, rows,
             tilePx: PRINT_TILE_PX,
