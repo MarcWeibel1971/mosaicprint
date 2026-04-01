@@ -1169,67 +1169,62 @@ export default function Studio() {
       const rotations = assignmentRotRef.current;
       const tileIds = tileIdsRef.current;
 
-      // HI-RES RELOAD for zoom: load DB tiles via source_url (original ~940px from Pexels/Unsplash).
-      // This avoids 128px→256px upscale (blurry). Direct source_url gives full-resolution tiles.
+      // HI-RES RELOAD for zoom: use CDN 128px tiles (already in browser cache from mosaic render).
+      // Strategy:
+      // 1. Use CDN URLs (tiles.mosaicprint.ch, 128px) – fast, already cached in browser.
+      //    On mobile, validImgs are downscaled to 64px, so we reload from CDN for better quality.
+      // 2. For tiles without CDN URL, fall back to /api/tile/:id?size=256 (slower but correct).
+      // This gives immediate sharp results without waiting 3+ minutes for Pexels URLs.
       const zoomHiResMap: Record<number, HTMLImageElement> = {};
       const uniqueZoomIdxs = [...new Set(assignment)];
-      const ZOOM_NEED_SIZE = 256; // minimum acceptable size for zoom
+      // On mobile, validImgs are 64px. We need at least 100px for a decent zoom render.
+      // CDN tiles are 128px which is sufficient (2x upscale vs 4x for 64px tiles).
+      const ZOOM_NEED_SIZE = isMob ? 100 : 200;
+      const urlIndex = tileUrlIndexRef.current; // CDN URL index (tiles.mosaicprint.ch)
       const zoomReloadNeeded = uniqueZoomIdxs.filter(idx => {
         const dbId = tileIds[idx];
         if (!dbId || dbId <= 0) return false;
         const hi = hiResImgs[idx];
         if (hi && hi.complete && hi.naturalWidth >= ZOOM_NEED_SIZE * 0.8) return false; // already hi-res
         const img = validImgs[idx];
+        // Need reload if current image is too small
         return !img || !img.complete || img.naturalWidth === 0 || img.naturalWidth < ZOOM_NEED_SIZE * 0.8;
       });
       if (zoomReloadNeeded.length > 0) {
-        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles via source_url for zoom`);
+        console.log(`[ClientHiRes] Reloading ${zoomReloadNeeded.length} tiles for zoom (CDN 128px strategy)`);
 
-        // Fetch source_url for all needed tiles in one request
-        const zoomDbIds = zoomReloadNeeded.map(idx => tileIds[idx]).filter(id => id > 0);
-        let zoomSourceUrlMap: Record<number, string> = {};
-        try {
-          const urlRes = await fetch(`/api/tile-urls?ids=${zoomDbIds.join(',')}&hires=1`);
-          if (urlRes.ok) {
-            const data = await urlRes.json() as Record<string, string>;
-            for (const [k, v] of Object.entries(data)) { if (v) zoomSourceUrlMap[Number(k)] = v; }
-            console.log(`[ClientHiRes] Got ${Object.keys(zoomSourceUrlMap).length} source URLs for zoom`);
-          }
-        } catch (e) {
-          console.warn('[ClientHiRes] Failed to fetch zoom source URLs', e);
-        }
-
-        const ZBATCH = 8;
-        const loadZoomTile = (dbId: number): Promise<HTMLImageElement | null> => {
-          const sourceUrl = zoomSourceUrlMap[dbId];
+        // Use CDN URLs from tileUrlIndex (already loaded during mosaic render, fast from browser cache)
+        // Fall back to /api/tile/:id?size=256 for tiles without CDN URL
+        const ZBATCH = 30; // High parallelism: CDN requests are fast (cached)
+        const loadZoomTile = (dbId: number, tileIdx: number): Promise<HTMLImageElement | null> => {
+          // Priority: CDN URL (128px, cached) > API endpoint (256px, slower)
+          const cdnUrl = urlIndex ? urlIndex[String(dbId)] : null;
+          const apiUrl = `/api/tile/${dbId}?size=256&t=${Date.now()}`;
           return new Promise(resolve => {
-            const tryLoad = (url: string, retries: number, isFallback: boolean) => {
+            const tryLoad = (url: string, isFallback: boolean) => {
               const img = new Image();
               if (!url.startsWith('/')) img.crossOrigin = 'anonymous';
               const timeout = setTimeout(() => {
                 img.onload = img.onerror = null;
-                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
-                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                if (!isFallback && cdnUrl) { tryLoad(apiUrl, true); }
                 else { resolve(null); }
-              }, 10000);
+              }, isFallback ? 8000 : 4000); // CDN: 4s timeout, API: 8s timeout
               img.onload = () => {
                 clearTimeout(timeout);
                 if (img.naturalWidth < 10) {
-                  if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 300); }
-                  else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                  if (!isFallback && cdnUrl) { tryLoad(apiUrl, true); }
                   else { resolve(null); }
                 } else { resolve(img); }
               };
               img.onerror = () => {
                 clearTimeout(timeout);
-                if (retries > 0) { setTimeout(() => tryLoad(url, retries - 1, isFallback), 500); }
-                else if (!isFallback && sourceUrl) { tryLoad(`/api/tile/${dbId}?size=256&t=${Date.now()}`, 1, true); }
+                if (!isFallback && cdnUrl) { tryLoad(apiUrl, true); }
                 else { resolve(null); }
               };
               img.src = url;
             };
-            const startUrl = sourceUrl || `/api/tile/${dbId}?size=256&t=${Date.now()}`;
-            tryLoad(startUrl, 1, !sourceUrl);
+            // Start with CDN URL if available (fast, cached), otherwise use API
+            tryLoad(cdnUrl || apiUrl, !cdnUrl);
           });
         };
 
@@ -1238,7 +1233,7 @@ export default function Studio() {
           await Promise.all(batch.map(async (idx) => {
             const dbId = tileIds[idx];
             if (!dbId || dbId <= 0) return;
-            const img = await loadZoomTile(dbId);
+            const img = await loadZoomTile(dbId, idx);
             if (img && img.naturalWidth > 0) zoomHiResMap[idx] = img;
           }));
           await new Promise(r => setTimeout(r, 0));
