@@ -6215,7 +6215,7 @@ export default function Studio() {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.5 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
+                <button onClick={() => { const nz = Math.min(8, zoom * 1.3); if (nz > 1.0 && !hiResReady && !hiResLoading) { triggerClientHiResRender(); } setZoom(nz); }} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
                   <ZoomIn className="w-4 h-4" />
                 </button>
                 <button onClick={() => setZoom(z => Math.max(0.2, z / 1.3))} className="p-2.5 rounded-xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-all text-gray-600 hover:text-gray-900">
@@ -6307,7 +6307,7 @@ export default function Studio() {
                     ref={canvasRef}
                     style={{
                       display: (ready || loading || projectLoading) ? "block" : "none",
-                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && (isMobile || zoom > 1.5)) ? "pixelated" : "auto",
+                      imageRendering: zoom > 1 && !distancePreview && !(hiResReady && (isMobile || zoom > 1.0)) ? "pixelated" : "auto",
                       filter: distancePreview ? "blur(2px)" : "none",
                       maxWidth: "none",
                     }}
@@ -6477,7 +6477,7 @@ export default function Studio() {
                       setColorEnhance(v); colorEnhanceRef.current = v;
                       // If hi-res is active, reset and re-trigger hi-res render
                       // so the new colorEnhance value is baked into the hi-res image
-                      if (hiResReadyRef.current && (isMobile || zoom > 1.5)) {
+                      if (hiResReadyRef.current && (isMobile || zoom > 1.0)) {
                         resetHiRes();
                         setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
                       }
@@ -6737,7 +6737,7 @@ export default function Studio() {
                       onChange={e => {
                         const v = Number(e.target.value);
                         setColorEnhance(v); colorEnhanceRef.current = v;
-                        if (hiResReadyRef.current && (isMobile || zoom > 1.5)) {
+                        if (hiResReadyRef.current && (isMobile || zoom > 1.0)) {
                           resetHiRes();
                           setTimeout(() => { triggerClientHiResRef.current?.(); }, 50);
                         }
