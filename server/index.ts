@@ -503,15 +503,33 @@ app.get("/api/tile-urls", async (req, res) => {
     // Upgrade Pexels/Unsplash thumbnail URLs to higher resolution for pop-out
     function upgradeToHiRes(url: string): string {
       if (!url) return url;
-      // Pexels: replace h=130 or w=130 with w=800 for sharp pop-out display
+      // Pexels: set w=800 for sharp pop-out display (removes h= and existing w= params)
       if (url.includes('images.pexels.com')) {
-        return url.replace(/[?&]h=\d+/, '').replace(/[?&]w=\d+/, '')
-          + (url.includes('?') ? '&' : '?') + 'w=800&auto=compress&cs=tinysrgb';
+        // Parse URL and rebuild with w=800 only
+        try {
+          const u = new URL(url);
+          u.searchParams.delete('h');
+          u.searchParams.set('w', '800');
+          u.searchParams.set('auto', 'compress');
+          u.searchParams.set('cs', 'tinysrgb');
+          return u.toString();
+        } catch {
+          // Fallback: simple string replacement
+          return url.replace(/([?&])h=\d+(&|$)/, '$1').replace(/([?&])w=\d+(&|$)/, '$1')
+            .replace(/[?&]$/, '') + (url.includes('?') ? '&' : '?') + 'w=800';
+        }
       }
-      // Unsplash: add w=800 parameter
+      // Unsplash: set w=800 parameter
       if (url.includes('images.unsplash.com')) {
-        return url.replace(/[?&]w=\d+/, '').replace(/[?&]h=\d+/, '')
-          + (url.includes('?') ? '&' : '?') + 'w=800';
+        try {
+          const u = new URL(url);
+          u.searchParams.delete('h');
+          u.searchParams.set('w', '800');
+          return u.toString();
+        } catch {
+          return url.replace(/([?&])w=\d+(&|$)/, '$1').replace(/[?&]$/, '')
+            + (url.includes('?') ? '&' : '?') + 'w=800';
+        }
       }
       return url;
     }
