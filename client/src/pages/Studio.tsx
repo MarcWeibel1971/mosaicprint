@@ -1345,7 +1345,11 @@ export default function Studio() {
         const MAX_BLUE_SHIFT = 20;   // moderate blue correction
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
-        if (cellLabData.length > 0) {
+        // MOBILE: Skip LAB correction entirely on mobile.
+      // On mobile, per-tile getImageData+putImageData for 4800+ tiles takes 50+ seconds,
+      // exceeding the 45s toBlob() timeout. The result is null → no hi-res overlay.
+      // Trade-off: no color correction on mobile zoom, but sharp tiles immediately.
+      if (cellLabData.length > 0 && !isMob) {
           console.log(`[ClientHiRes] Applying LAB color correction (mobile=${isMob})`);
           // Process each tile cell
           // Mobile: tile-by-tile getImageData to avoid large buffer crash in Mobile Safari
