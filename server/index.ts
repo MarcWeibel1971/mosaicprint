@@ -60,10 +60,36 @@ function evictTileCache() {
   for (let i = 0; i < 500; i++) tileCacheMap.delete(entries[i][0]);
 }
 
+// Disk cache for hi-res tiles (>= 256px) to survive server restarts
+// Railway /tmp is ephemeral but survives within a deployment session
+const DISK_CACHE_DIR = '/tmp/tile-cache-hires';
+try { fs.mkdirSync(DISK_CACHE_DIR, { recursive: true }); } catch { /* ignore */ }
+
+function diskCachePath(id: number, size: number): string {
+  return `${DISK_CACHE_DIR}/${id}-${size}.jpg`;
+}
+
+async function readDiskCache(id: number, size: number): Promise<Buffer | null> {
+  if (size < 256) return null; // only cache hi-res
+  try {
+    const p = diskCachePath(id, size);
+    const stat = fs.statSync(p);
+    // Invalidate disk cache entries older than 7 days
+    if (Date.now() - stat.mtimeMs > 7 * 24 * 60 * 60 * 1000) { fs.unlinkSync(p); return null; }
+    return fs.readFileSync(p);
+  } catch { return null; }
+}
+
+function writeDiskCache(id: number, size: number, buf: Buffer): void {
+  if (size < 256) return; // only cache hi-res
+  try { fs.writeFileSync(diskCachePath(id, size), buf); } catch { /* ignore */ }
+}
+
 /**
  * Shared tile loading: used by /api/tile/:id AND print render.
- * Loads a tile image at the requested size, with 3-tier caching:
+ * Loads a tile image at the requested size, with 4-tier caching:
  *   1. In-memory tileCacheMap (exact size, then resize from nearby sizes)
+ *   1b. Disk cache for hi-res tiles (survives server restarts within session)
  *   2. URL resolution from tileUrlCache or DB
  *   3. Upstream fetch (R2 CDN, source_url)
  * Returns a JPEG buffer resized to exactly `size x size`, or null on failure.
@@ -74,6 +100,13 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
   // 1. Check exact cache hit
   const cached = tileCacheMap.get(cacheKey);
   if (cached) return cached.buf;
+
+  // 1b. Check disk cache for hi-res tiles (avoids slow upstream fetch after server restart)
+  const diskBuf = await readDiskCache(id, size);
+  if (diskBuf) {
+    tileCacheMap.set(cacheKey, { buf: diskBuf, contentType: 'image/jpeg', ts: Date.now() });
+    return diskBuf;
+  }
 
   // 1b. Check nearby sizes and resize
   // IMPORTANT: Only use cached smaller sizes if the size difference is small (max 2x upscale).
@@ -184,6 +217,8 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
     const effectiveCacheKey = effectiveSize !== size ? `${id}-${effectiveSize}` : cacheKey;
     tileCacheMap.set(effectiveCacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
     if (effectiveSize !== size) tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+    // Persist hi-res tiles to disk so they survive server restarts within the same session
+    writeDiskCache(id, effectiveSize, resized);
     evictTileCache();
     return resized;
   } catch {
@@ -465,6 +500,21 @@ app.get("/api/tile-urls", async (req, res) => {
       [ids]
     );
     const isHttp = (url: string | null) => !!url && (url.startsWith('https://') || url.startsWith('http://'));
+    // Upgrade Pexels/Unsplash thumbnail URLs to higher resolution for pop-out
+    function upgradeToHiRes(url: string): string {
+      if (!url) return url;
+      // Pexels: replace h=130 or w=130 with w=800 for sharp pop-out display
+      if (url.includes('images.pexels.com')) {
+        return url.replace(/[?&]h=\d+/, '').replace(/[?&]w=\d+/, '')
+          + (url.includes('?') ? '&' : '?') + 'w=800&auto=compress&cs=tinysrgb';
+      }
+      // Unsplash: add w=800 parameter
+      if (url.includes('images.unsplash.com')) {
+        return url.replace(/[?&]w=\d+/, '').replace(/[?&]h=\d+/, '')
+          + (url.includes('?') ? '&' : '?') + 'w=800';
+      }
+      return url;
+    }
     const urlMap: Record<number, string> = {};
     for (const row of result.rows) {
       if (wantHiRes) {
@@ -473,9 +523,9 @@ app.get("/api/tile-urls", async (req, res) => {
         // Fall back to r2_url (128px but loadable) or tile128_url.
         // If nothing is loadable, omit entry → client uses /api/tile/:id proxy.
         if (isHttp(row.source_url)) {
-          urlMap[row.id] = row.source_url;
+          urlMap[row.id] = upgradeToHiRes(row.source_url);
         } else if (isHttp(row.r2_url)) {
-          urlMap[row.id] = row.r2_url;
+          urlMap[row.id] = row.r2_url; // R2 tiles: client will use /api/tile/:id proxy for resize
         } else if (isHttp(row.tile128_url)) {
           urlMap[row.id] = row.tile128_url;
         }

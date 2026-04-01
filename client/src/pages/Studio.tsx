@@ -4741,48 +4741,84 @@ export default function Studio() {
     const tileIds = tileIdsRef.current;
 
     // Pre-load hi-res images for DB tiles that only have 64px thumbnails.
-    // This prevents blurry pop-out tiles (64px upscaled to 512px canvas).
-    const popOutLoadPromises: Promise<void>[] = [];
+    // STRATEGY: Use /api/tile-urls?hires=1 to get direct Pexels/Unsplash URLs (fast, full-res)
+    // This avoids the slow /api/tile/:id?size=512 proxy (2-6s per tile due to server-side resize)
     const popOutHiResCache: Record<number, HTMLImageElement> = {};
     const popOutLoadedIdxs = new Set<number>();
+    const dbIdsForPopOut: Array<{ tileIdx: number; dbId: number }> = [];
 
     for (let t = 0; t < numTiles; t++) {
       const ci = indices[t];
       if (!assignment) continue;
       const tileIdx = assignment[ci];
-      if (popOutLoadedIdxs.has(tileIdx)) continue; // already queued
+      if (popOutLoadedIdxs.has(tileIdx)) continue;
       const dbId = tileIds?.[tileIdx];
       if (!dbId || dbId <= 0) continue; // user tile — already has hi-res via userTileOriginalRef
-      // Always load 512px for DB tiles — validImgs only has 64px thumbnails
-      // Don't skip based on validImgsHiResRef (those are null for DB tiles)
       popOutLoadedIdxs.add(tileIdx);
-      // Need to load hi-res for this DB tile
-      popOutLoadPromises.push(new Promise<void>(resolve => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        const timeout = setTimeout(() => { img.onload = img.onerror = null; resolve(); }, 8000);
-        img.onload = () => { clearTimeout(timeout); if (img.naturalWidth > 0) popOutHiResCache[tileIdx] = img; resolve(); };
-        img.onerror = () => { clearTimeout(timeout); resolve(); };
-        img.src = `/api/tile/${dbId}?size=512&t=${Date.now()}`;
-      }));
+      dbIdsForPopOut.push({ tileIdx, dbId });
     }
-    // Load all hi-res tiles in parallel (max ~30 tiles × ~50KB = ~1.5MB)
-    console.log(`[PopOut] tileIds.length=${tileIds?.length}, assignment=${assignment?.length}, numTiles=${numTiles}, loadPromises=${popOutLoadPromises.length}`);
-    if (popOutLoadPromises.length > 0) {
-      console.log(`[PopOut] Loading ${popOutLoadPromises.length} hi-res tiles for sharp pop-out...`);
+
+    console.log(`[PopOut] tileIds.length=${tileIds?.length}, assignment=${assignment?.length}, numTiles=${numTiles}, dbTilesToLoad=${dbIdsForPopOut.length}`);
+
+    if (dbIdsForPopOut.length > 0) {
+      // Step 1: Fetch direct hi-res URLs from server (single fast DB query for all tiles)
+      let hiResUrlMap: Record<number, string> = {};
+      try {
+        const idsParam = dbIdsForPopOut.map(x => x.dbId).join(',');
+        const urlResp = await fetch(`/api/tile-urls?ids=${idsParam}&hires=1`);
+        if (urlResp.ok) hiResUrlMap = await urlResp.json();
+        console.log(`[PopOut] Got ${Object.keys(hiResUrlMap).length} direct hi-res URLs`);
+      } catch (e) {
+        console.warn('[PopOut] Failed to fetch hi-res URLs, falling back to proxy:', e);
+      }
+
+      // Step 2: Load all hi-res images in parallel using direct URLs
+      const popOutLoadPromises: Promise<void>[] = dbIdsForPopOut.map(({ tileIdx, dbId }) =>
+        new Promise<void>(resolve => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          // Use direct URL if available (fast: Pexels/Unsplash CDN, ~940px)
+          // Fall back to proxy only for R2-only tiles without external source
+          const directUrl = hiResUrlMap[dbId];
+          const useDirectUrl = directUrl && !directUrl.includes('tiles.mosaicprint.ch');
+          const src = useDirectUrl ? directUrl : `/api/tile/${dbId}?size=512`;
+          const timeout = setTimeout(() => {
+            img.onload = img.onerror = null;
+            // On timeout: try fallback URL if we haven't already
+            if (useDirectUrl) {
+              const fallbackImg = new Image();
+              fallbackImg.crossOrigin = 'anonymous';
+              const t2 = setTimeout(() => { fallbackImg.onload = fallbackImg.onerror = null; resolve(); }, 5000);
+              fallbackImg.onload = () => { clearTimeout(t2); if (fallbackImg.naturalWidth > 0) popOutHiResCache[tileIdx] = fallbackImg; resolve(); };
+              fallbackImg.onerror = () => { clearTimeout(t2); resolve(); };
+              fallbackImg.src = `/api/tile/${dbId}?size=512`;
+            } else {
+              resolve();
+            }
+          }, 6000);
+          img.onload = () => { clearTimeout(timeout); if (img.naturalWidth > 0) popOutHiResCache[tileIdx] = img; resolve(); };
+          img.onerror = () => {
+            clearTimeout(timeout);
+            // On error: try proxy fallback if we used direct URL
+            if (useDirectUrl) {
+              const fallbackImg = new Image();
+              fallbackImg.crossOrigin = 'anonymous';
+              const t2 = setTimeout(() => { fallbackImg.onload = fallbackImg.onerror = null; resolve(); }, 5000);
+              fallbackImg.onload = () => { clearTimeout(t2); if (fallbackImg.naturalWidth > 0) popOutHiResCache[tileIdx] = fallbackImg; resolve(); };
+              fallbackImg.onerror = () => { clearTimeout(t2); resolve(); };
+              fallbackImg.src = `/api/tile/${dbId}?size=512`;
+            } else {
+              resolve();
+            }
+          };
+          img.src = src;
+        })
+      );
+
+      console.log(`[PopOut] Loading ${popOutLoadPromises.length} hi-res tiles (direct URLs where available)...`);
       await Promise.all(popOutLoadPromises);
       if (cancelled) return;
       console.log(`[PopOut] Loaded ${Object.keys(popOutHiResCache).length}/${popOutLoadPromises.length} hi-res tiles`);
-    } else {
-      // Debug: why no promises? Check first few tiles
-      for (let t2 = 0; t2 < Math.min(3, numTiles); t2++) {
-        const ci2 = indices[t2];
-        if (!assignment) break;
-        const tileIdx2 = assignment[ci2];
-        const dbId2 = tileIds?.[tileIdx2];
-        const hiImg2 = validImgsHiResRef.current?.[tileIdx2];
-        console.log(`[PopOut] tile t=${t2} ci=${ci2} tileIdx=${tileIdx2} dbId=${dbId2} hiImg=${hiImg2?.naturalWidth}px`);
-      }
     }
 
     for (let t = 0; t < numTiles; t++) {
