@@ -1117,8 +1117,12 @@ export default function Studio() {
     // iOS Safari supports up to ~16.7 MP but we can tile-render in chunks
     // Desktop: cap at 80MP to keep toBlob() fast (< 5s). At 120×90 tiles:
     //   128px → 176.9MP (too slow), 96px → 99.5MP (borderline), 80px → 69.1MP (fast)
-    // Mobile: cap at 50MP
-    const maxCanvasArea = isMob ? 50_000_000 : 80_000_000;
+    // Mobile: use 16MP limit (not 50MP) to ensure toBlob() completes in < 5s.
+    // iOS Safari can handle 50MP canvas creation but toBlob() on 50MP takes 30-60s
+    // (or silently returns null), causing the hi-res overlay to never appear.
+    // At 16MP: HR_TILE=57px (vs 64px thumbnail) → still sharp, toBlob() in ~2s.
+    // Desktop: 80MP is fine (modern GPUs handle toBlob() quickly).
+    const maxCanvasArea = isMob ? 16_000_000 : 80_000_000;
     const maxCanvasDim = isMob ? 8192 : 12000;
     const maxTileFromArea = Math.floor(Math.sqrt(maxCanvasArea / (cols * rows)));
     const maxTileFromDim = Math.floor(maxCanvasDim / Math.max(cols, rows));
