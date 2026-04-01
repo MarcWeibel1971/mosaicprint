@@ -6693,6 +6693,7 @@ export default function Studio() {
                 >
                   {savingPreview ? 'Speichert...' : 'Vorschau speichern'}
                 </button>
+                </div>
               </div>
             )}
 
