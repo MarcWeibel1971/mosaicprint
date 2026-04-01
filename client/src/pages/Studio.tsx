@@ -4870,7 +4870,15 @@ export default function Studio() {
       // Position exactly over the tile's spot in the mosaic
       const left = col * cssTileW;
       const top = row * cssTileH;
-      tileCanvas.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${cssTileW}px;height:${cssTileH}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;pointer-events:none;`;
+      // CRITICAL FIX: Canvas must have the FINAL display size as CSS size.
+      // If CSS size = cssTileW (e.g. 8px) and GSAP scale = 18×, the browser rasterizes
+      // the canvas at 8px and then upscales it → blurry even with 512px internal resolution.
+      // Solution: Set CSS size = final zoomed size (cssTileW * popScale ≈ 150px), center it
+      // over the tile, and animate scale from 1/popScale → 1 instead of 1 → popScale.
+      const finalSizePx = cssTileW * popScale;
+      const offsetLeft = left + cssTileW / 2 - finalSizePx / 2;
+      const offsetTop = top + cssTileH / 2 - finalSizePx / 2;
+      tileCanvas.style.cssText = `position:absolute;left:${offsetLeft}px;top:${offsetTop}px;width:${finalSizePx}px;height:${finalSizePx}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;pointer-events:none;`;
       popContainer.appendChild(tileCanvas);
       tileEls.push(tileCanvas);
     }
@@ -4882,18 +4890,21 @@ export default function Studio() {
     tileEls.forEach((tile, i) => {
       const delay = i * 3.0; // 3s between each tile start
       // Appear + zoom out towards viewer (3s)
+      // Canvas CSS size is already the final zoomed size (finalSizePx = cssTileW * popScale)
+      // So we animate scale from 1/popScale (= tile size) to 1 (= zoomed size)
+      // This ensures the browser rasterizes the canvas at full display size → sharp!
       tl.fromTo(tile, {
-        opacity: 0, scale: 1,
+        opacity: 0, scale: 1 / popScale,
         boxShadow: 'none',
       }, {
-        opacity: 1, scale: popScale,
+        opacity: 1, scale: 1,
         boxShadow: '0 12px 40px rgba(0,0,0,0.7)',
         duration: 3.0,
         ease: 'power2.out',
       }, delay);
       // Hold visible (1s), then shrink back + fade (2s)
       tl.to(tile, {
-        scale: 1, opacity: 0,
+        scale: 1 / popScale, opacity: 0,
         boxShadow: 'none',
         duration: 2.0,
         ease: 'power2.inOut',
