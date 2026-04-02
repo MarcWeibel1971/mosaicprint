@@ -2407,6 +2407,8 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const targetColors: number[] = rp.targetColors ?? [];
         const edgeMap: number[] = rp.edgeMap ?? [];
         const faceMask: boolean[] = rp.faceMask ?? [];
+        // Algorithm settings from client (for LAB color correction consistency)
+        const algoSettings: Record<string, number | string | boolean> = rp.algoSettings ?? {};
         // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
         // for tiles with external sources, giving sharp output at any print size.
         // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
@@ -2520,19 +2522,20 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
 
         // Color correction parameters for server-side print render.
         // Goal: tiles should look like the client preview – keep tile texture, apply light color nudge.
-        // AB_BLEND = 0.20: gentle 20% push toward target color (preserves tile texture).
-        // Higher values (0.55) make tiles look like solid color blocks – avoid.
         // Use same parameters as client renderMosaicClientSide to avoid color deviation (especially blue shift)
-        // AB_BLEND=0 when colorEnhance=0 (no color shift at all), same as client
+        // CRITICAL: Must use algoSettings from client to match LAB color correction exactly
+        const histBlend = (algoSettings.histogramBlend as number) ?? 0.0;
+        const blendFactor = Math.min(1.0, histBlend / 0.10);
         const colorEnhanceVal = colorEnhance / 100; // 0..1, no minimum
-        const AB_BLEND = Math.min(0.32, colorEnhanceVal * 0.32); // 0..0.32 (same as client: 0..0.32)
-        const L_BLEND = 0.35;
-        const MAX_COLOR_SHIFT = 15;  // same as client (was 20)
-        const MAX_BLUE_SHIFT = 5;    // same as client (was 20) – critical to prevent blue shift
-        const cBoost = 1.20;
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12..0.32 (same as client)
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // 0 at colorEnhance=0 (same as client)
+        const L_BLEND = 0.40 + 0.40 * blendFactor;  // 0.40..0.80 (same as client)
+        const MAX_COLOR_SHIFT = 15;  // same as client
+        const MAX_BLUE_SHIFT = 5;    // same as client – critical to prevent blue shift
+        const cBoost = (algoSettings.contrastBoost as number) ?? 1.30;  // same as client default
         const satBoost = 0.90 + cBoost * 0.10;
-        const BASE_OL = userOverlay > 0 ? userOverlay : 0.15;
-        const EDGE_B = 0.20;
+        const BASE_OL = userOverlay > 0 ? userOverlay : ((algoSettings.baseOverlay as number) ?? 0.15);
+        const EDGE_B = (algoSettings.edgeBoost as number) ?? 0.20;
         // Apply color correction whenever targetColors are available
         const hasColorCorrection = targetColors.length > 0;
 
@@ -2654,6 +2657,62 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
           limitInputPixels: false,
         }).composite(stripCompositeOps).jpeg({ quality: 92 }).toBuffer();
         console.log(`[admin-render] All ${stripCount} strips assembled`);
+        // Apply Foto-Overlay (userOverlay slider) if set – same as client renderMosaicClientSide
+        // The photo_url is stored in the order DB record (thumbnail, up to 1200px on desktop)
+        if (userOverlay > 0) {
+          try {
+            const photoUrlFromDb = order.photo_url;
+            if (photoUrlFromDb && photoUrlFromDb.startsWith('data:')) {
+              const base64Data = photoUrlFromDb.split(',')[1];
+              const photoBuf = Buffer.from(base64Data, 'base64');
+              // Resize photo to full output size
+              const photoResized = await sharp(photoBuf)
+                .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
+                .ensureAlpha()
+                .toBuffer();
+              // Apply alpha (userOverlay 0-100 → 0-255)
+              const alpha = Math.round((userOverlay / 100) * 255);
+              // Composite with alpha using Sharp
+              const overlayWithAlpha = await sharp(photoResized)
+                .composite([{
+                  input: Buffer.alloc(outW * outH, alpha),
+                  raw: { width: outW, height: outH, channels: 1 },
+                  blend: 'dest-in',
+                }])
+                .toBuffer();
+              baseBuf = await sharp(baseBuf)
+                .composite([{ input: overlayWithAlpha, blend: 'over' }])
+                .jpeg({ quality: 92 })
+                .toBuffer();
+              console.log(`[admin-render] Foto-Overlay applied (${userOverlay}%)`);
+            } else if (photoUrlFromDb && photoUrlFromDb.startsWith('http')) {
+              // External URL: fetch and apply
+              const resp = await fetch(photoUrlFromDb, { signal: AbortSignal.timeout(15000) });
+              if (resp.ok) {
+                const photoBuf = Buffer.from(await resp.arrayBuffer());
+                const photoResized = await sharp(photoBuf)
+                  .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
+                  .ensureAlpha()
+                  .toBuffer();
+                const alpha = Math.round((userOverlay / 100) * 255);
+                const overlayWithAlpha = await sharp(photoResized)
+                  .composite([{
+                    input: Buffer.alloc(outW * outH, alpha),
+                    raw: { width: outW, height: outH, channels: 1 },
+                    blend: 'dest-in',
+                  }])
+                  .toBuffer();
+                baseBuf = await sharp(baseBuf)
+                  .composite([{ input: overlayWithAlpha, blend: 'over' }])
+                  .jpeg({ quality: 92 })
+                  .toBuffer();
+                console.log(`[admin-render] Foto-Overlay applied from URL (${userOverlay}%)`);
+              }
+            }
+          } catch (overlayErr) {
+            console.warn(`[admin-render] Foto-Overlay failed (non-critical):`, overlayErr);
+          }
+        }
         await setProgress(92, 'Bild wird auf R2 hochgeladen...');
         // Upload to R2
         const filename = `orders/order-${orderId}-${Date.now()}.jpg`;

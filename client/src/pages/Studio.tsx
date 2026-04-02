@@ -5694,7 +5694,9 @@ export default function Studio() {
     const digFmt = DIGITAL_FORMATS[selectedDigitalFormat];
     const { cols, rows } = mosaicParamsRef.current;
     // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256) so progress shows real dimensions
-    const SERVER_MAX_DIM = 16000;
+    // Desktop: 20000px limit (400MP canvas), Mobile: 16000px (iOS Safari canvas limit ~256MP)
+    const _isMobileForDL = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const SERVER_MAX_DIM = _isMobileForDL ? 16000 : 20000;
     let TILE_PX = Math.min(Math.max(digFmt.tilePx, 32), 256);
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
@@ -5738,7 +5740,9 @@ export default function Studio() {
   const handleAdminMaxDownload = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
     const { cols, rows } = mosaicParamsRef.current;
-    const SERVER_MAX_DIM = 16000;
+    // Desktop: 20000px limit (400MP canvas), Mobile: 16000px (iOS Safari canvas limit ~256MP)
+    const _isMobileForAdminDL = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const SERVER_MAX_DIM = _isMobileForAdminDL ? 16000 : 20000;
     let TILE_PX = 256; // Max tile size supported by server
     if (cols * TILE_PX > SERVER_MAX_DIM || rows * TILE_PX > SERVER_MAX_DIM) {
       TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), TILE_PX);
@@ -5787,7 +5791,9 @@ export default function Studio() {
     const { cols, rows } = mosaicParamsRef.current;
     // 1 tile = 1 cm @ 400 DPI → tilePx = 1 cm × (400/2.54) ≈ 157 px
     const TILE_PX_400DPI = 157;
-    const SERVER_MAX_DIM = 16000;
+    // Desktop: 20000px limit (400MP canvas), Mobile: 16000px (iOS Safari canvas limit ~256MP)
+    const _isMobileForPrint = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    const SERVER_MAX_DIM = _isMobileForPrint ? 16000 : 20000;
     let PRINT_TILE_PX = TILE_PX_400DPI;
     if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
       PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
@@ -5819,15 +5825,20 @@ export default function Studio() {
       }
 
       // 2. Capture customer photo thumbnail
+      // Desktop: Use larger thumbnail (1200px) so server can apply Foto-Overlay at higher quality
+      // Mobile: Keep 400px to avoid memory issues
+      const PHOTO_THUMB_SIZE = isMobileDevice ? THUMB_SIZE : 1200;
       let photoUrl: string | null = null;
       if (userPhotoImg) {
         const photoThumb = document.createElement('canvas');
-        photoThumb.width = THUMB_SIZE;
-        photoThumb.height = Math.round(THUMB_SIZE * (userPhotoImg.height / userPhotoImg.width));
+        photoThumb.width = PHOTO_THUMB_SIZE;
+        photoThumb.height = Math.round(PHOTO_THUMB_SIZE * (userPhotoImg.height / userPhotoImg.width));
         const photoCtx = photoThumb.getContext('2d');
         if (photoCtx) {
+          photoCtx.imageSmoothingEnabled = true;
+          photoCtx.imageSmoothingQuality = 'high';
           photoCtx.drawImage(userPhotoImg, 0, 0, photoThumb.width, photoThumb.height);
-          photoUrl = photoThumb.toDataURL('image/jpeg', 0.7);
+          photoUrl = photoThumb.toDataURL('image/jpeg', 0.88); // Higher quality for print overlay
         }
       } else if (userPhoto && typeof userPhoto === 'string') {
         photoUrl = userPhoto;
@@ -5933,6 +5944,8 @@ export default function Studio() {
             targetColors: targetColorsRef.current,
             edgeMap: edgeMapRef.current,
             faceMask: faceMaskRef.current,
+            // Algorithm settings for server-side LAB color correction (must match client)
+            algoSettings: (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'); } catch { return {}; } })(),
             // R2 URLs for user-uploaded tiles (negative IDs) – required for server-side rendering
             ...(Object.keys(userTileUrls).length > 0 ? { userTileUrls } : {}),
           },
@@ -6611,7 +6624,9 @@ export default function Studio() {
                         const { cols, rows } = mosaicParamsRef.current;
                         // 1 tile = 1cm @ 400DPI = 157px; cap at 400px
                         const TILE_PX_400DPI = 157;
-                        const SERVER_MAX_DIM = 16000;
+                        // Desktop: 20000px limit (400MP canvas), Mobile: 16000px (iOS Safari canvas limit ~256MP)
+                        const _isMobileForAdminPrint = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+                        const SERVER_MAX_DIM = _isMobileForAdminPrint ? 16000 : 20000;
                         let PRINT_TILE_PX = TILE_PX_400DPI;
                         if (cols * PRINT_TILE_PX > SERVER_MAX_DIM || rows * PRINT_TILE_PX > SERVER_MAX_DIM) {
                           PRINT_TILE_PX = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), PRINT_TILE_PX);
@@ -7047,7 +7062,9 @@ export default function Studio() {
                       const cols = mosaicParamsRef.current?.cols ?? 60;
                       const rows = mosaicParamsRef.current?.rows ?? 80;
                       // Replicate server-side clamping (MAX_DIM=32000, tilePx 32-256)
-                      const SERVER_MAX_DIM = 16000;
+                      // Desktop: 20000px limit (400MP canvas), Mobile: 16000px (iOS Safari canvas limit ~256MP)
+                      const _isMobileForFmtPreview = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+                      const SERVER_MAX_DIM = _isMobileForFmtPreview ? 16000 : 20000;
                       let clampedTilePx = Math.min(Math.max(rawTilePx, 32), 256);
                       if (cols * clampedTilePx > SERVER_MAX_DIM || rows * clampedTilePx > SERVER_MAX_DIM) {
                         clampedTilePx = Math.min(Math.floor(SERVER_MAX_DIM / cols), Math.floor(SERVER_MAX_DIM / rows), clampedTilePx);
