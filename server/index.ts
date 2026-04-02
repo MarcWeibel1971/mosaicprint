@@ -2838,6 +2838,22 @@ app.post('/api/admin/orders/:id/print-url', express.raw({ type: 'image/jpeg', li
   }
 });
 
+// DELETE /api/admin/orders/:id – delete an order permanently
+app.delete('/api/admin/orders/:id', async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId || isNaN(orderId)) return res.status(400).json({ error: 'Invalid order ID' });
+    const pool = db.getPool();
+    const result = await pool.query('DELETE FROM mosaic_orders WHERE id = $1 RETURNING id', [orderId]);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Order not found' });
+    console.log(`[admin] Deleted order #${orderId}`);
+    res.json({ ok: true, deletedId: orderId });
+  } catch (e) {
+    console.error('[admin/delete-order] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // POST /api/admin/migrate-to-r2 – migrate existing tiles to R2 storage
 // Runs in background, returns job status via GET /api/admin/migrate-to-r2/status
 const r2MigrationStatus = {

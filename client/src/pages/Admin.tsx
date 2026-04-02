@@ -6441,6 +6441,27 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const [renderProgress, setRenderProgress] = useState(0)
   const [renderMsg, setRenderMsg] = useState('')
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+
+  const deleteOrder = async (orderId: number) => {
+    setDeletingOrderId(orderId)
+    try {
+      const res = await fetch(`/api/admin/orders/${orderId}`, { method: 'DELETE', headers: authHeaders() })
+      const data = await res.json()
+      if (data.ok) {
+        setOrders(prev => prev.filter(o => o.id !== orderId))
+        onMessage({ text: `Bestellung #${orderId} gelöscht`, type: 'success' })
+      } else {
+        onMessage({ text: data.error ?? 'Fehler beim Löschen', type: 'error' })
+      }
+    } catch {
+      onMessage({ text: 'Fehler beim Löschen', type: 'error' })
+    } finally {
+      setDeletingOrderId(null)
+      setConfirmDeleteId(null)
+    }
+  }
 
   const fetchOrders = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -6802,6 +6823,34 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 onBlur={(e) => updateNotes(order.id, e.target.value)}
                 className="flex-1 min-w-[150px] px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none"
               />
+
+              {/* Delete button */}
+              {confirmDeleteId === order.id ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-red-600 font-medium">Wirklich löschen?</span>
+                  <button
+                    onClick={() => deleteOrder(order.id)}
+                    disabled={deletingOrderId === order.id}
+                    className="px-2.5 py-1.5 bg-red-600 text-white text-xs font-semibold rounded-lg hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {deletingOrderId === order.id ? 'Lösche...' : 'Ja, löschen'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteId(null)}
+                    className="px-2.5 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-lg hover:bg-gray-200"
+                  >
+                    Abbrechen
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmDeleteId(order.id)}
+                  className="flex items-center gap-1 px-2.5 py-1.5 bg-red-50 text-red-600 text-xs font-semibold rounded-lg hover:bg-red-100 border border-red-200"
+                  title="Bestellung löschen"
+                >
+                  🗑️ Löschen
+                </button>
+              )}
             </div>
           </div>
         </div>
