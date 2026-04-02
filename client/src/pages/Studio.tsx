@@ -1347,9 +1347,13 @@ export default function Studio() {
         // color casts than the 128px R2 thumbnails used in preview.
         // AB_BLEND: gentle nudge toward target color, preserving tile texture.
         // Too high (0.55) = tiles become solid color blocks with no texture. Keep at 0.10-0.30.
-        const AB_BLEND = Math.min(0.30, 0.10 + colorEnhanceVal * 0.20); // 0.10..0.30 range
-        const MAX_COLOR_SHIFT = 20;  // moderate clamp to preserve tile character
-        const MAX_BLUE_SHIFT = 20;   // moderate blue correction
+        // CRITICAL FIX: Use same parameters as renderMosaic to prevent blue tint
+        // renderMosaic: AB_BLEND_BASE=0.12+0.20*blendFactor, scaled by colorEnhanceVal (0 at 0%)
+        // Hi-res was using AB_BLEND=0.10 minimum (always active) → blue tint even at colorEnhance=0
+        const AB_BLEND_BASE = 0.12 + 0.20 * blendFactor;  // 0.12..0.32 (same as renderMosaic)
+        const AB_BLEND = AB_BLEND_BASE * colorEnhanceVal;  // 0 at colorEnhance=0 (same as renderMosaic)
+        const MAX_COLOR_SHIFT = 15;  // same as renderMosaic
+        const MAX_BLUE_SHIFT = 5;    // same as renderMosaic (was 20 → caused blue tint)
         const cBoost = algoSettings.contrastBoost ?? 1.30;  // same default as renderMosaic
 
         // MOBILE: Use fast Canvas compositing instead of slow per-pixel LAB correction.
@@ -1362,7 +1366,8 @@ export default function Studio() {
           const origComposite = hrCtx!.globalCompositeOperation;
           const origAlpha = hrCtx!.globalAlpha;
           hrCtx!.globalCompositeOperation = 'multiply';
-          hrCtx!.globalAlpha = Math.min(0.35, 0.10 + colorEnhanceVal * 0.25); // 0.10..0.35
+          // CRITICAL FIX: 0 at colorEnhance=0 to prevent blue tint (was 0.10 minimum)
+          hrCtx!.globalAlpha = colorEnhanceVal * 0.35; // 0..0.35 (0 at colorEnhance=0)
           for (let row = 0; row < rows; row++) {
             for (let col = 0; col < cols; col++) {
               const ci = row * cols + col;
