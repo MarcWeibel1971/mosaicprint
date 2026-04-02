@@ -5850,9 +5850,20 @@ export default function Studio() {
         const userHiRes = userTileHiResRef.current;
         const userThumbs = userTileImagesRef.current;
 
+        // numUserPhotos: actual number of user photos (not expanded count)
+        // In MIX mode, user tiles are expanded N times, so IDs go from -1 to -(N*numPhotos)
+        // We need modulo to map any negative ID back to the correct photo index
+        const numUserPhotos = Math.max(
+          userOriginals.length || 0,
+          userHiRes.length || 0,
+          userThumbs.length || 0,
+          1
+        );
         let uploadedCount = 0;
         await Promise.all(uniqueNegativeIds.map(async (tileId) => {
-          const idx = Math.abs(tileId) - 1;
+          // Use modulo to handle expanded user tiles (e.g. tileId=-203 with 5 photos → idx=2)
+          const rawIdx = Math.abs(tileId) - 1;
+          const idx = rawIdx % numUserPhotos;
           const imgEl = userOriginals[idx] || userHiRes[idx] || userThumbs[idx];
           if (!imgEl || !imgEl.src) return;
           try {

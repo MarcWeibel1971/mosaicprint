@@ -2486,9 +2486,10 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         }
         await setProgress(50, 'Mosaik wird zusammengesetzt...');
         // STRIP-BASED COMPOSITING: Process image in horizontal strips to avoid OOM
-        // Each strip = STRIP_ROWS tile rows. This keeps memory usage manageable (~60 MB/strip)
+        // Each strip = STRIP_ROWS tile rows. This keeps memory usage manageable (~30 MB/strip)
         // and avoids repeated JPEG compression artifacts from batch compositing.
-        const STRIP_ROWS = 8; // rows of tiles per strip
+        // Reduced from 8 to 4 to prevent Railway CPU timeout on LAB color correction (pixel-by-pixel iteration)
+        const STRIP_ROWS = 4; // rows of tiles per strip
         const stripCount = Math.ceil(rows / STRIP_ROWS);
 
         // LAB color transfer helper functions (same as client renderMosaicClientSide)
@@ -2521,11 +2522,13 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         // Goal: tiles should look like the client preview – keep tile texture, apply light color nudge.
         // AB_BLEND = 0.20: gentle 20% push toward target color (preserves tile texture).
         // Higher values (0.55) make tiles look like solid color blocks – avoid.
-        const colorEnhanceVal = Math.max(0.05, colorEnhance / 100); // min 5% even if slider=0
-        const AB_BLEND = Math.min(0.35, 0.10 + colorEnhanceVal * 0.25); // 0.10..0.35 range
+        // Use same parameters as client renderMosaicClientSide to avoid color deviation (especially blue shift)
+        // AB_BLEND=0 when colorEnhance=0 (no color shift at all), same as client
+        const colorEnhanceVal = colorEnhance / 100; // 0..1, no minimum
+        const AB_BLEND = Math.min(0.32, colorEnhanceVal * 0.32); // 0..0.32 (same as client: 0..0.32)
         const L_BLEND = 0.35;
-        const MAX_COLOR_SHIFT = 20;  // moderate clamp to preserve tile character
-        const MAX_BLUE_SHIFT = 20;   // moderate blue correction
+        const MAX_COLOR_SHIFT = 15;  // same as client (was 20)
+        const MAX_BLUE_SHIFT = 5;    // same as client (was 20) – critical to prevent blue shift
         const cBoost = 1.20;
         const satBoost = 0.90 + cBoost * 0.10;
         const BASE_OL = userOverlay > 0 ? userOverlay : 0.15;
@@ -2595,6 +2598,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                 const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
 
                 // Apply per-pixel LAB transfer + overlay
+                // OPTIMIZATION: Process every pixel but use fast path for non-face, non-edge tiles
                 for (let py = py0; py < py1; py++) {
                   for (let px = px0; px < px1; px++) {
                     const pi = (py * outW + px) * nCh;
