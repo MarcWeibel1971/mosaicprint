@@ -2480,7 +2480,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                 buf = Buffer.from(await resp.arrayBuffer());
               }
               // Resize to tilePx
-              const resized = await sharp(buf)
+              const resized = await sharp(buf, { limitInputPixels: false })
                 .resize(tilePx, tilePx, { fit: 'cover', position: 'centre' })
                 .jpeg({ quality: 90 })
                 .toBuffer();
@@ -2575,7 +2575,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                 const str = Math.min(0.30, BASE_OL + edge*EDGE_B + faceBoost);
                 try {
                   // Step 1: Get average brightness of tile via Sharp stats (fast, no full decode)
-                  const stats = await sharp(jpegBuf).stats();
+                  const stats = await sharp(jpegBuf, { limitInputPixels: false }).stats();
                   const avgR = stats.channels[0].mean;
                   const avgG = stats.channels[1].mean;
                   const avgB = stats.channels[2].mean;
@@ -2591,7 +2591,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                   const tintR = Math.round(128 + (tR - 128) * tintStrength);
                   const tintG = Math.round(128 + (tG - 128) * tintStrength);
                   const tintB = Math.round(128 + (tBv - 128) * tintStrength);
-                  let pipeline = sharp(jpegBuf)
+                  let pipeline = sharp(jpegBuf, { limitInputPixels: false })
                     .modulate({ brightness: Math.max(0.1, Math.min(3.5, lumScale)) })
                     .tint({ r: tintR, g: tintG, b: tintB });
                   // Step 3: Soft-light overlay (face/edge boost) via composite
@@ -2678,9 +2678,9 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
               create: { width: outW, height: mergedH, channels: 3, background: { r: 0, g: 0, b: 0 } },
               limitInputPixels: false,
             }).composite([
-              { input: fileA, top: 0, left: 0 },
-              { input: fileB, top: heightA, left: 0 },
-            ]).jpeg({ quality: 92 }).toFile(mergedPath);
+              { input: fileA, top: 0, left: 0, limitInputPixels: false },
+              { input: fileB, top: heightA, left: 0, limitInputPixels: false },
+            ]).jpeg({ quality: 92, limitInputPixels: false } as any).toFile(mergedPath);
             // Remove source files (free disk space)
             try { fs.unlinkSync(fileA); } catch { /* ignore */ }
             try { fs.unlinkSync(fileB); } catch { /* ignore */ }
@@ -2713,7 +2713,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
               const overlayOpacity = userOverlay / 100; // 0.0 – 1.0
               const alpha = Math.round(overlayOpacity * 255);
               // Build RGBA overlay: resize + set uniform alpha channel
-              const photoResizedRgba = await sharp(rawPhotoBuf)
+              const photoResizedRgba = await sharp(rawPhotoBuf, { limitInputPixels: false })
                 .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
                 .ensureAlpha(overlayOpacity) // sets alpha channel to overlayOpacity (0.0–1.0)
                 .toBuffer();
