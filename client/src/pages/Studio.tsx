@@ -5714,13 +5714,15 @@ export default function Studio() {
       const useFormat = digFmt.format === 'png' ? 'png' : 'jpg';
 
       // CLIENT-SIDE RENDERING using shared renderMosaicClientSide()
+      // CRITICAL: Pass userOverlay, userPhotoImg and cellLab so the download matches the preview exactly
       const { blob, filename } = await renderMosaicClientSide({
         cols, rows, tilePx: TILE_PX, format: useFormat as 'jpg' | 'png',
         assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
-        colorEnhance,
+        cellLab: cellLabRef.current,
+        userOverlay, colorEnhance, userPhotoImg,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       const mimeType3 = useFormat === 'png' ? 'image/png' : 'image/jpeg';
@@ -5734,8 +5736,7 @@ export default function Studio() {
       setDlLoading(false);
       setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 5000);
     }
-  }, [selectedDigitalFormat]);
-
+   }, [selectedDigitalFormat, userOverlay, colorEnhance, userPhotoImg]);
   // Admin max-quality download: always uses 400px/tile PNG (same as digital PNG Lossless)
   const handleAdminMaxDownload = useCallback(async () => {
     if (!assignmentRef.current.length || !tileIdsRef.current.length || !mosaicParamsRef.current) return;
@@ -5757,13 +5758,15 @@ export default function Studio() {
       setDlProgress(5);
 
       // CLIENT-SIDE RENDERING (admin max quality) - JPG for Printolino compatibility
+      // CRITICAL: Pass userOverlay, userPhotoImg and cellLab so the download matches the preview exactly
       const { blob: adminBlob, filename: adminFilename } = await renderMosaicClientSide({
         cols, rows, tilePx: TILE_PX, format: 'jpg',
         assignment: assignmentRef.current, rotations: assignmentRotRef.current, tileIds: tileIdsRef.current,
         validImgs: validImgsRef.current, hiResImgs: validImgsHiResRef.current,
         snapshot: snapshotRef.current, origTilePx: mosaicParamsRef.current?.tilePx || 8,
         targetColors: targetColorsRef.current, edgeMap: edgeMapRef.current, faceMask: faceMaskRef.current,
-        colorEnhance,
+        cellLab: cellLabRef.current,
+        userOverlay, colorEnhance, userPhotoImg,
         onProgress: (pct, msg) => { setDlProgress(pct); setDlProgressMsg(msg); },
       });
       forceDownloadBlob(adminBlob, adminFilename, 'image/jpeg');
@@ -5776,9 +5779,8 @@ export default function Studio() {
       setDlLoading(false);
       setTimeout(() => { setDlProgressMsg(''); setDlProgress(0); }, 4000);
     }
-  }, []);
-
-  // Druck bestellen: create order in DB + render file client-side for admin fulfillment
+  }, [userOverlay, colorEnhance, userPhotoImg]);
+  // Druck bestellen: create order in DB + render file client-side for admin fulfillmentt
   const [printolinoLoading, setPrintolinoLoading] = useState(false);
   const [printolinoSuccess, setPrintolinoSuccess] = useState(false);
   const handlePrintolinoOrder = useCallback(async () => {
