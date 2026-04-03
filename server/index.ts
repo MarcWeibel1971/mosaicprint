@@ -2093,10 +2093,11 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
     // Join strips vertically
     updateProgress(88, 'Strips zusammenfuegen...');
     let yOff = 0;
-    const compositeStrips = [];
+    const compositeStrips: any[] = [];
     for (const sf of stripFiles) {
-      const meta = await sharp(sf).metadata();
-      compositeStrips.push({ input: sf, top: yOff, left: 0 });
+      // limitInputPixels:false required for strips that may exceed Sharp's default 268MP limit
+      const meta = await sharp(sf, { limitInputPixels: false }).metadata();
+      compositeStrips.push({ input: sf, top: yOff, left: 0, limitInputPixels: false });
       yOff += meta.height ?? 0;
     }
 
