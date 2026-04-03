@@ -682,6 +682,12 @@ export default function Studio() {
   const [wandActive, setWandActive] = useState(false);
   const [wandProgress, setWandProgress] = useState(0);
   const [wandStats, setWandStats] = useState<{corrected: number; total: number; avgDeltaE: number} | null>(null);
+  // Zauberstab Vor-/Nachher-Vergleich
+  const wandBeforeRef = useRef<ImageData | null>(null); // Canvas-Snapshot vor der Korrektur
+  const [wandSplitPos, setWandSplitPos] = useState(50); // Split-Slider Position 0-100%
+  const [wandShowCompare, setWandShowCompare] = useState(false); // Zeige Vor-/Nachher-Vergleich
+  const wandBeforeCanvasRef = useRef<HTMLCanvasElement | null>(null); // Off-screen Canvas für Vorher-Bild
+  const wandSplitDragging = useRef(false);
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
   const [userOverlayUrl, setUserOverlayUrl] = useState<string | null>(null); // data URL of target photo at canvas aspect ratio
   const [compareMode, setCompareMode] = useState(false);
@@ -1580,11 +1586,22 @@ export default function Studio() {
     setWandActive(true);
     setWandProgress(0);
     setWandStats(null);
+    setWandShowCompare(false);
     tileShiftsRef.current = null;
     setTileShifts(null);
     try {
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('No canvas context');
+      // Snapshot des Canvas vor der Korrektur für Vor-/Nachher-Vergleich
+      const beforeSnap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      wandBeforeRef.current = beforeSnap;
+      // Off-screen Canvas für das Vorher-Bild
+      const beforeCanvas = document.createElement('canvas');
+      beforeCanvas.width = canvas.width;
+      beforeCanvas.height = canvas.height;
+      const beforeCtx = beforeCanvas.getContext('2d');
+      if (beforeCtx) beforeCtx.putImageData(beforeSnap, 0, 0);
+      wandBeforeCanvasRef.current = beforeCanvas;
       const shifts = new Float32Array(total * 3);
       let correctedCount = 0;
       let totalDeltaE = 0;
@@ -1660,16 +1677,35 @@ export default function Studio() {
       tileShiftsRef.current = shifts;
       setTileShifts(shifts);
       setWandStats({ corrected: correctedCount, total, avgDeltaE: totalDeltaE / total });
+      setWandSplitPos(50);
+      setWandShowCompare(true); // Zeige Vor-/Nachher-Vergleich
     } finally {
       setWandActive(false);
     }
   }, []);
 
+  // Zauberstab: Korrektur bestätigen (Snapshot verwerfen)
+  const confirmWand = useCallback(() => {
+    wandBeforeRef.current = null;
+    wandBeforeCanvasRef.current = null;
+    setWandShowCompare(false);
+  }, []);
+
+  // Zauberstab: Korrektur rükgängig machen (Canvas-Snapshot wiederherstellen)
   const resetWand = useCallback(() => {
+    const canvas = canvasRef.current;
+    const before = wandBeforeRef.current;
+    if (canvas && before) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.putImageData(before, 0, 0);
+    }
+    wandBeforeRef.current = null;
+    wandBeforeCanvasRef.current = null;
     tileShiftsRef.current = null;
     setTileShifts(null);
     setWandStats(null);
     setWandProgress(0);
+    setWandShowCompare(false);
   }, []);
 
   // Reset hi-res when new mosaic is renderedd
@@ -6633,6 +6669,74 @@ export default function Studio() {
                       }}
                     />
                   )}
+                  {/* Zauberstab Vor-/Nachher Split-View Overlay */}
+                  {wandShowCompare && wandBeforeCanvasRef.current && (() => {
+                    const displayW = mosaicParamsRef.current ? Math.round(mosaicParamsRef.current.canvasW * ((mosaicParamsRef.current as any)._displayScale ?? 0.5)) : 0;
+                    const displayH = mosaicParamsRef.current ? Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5)) : 0;
+                    const splitX = Math.round(displayW * wandSplitPos / 100);
+                    return (
+                      <>
+                        {/* Vorher-Bild: links vom Splitter, via clip */}
+                        <canvas
+                          ref={(el) => {
+                            if (el && wandBeforeCanvasRef.current) {
+                              el.width = wandBeforeCanvasRef.current.width;
+                              el.height = wandBeforeCanvasRef.current.height;
+                              const ctx2 = el.getContext('2d');
+                              if (ctx2) ctx2.drawImage(wandBeforeCanvasRef.current, 0, 0);
+                            }
+                          }}
+                          style={{
+                            position: "absolute", top: 0, left: 0,
+                            width: `${displayW}px`, height: `${displayH}px`,
+                            clipPath: `inset(0 ${displayW - splitX}px 0 0)`,
+                            pointerEvents: "none",
+                            maxWidth: "none",
+                          }}
+                        />
+                        {/* Trennlinie */}
+                        <div style={{
+                          position: "absolute", top: 0, left: `${splitX}px`, width: 2, height: `${displayH}px`,
+                          background: "white", boxShadow: "0 0 6px rgba(0,0,0,0.5)",
+                          pointerEvents: "none",
+                        }} />
+                        {/* Labels */}
+                        <div style={{ position: "absolute", top: 8, left: Math.max(4, splitX - 70), pointerEvents: "none" }}>
+                          <span style={{ background: "rgba(0,0,0,0.55)", color: "white", fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 6 }}>Vorher</span>
+                        </div>
+                        <div style={{ position: "absolute", top: 8, left: Math.min(displayW - 70, splitX + 6), pointerEvents: "none" }}>
+                          <span style={{ background: "rgba(109,40,217,0.8)", color: "white", fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 6 }}>Nachher</span>
+                        </div>
+                        {/* Ziehbarer Splitter-Handle */}
+                        <div
+                          style={{
+                            position: "absolute", top: "50%", left: `${splitX - 14}px`,
+                            width: 28, height: 28, borderRadius: "50%",
+                            background: "white", boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+                            transform: "translateY(-50%)",
+                            cursor: "ew-resize",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            fontSize: 14, color: "#6d28d9", fontWeight: 700, userSelect: "none",
+                            zIndex: 10,
+                          }}
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            wandSplitDragging.current = true;
+                            const onMove = (ev: MouseEvent) => {
+                              if (!wandSplitDragging.current) return;
+                              const rect = (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect();
+                              if (!rect) return;
+                              const pct = Math.max(5, Math.min(95, ((ev.clientX - rect.left) / rect.width) * 100));
+                              setWandSplitPos(pct);
+                            };
+                            const onUp = () => { wandSplitDragging.current = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+                            window.addEventListener('mousemove', onMove);
+                            window.addEventListener('mouseup', onUp);
+                          }}
+                        >⇔</div>
+                      </>
+                    );
+                  })()}
                 </div>
                 {/* Hi-Res loading overlay - fixed position in viewport, not affected by zoom */}
                 {hiResLoading && (
@@ -6739,7 +6843,7 @@ export default function Studio() {
             {/* Zauberstab: lokale per-Tile LAB-Korrektur */}
             {ready && cellLabRef.current.length > 0 && (
               <div className="mb-4">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <button
                     disabled={wandActive}
                     onClick={handleMagicWand}
@@ -6749,13 +6853,33 @@ export default function Studio() {
                     <span className="text-base">✨</span>
                     {wandActive ? `Optimiere... ${wandProgress}%` : 'Auto-Optimieren'}
                   </button>
-                  {tileShifts && !wandActive && (
+                  {/* Bestätigen/Rückgängig-Buttons nach der Korrektur */}
+                  {tileShifts && !wandActive && wandShowCompare && (
+                    <>
+                      <button
+                        onClick={confirmWand}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-green-600 text-white text-xs font-semibold rounded-xl hover:bg-green-700 transition-all shadow-sm"
+                        title="Korrektur übernehmen"
+                      >
+                        <span>✓</span> Bestätigen
+                      </button>
+                      <button
+                        onClick={resetWand}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 text-gray-600 text-xs font-medium rounded-xl hover:bg-gray-50 transition-all"
+                        title="Optimierung rückgängig machen und Original wiederherstellen"
+                      >
+                        <span>↩</span> Rückgängig
+                      </button>
+                    </>
+                  )}
+                  {/* Nur Rückgängig wenn bereits bestätigt */}
+                  {tileShifts && !wandActive && !wandShowCompare && (
                     <button
                       onClick={resetWand}
                       className="flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 text-gray-600 text-xs font-medium rounded-xl hover:bg-gray-50 transition-all"
-                      title="Zauberstab-Korrektur rückgängig machen"
+                      title="Optimierung rückgängig machen"
                     >
-                      <span>↩</span> Zurücksetzen
+                      <span>↩</span> Rückgängig
                     </button>
                   )}
                 </div>
@@ -6764,9 +6888,15 @@ export default function Studio() {
                     <div className="bg-purple-500 h-1.5 rounded-full transition-all" style={{ width: `${wandProgress}%` }} />
                   </div>
                 )}
-                {wandStats && !wandActive && (
+                {wandStats && !wandActive && wandShowCompare && (
                   <p className="mt-1.5 text-xs text-purple-700">
                     ✓ {wandStats.corrected} von {wandStats.total} Tiles korrigiert · Ø Delta-E: {wandStats.avgDeltaE.toFixed(1)}
+                    <span className="ml-2 text-purple-500">← Trennlinie im Bild ziehen für Vor-/Nachher-Vergleich</span>
+                  </p>
+                )}
+                {wandStats && !wandActive && !wandShowCompare && (
+                  <p className="mt-1.5 text-xs text-green-700">
+                    ✓ Optimierung bestätigt · {wandStats.corrected} von {wandStats.total} Tiles korrigiert
                   </p>
                 )}
               </div>
