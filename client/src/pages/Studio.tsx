@@ -5450,6 +5450,35 @@ export default function Studio() {
     })();
   }, [searchParams, user, authHeaders]);
 
+  // Admin-Order-Einstellungen laden: wenn orderId in URL, lade algoSettings aus renderParams der Bestellung
+  // und schreibe sie in localStorage, damit renderMosaicClientSide die richtigen Kunden-Einstellungen verwendet.
+  useEffect(() => {
+    const orderId = searchParams.get('orderId');
+    if (!orderId) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/admin/orders/${orderId}`);
+        const result = await res.json();
+        if (!result.ok || !result.order) return;
+        const rp = typeof result.order.render_params === 'string'
+          ? JSON.parse(result.order.render_params)
+          : result.order.render_params;
+        if (!rp) return;
+        // Restore algoSettings from order renderParams into localStorage
+        if (rp.algoSettings && Object.keys(rp.algoSettings).length > 0) {
+          localStorage.setItem('mosaicprint_algo_settings', JSON.stringify(rp.algoSettings));
+          console.log('[AdminOrder] algoSettings restored from order renderParams:', rp.algoSettings);
+        }
+        // Restore slider values from renderParams (override project data if present)
+        if (rp.userOverlay !== undefined) setUserOverlay(rp.userOverlay);
+        if (rp.colorEnhance !== undefined) { setColorEnhance(rp.colorEnhance); colorEnhanceRef.current = rp.colorEnhance; }
+      } catch (e) {
+        console.warn('[AdminOrder] Failed to load order settings:', e);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   // Print Export: high-quality render with 128px tiles
   // Two modes:
   // - Preview (paid=false): uses existing canvas, adds watermark

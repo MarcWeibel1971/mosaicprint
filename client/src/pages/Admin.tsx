@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Database, RefreshCw, Upload, Image as ImageIcon, Save, CheckCircle, XCircle,
   Zap, Camera, Settings, Grid, BarChart2, Filter, ChevronLeft, ChevronRight, Trash2, X, Download, FileText, AlertTriangle,
-  Users, Link, Plus, QrCode, Eye
+  Users, Link, Plus, QrCode, Eye, SlidersHorizontal
 } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -6443,6 +6443,7 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+  const [detailOrder, setDetailOrder] = useState<OrderItem | null>(null)
 
   const deleteOrder = async (orderId: number) => {
     setDeletingOrderId(orderId)
@@ -6586,6 +6587,63 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
 
   return (
     <div className="space-y-6">
+      {/* Einstellungs-Detail-Modal */}
+      {detailOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setDetailOrder(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 p-6 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <SlidersHorizontal className="w-5 h-5 text-indigo-600" />
+                Einstellungen – Bestellung #{detailOrder.id}
+              </h3>
+              <button onClick={() => setDetailOrder(null)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+            </div>
+            {detailOrder.render_params ? (() => {
+              const rp = detailOrder.render_params as Record<string, unknown>;
+              const algo = (rp.algoSettings ?? {}) as Record<string, unknown>;
+              return (
+                <div className="space-y-4">
+                  <div className="bg-gray-50 rounded-xl p-4">
+                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Mosaik-Raster</p>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <span className="text-gray-500">Spalten × Zeilen</span><span className="font-semibold">{String(rp.cols ?? '–')} × {String(rp.rows ?? '–')}</span>
+                      <span className="text-gray-500">Ausgabe</span><span className="font-semibold">{rp.outputWidth && rp.outputHeight ? `${Number(rp.outputWidth).toLocaleString()} × ${Number(rp.outputHeight).toLocaleString()} px` : '–'}</span>
+                      <span className="text-gray-500">Format</span><span className="font-semibold">{String(rp.format ?? 'jpg').toUpperCase()}</span>
+                    </div>
+                  </div>
+                  <div className="bg-indigo-50 rounded-xl p-4">
+                    <p className="text-xs font-bold text-indigo-500 uppercase tracking-wider mb-3">Overlay & Farbkorrektur</p>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <span className="text-gray-500">Foto-Overlay</span><span className="font-semibold text-indigo-700">{rp.userOverlay !== undefined ? `${Math.round(Number(rp.userOverlay))}%` : '–'}</span>
+                      <span className="text-gray-500">Color Enhance</span><span className="font-semibold text-purple-700">{rp.colorEnhance !== undefined ? `${Math.round(Number(rp.colorEnhance))}%` : '–'}</span>
+                    </div>
+                  </div>
+                  {Object.keys(algo).length > 0 && (
+                    <div className="bg-green-50 rounded-xl p-4">
+                      <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-3">Algorithmus-Einstellungen</p>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        {algo.histogramBlend !== undefined && <><span className="text-gray-500">Histogram Blend</span><span className="font-semibold">{String(algo.histogramBlend)}</span></>}
+                        {algo.contrastBoost !== undefined && <><span className="text-gray-500">Kontrast Boost</span><span className="font-semibold">{String(algo.contrastBoost)}</span></>}
+                        {algo.baseOverlay !== undefined && <><span className="text-gray-500">Base Overlay</span><span className="font-semibold">{String(algo.baseOverlay)}</span></>}
+                        {algo.edgeBoost !== undefined && <><span className="text-gray-500">Edge Boost</span><span className="font-semibold">{String(algo.edgeBoost)}</span></>}
+                        {algo.overlayMode !== undefined && <><span className="text-gray-500">Overlay Modus</span><span className="font-semibold">{String(algo.overlayMode)}</span></>}
+                        {algo.neighborRadius !== undefined && <><span className="text-gray-500">Neighbor Radius</span><span className="font-semibold">{String(algo.neighborRadius)}</span></>}
+                        {algo.neighborPenalty !== undefined && <><span className="text-gray-500">Neighbor Penalty</span><span className="font-semibold">{String(algo.neighborPenalty)}</span></>}
+                        {algo.brightnessWeight !== undefined && <><span className="text-gray-500">Brightness Weight</span><span className="font-semibold">{String(algo.brightnessWeight)}</span></>}
+                        {algo.labWeight !== undefined && <><span className="text-gray-500">LAB Weight</span><span className="font-semibold">{String(algo.labWeight)}</span></>}
+                        {algo.enableRotation !== undefined && <><span className="text-gray-500">Rotation</span><span className="font-semibold">{algo.enableRotation ? 'Ja' : 'Nein'}</span></>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })() : (
+              <p className="text-sm text-gray-400">Keine Render-Parameter gespeichert.</p>
+            )}
+            <button onClick={() => setDetailOrder(null)} className="mt-6 w-full py-2.5 bg-gray-100 text-gray-700 font-semibold rounded-xl hover:bg-gray-200 text-sm">Schliessen</button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-gray-900">Kundenbestellungen</h2>
@@ -6779,6 +6837,16 @@ function OrdersPanel({ onMessage }: { onMessage: (m: { text: string; type: 'succ
                 >
                   <Eye className="w-3.5 h-3.5" />
                   Im Studio öffnen
+                </button>
+              )}
+              {/* Einstellungs-Detail-Button */}
+              {order.render_params && (
+                <button
+                  onClick={() => setDetailOrder(order)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 text-xs font-semibold rounded-lg hover:bg-indigo-100"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  Einstellungen
                 </button>
               )}
 

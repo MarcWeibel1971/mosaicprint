@@ -2779,6 +2779,17 @@ app.get('/api/admin/orders', async (_req, res) => {
     res.status(500).json({ error: String(e) });
   }
 });
+// GET /api/admin/orders/:id – return a single order (for Studio admin mode to load algoSettings)
+app.get('/api/admin/orders/:id', async (req, res) => {
+  try {
+    const pool = db.getPool();
+    const result = await pool.query('SELECT * FROM mosaic_orders WHERE id = $1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ ok: false, error: 'Bestellung nicht gefunden' });
+    res.json({ ok: true, order: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
 
 // GET /api/admin/orders/:id/download – proxy R2 file as attachment (avoids CORS issues)
 app.get('/api/admin/orders/:id/download', async (req, res) => {
