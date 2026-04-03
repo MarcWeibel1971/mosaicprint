@@ -688,6 +688,8 @@ export default function Studio() {
   const [wandShowCompare, setWandShowCompare] = useState(false); // Zeige Vor-/Nachher-Vergleich
   const wandBeforeCanvasRef = useRef<HTMLCanvasElement | null>(null); // Off-screen Canvas für Vorher-Bild
   const wandSplitDragging = useRef(false);
+  const wandSplitContainerRef = useRef<HTMLDivElement | null>(null); // Container für Split-View (für getBoundingClientRect)
+  const wandSplitCanvasElRef = useRef<HTMLCanvasElement | null>(null); // DOM-Canvas des Before-Bildes
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
   const [userOverlayUrl, setUserOverlayUrl] = useState<string | null>(null); // data URL of target photo at canvas aspect ratio
   const [compareMode, setCompareMode] = useState(false);
@@ -6675,10 +6677,14 @@ export default function Studio() {
                     const displayH = mosaicParamsRef.current ? Math.round(mosaicParamsRef.current.canvasH * ((mosaicParamsRef.current as any)._displayScale ?? 0.5)) : 0;
                     const splitX = Math.round(displayW * wandSplitPos / 100);
                     return (
-                      <>
+                      <div
+                        ref={wandSplitContainerRef}
+                        style={{ position: "absolute", top: 0, left: 0, width: `${displayW}px`, height: `${displayH}px`, pointerEvents: "none" }}
+                      >
                         {/* Vorher-Bild: links vom Splitter, via clip */}
                         <canvas
                           ref={(el) => {
+                            wandSplitCanvasElRef.current = el;
                             if (el && wandBeforeCanvasRef.current) {
                               el.width = wandBeforeCanvasRef.current.width;
                               el.height = wandBeforeCanvasRef.current.height;
@@ -6707,7 +6713,7 @@ export default function Studio() {
                         <div style={{ position: "absolute", top: 8, left: Math.min(displayW - 70, splitX + 6), pointerEvents: "none" }}>
                           <span style={{ background: "rgba(109,40,217,0.8)", color: "white", fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 6 }}>Nachher</span>
                         </div>
-                        {/* Ziehbarer Splitter-Handle */}
+                        {/* Ziehbarer Splitter-Handle: pointerEvents: auto so it can be dragged */}
                         <div
                           style={{
                             position: "absolute", top: "50%", left: `${splitX - 14}px`,
@@ -6718,13 +6724,15 @@ export default function Studio() {
                             display: "flex", alignItems: "center", justifyContent: "center",
                             fontSize: 14, color: "#6d28d9", fontWeight: 700, userSelect: "none",
                             zIndex: 10,
+                            pointerEvents: "auto",
                           }}
                           onMouseDown={(e) => {
                             e.stopPropagation();
                             wandSplitDragging.current = true;
                             const onMove = (ev: MouseEvent) => {
                               if (!wandSplitDragging.current) return;
-                              const rect = (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect();
+                              // Use wandSplitContainerRef for reliable rect
+                              const rect = wandSplitContainerRef.current?.getBoundingClientRect();
                               if (!rect) return;
                               const pct = Math.max(5, Math.min(95, ((ev.clientX - rect.left) / rect.width) * 100));
                               setWandSplitPos(pct);
@@ -6734,7 +6742,7 @@ export default function Studio() {
                             window.addEventListener('mouseup', onUp);
                           }}
                         >⇔</div>
-                      </>
+                      </div>
                     );
                   })()}
                 </div>
