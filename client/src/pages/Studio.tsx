@@ -676,6 +676,12 @@ export default function Studio() {
   const [editRows, setEditRows] = useState<number | null>(null); // editable rows in stats modal
   const [userOverlay, setUserOverlay] = useState(0); // 0-100: how much original photo shows through
   const [colorEnhance, setColorEnhance] = useState(0); // 0-100: tint tiles toward target color
+  // Zauberstab: per-tile LAB shift corrections [dL, dA, dB] per cell index
+  const [tileShifts, setTileShifts] = useState<Float32Array | null>(null);
+  const tileShiftsRef = useRef<Float32Array | null>(null);
+  const [wandActive, setWandActive] = useState(false);
+  const [wandProgress, setWandProgress] = useState(0);
+  const [wandStats, setWandStats] = useState<{corrected: number; total: number; avgDeltaE: number} | null>(null);
   const [colorEnhanceUrl, setColorEnhanceUrl] = useState<string | null>(null); // data URL of target color canvas
   const [userOverlayUrl, setUserOverlayUrl] = useState<string | null>(null); // data URL of target photo at canvas aspect ratio
   const [compareMode, setCompareMode] = useState(false);
@@ -1562,7 +1568,111 @@ export default function Studio() {
   // Keep ref in sync so triggerHiResRender can call it as fallback
   triggerClientHiResRef.current = triggerClientHiResRender;
 
-  // Reset hi-res when new mosaic is rendered
+  // ─── ZAUBERSTAB: per-tile LAB-Shift-Analyse und -Korrektur ──────────────────
+  const handleMagicWand = useCallback(async () => {
+    const canvas = canvasRef.current;
+    const params = mosaicParamsRef.current;
+    const cellLab = cellLabRef.current;
+    const assignment = assignmentRef.current;
+    if (!canvas || !params || !cellLab.length || !assignment.length) return;
+    const { cols, rows, tilePx } = params;
+    const total = cols * rows;
+    setWandActive(true);
+    setWandProgress(0);
+    setWandStats(null);
+    tileShiftsRef.current = null;
+    setTileShifts(null);
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('No canvas context');
+      const shifts = new Float32Array(total * 3);
+      let correctedCount = 0;
+      let totalDeltaE = 0;
+      const THRESHOLD = 8;
+      const STRENGTH = 0.55;
+      const BATCH = 50;
+      for (let ci = 0; ci < total; ci++) {
+        if (ci % BATCH === 0) {
+          setWandProgress(Math.round((ci / total) * 85));
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const col = ci % cols;
+        const row = Math.floor(ci / cols);
+        const x = col * tilePx;
+        const y = row * tilePx;
+        const SAMPLES = 4;
+        const step = Math.max(1, Math.floor(tilePx / SAMPLES));
+        let sumR = 0, sumG = 0, sumB = 0, count = 0;
+        try {
+          const imgData = ctx.getImageData(x, y, tilePx, tilePx);
+          const d = imgData.data;
+          const w = imgData.width;
+          for (let sy = 0; sy < SAMPLES; sy++) {
+            for (let sx = 0; sx < SAMPLES; sx++) {
+              const px = Math.min(sx * step, w - 1);
+              const py = Math.min(sy * step, imgData.height - 1);
+              const pi = (py * w + px) * 4;
+              sumR += d[pi]; sumG += d[pi+1]; sumB += d[pi+2]; count++;
+            }
+          }
+        } catch { continue; }
+        if (count === 0) continue;
+        const avgR = sumR / count, avgG = sumG / count, avgB = sumB / count;
+        const [tL, tA, tB] = cellLab.length > ci ? cellLab[ci] : [50, 0, 0];
+        const [rL, rA, rB] = rgbToLab(avgR, avgG, avgB);
+        const dE = Math.sqrt((tL-rL)**2 + (tA-rA)**2 + (tB-rB)**2);
+        totalDeltaE += dE;
+        if (dE > THRESHOLD) {
+          shifts[ci * 3]     = (tL - rL) * STRENGTH;
+          shifts[ci * 3 + 1] = (tA - rA) * STRENGTH;
+          shifts[ci * 3 + 2] = (tB - rB) * STRENGTH;
+          correctedCount++;
+        }
+      }
+      setWandProgress(88);
+      for (let ci = 0; ci < total; ci++) {
+        if (ci % BATCH === 0) {
+          setWandProgress(88 + Math.round((ci / total) * 10));
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const dL = shifts[ci * 3];
+        const dA = shifts[ci * 3 + 1];
+        const dBv = shifts[ci * 3 + 2];
+        if (dL === 0 && dA === 0 && dBv === 0) continue;
+        const col = ci % cols;
+        const row = Math.floor(ci / cols);
+        const x = col * tilePx, y = row * tilePx;
+        try {
+          const imgData = ctx.getImageData(x, y, tilePx, tilePx);
+          const d = imgData.data;
+          for (let pi = 0; pi < d.length; pi += 4) {
+            const [l, a, b] = rgbToLab(d[pi], d[pi+1], d[pi+2]);
+            const newL = Math.max(0, Math.min(100, l + dL));
+            const newA = Math.max(-128, Math.min(127, a + dA));
+            const newBv = Math.max(-128, Math.min(127, b + dBv));
+            const [nr, ng, nb] = labToRgb(newL, newA, newBv);
+            d[pi] = nr; d[pi+1] = ng; d[pi+2] = nb;
+          }
+          ctx.putImageData(imgData, x, y);
+        } catch { continue; }
+      }
+      setWandProgress(100);
+      tileShiftsRef.current = shifts;
+      setTileShifts(shifts);
+      setWandStats({ corrected: correctedCount, total, avgDeltaE: totalDeltaE / total });
+    } finally {
+      setWandActive(false);
+    }
+  }, []);
+
+  const resetWand = useCallback(() => {
+    tileShiftsRef.current = null;
+    setTileShifts(null);
+    setWandStats(null);
+    setWandProgress(0);
+  }, []);
+
+  // Reset hi-res when new mosaic is renderedd
   const resetHiRes = () => {
     setHiResReady(false);
     setHiResLoading(false);
@@ -6626,6 +6736,41 @@ export default function Studio() {
               </div>
             )}
 
+            {/* Zauberstab: lokale per-Tile LAB-Korrektur */}
+            {ready && cellLabRef.current.length > 0 && (
+              <div className="mb-4">
+                <div className="flex items-center gap-3">
+                  <button
+                    disabled={wandActive}
+                    onClick={handleMagicWand}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-500 to-purple-600 text-white text-sm font-semibold rounded-xl shadow-sm hover:from-violet-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    title="Analysiert jedes Tile und korrigiert Farben lokal für ein natürlicheres Ergebnis"
+                  >
+                    <span className="text-base">✨</span>
+                    {wandActive ? `Optimiere... ${wandProgress}%` : 'Auto-Optimieren'}
+                  </button>
+                  {tileShifts && !wandActive && (
+                    <button
+                      onClick={resetWand}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 text-gray-600 text-xs font-medium rounded-xl hover:bg-gray-50 transition-all"
+                      title="Zauberstab-Korrektur rückgängig machen"
+                    >
+                      <span>↩</span> Zurücksetzen
+                    </button>
+                  )}
+                </div>
+                {wandActive && (
+                  <div className="mt-2 w-full bg-purple-100 rounded-full h-1.5">
+                    <div className="bg-purple-500 h-1.5 rounded-full transition-all" style={{ width: `${wandProgress}%` }} />
+                  </div>
+                )}
+                {wandStats && !wandActive && (
+                  <p className="mt-1.5 text-xs text-purple-700">
+                    ✓ {wandStats.corrected} von {wandStats.total} Tiles korrigiert · Ø Delta-E: {wandStats.avgDeltaE.toFixed(1)}
+                  </p>
+                )}
+              </div>
+            )}
             {/* Admin: Vorschau in Bestellung speichern + Printfile generieren */}
             {adminOrderId && ready && (
               <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-3">
