@@ -6698,6 +6698,7 @@ export default function Studio() {
                             clipPath: `inset(0 ${displayW - splitX}px 0 0)`,
                             pointerEvents: "none",
                             maxWidth: "none",
+                            imageRendering: zoom > 1 && !distancePreview ? "pixelated" : "auto",
                           }}
                         />
                         {/* Trennlinie */}
