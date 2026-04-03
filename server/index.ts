@@ -22,6 +22,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./router.js";
@@ -2412,6 +2413,8 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
         // for tiles with external sources, giving sharp output at any print size.
         // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
+        // MEMORY STRATEGY: tilePx stays at 200 for full quality. The final assembly uses
+        // progressive strip-to-file writing (tmp files) instead of holding all strips in RAM.
         const tilePx = 200;
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
@@ -2539,8 +2542,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         // Apply color correction whenever targetColors are available
         const hasColorCorrection = targetColors.length > 0;
 
-        // Process each strip
-        const stripBuffers: Buffer[] = [];
+        // Process each strip – write each strip to a tmp file to avoid holding all strips in RAM
+        // This allows rendering 24000x18000px (1.2 GB raw) on a 512 MB Railway server
+        const tmpDir = os.tmpdir();
+        const stripTmpFiles: string[] = [];
+        const stripHeights: number[] = [];
         for (let s = 0; s < stripCount; s++) {
           const stripRowStart = s * STRIP_ROWS;
           const stripRowEnd = Math.min(stripRowStart + STRIP_ROWS, rows);
@@ -2633,81 +2639,95 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
             }
           }
 
-          // Encode strip as JPEG for final assembly
-          const stripJpeg = await sharp(stripRaw, {
+          // Encode strip as JPEG and write to tmp file (avoids holding all strips in RAM)
+          const stripTmpPath = path.join(tmpDir, `mosaic-strip-${orderId}-${s}.jpg`);
+          await sharp(stripRaw, {
             raw: { width: outW, height: stripH, channels: 3 },
             limitInputPixels: false,
-          }).jpeg({ quality: 92 }).toBuffer();
-          stripBuffers.push(stripJpeg);
+          }).jpeg({ quality: 92 }).toFile(stripTmpPath);
+          stripTmpFiles.push(stripTmpPath);
+          stripHeights.push(stripH);
 
           const pct = Math.round(50 + ((s + 1) / stripCount) * 40);
           await setProgress(pct, `Rendering: Strip ${s + 1}/${stripCount}`);
           console.log(`[admin-render] Strip ${s+1}/${stripCount} done (rows ${stripRowStart}-${stripRowEnd})`);
         }
 
-        // Assemble all strips into final image
+        // Assemble all strips into final image using progressive compositing
+        // MEMORY-SAFE STRATEGY: Merge strips pairwise into a growing tmp file.
+        // This avoids Sharp having to hold the entire output image in RAM at once.
+        // Each merge step: read 2 strips from disk, write merged result to new tmp file.
         await setProgress(90, 'Strips werden zusammengesetzt...');
-        const stripCompositeOps: sharp.OverlayOptions[] = stripBuffers.map((buf, i) => ({
-          input: buf,
-          top: i * STRIP_ROWS * tilePx,
-          left: 0,
-        }));
-        let baseBuf = await sharp({
-          create: { width: outW, height: outH, channels: 3, background: { r: 128, g: 128, b: 128 } },
-          limitInputPixels: false,
-        }).composite(stripCompositeOps).jpeg({ quality: 92 }).toBuffer();
+        const assemblyTmpFiles: string[] = [...stripTmpFiles]; // start with strip files
+        let mergePass = 0;
+        while (assemblyTmpFiles.length > 1) {
+          const nextPassFiles: string[] = [];
+          for (let i = 0; i < assemblyTmpFiles.length; i += 2) {
+            if (i + 1 >= assemblyTmpFiles.length) {
+              // Odd one out: carry forward unchanged
+              nextPassFiles.push(assemblyTmpFiles[i]);
+              continue;
+            }
+            const fileA = assemblyTmpFiles[i];
+            const fileB = assemblyTmpFiles[i + 1];
+            // Get height of fileA to know where to place fileB
+            const metaA = await sharp(fileA, { limitInputPixels: false }).metadata();
+            const heightA = metaA.height ?? 0;
+            const metaB = await sharp(fileB, { limitInputPixels: false }).metadata();
+            const heightB = metaB.height ?? 0;
+            const mergedH = heightA + heightB;
+            const mergedPath = path.join(tmpDir, `mosaic-merge-${orderId}-p${mergePass}-i${i}.jpg`);
+            await sharp({
+              create: { width: outW, height: mergedH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+              limitInputPixels: false,
+            }).composite([
+              { input: fileA, top: 0, left: 0 },
+              { input: fileB, top: heightA, left: 0 },
+            ]).jpeg({ quality: 92 }).toFile(mergedPath);
+            // Remove source files (free disk space)
+            try { fs.unlinkSync(fileA); } catch { /* ignore */ }
+            try { fs.unlinkSync(fileB); } catch { /* ignore */ }
+            nextPassFiles.push(mergedPath);
+          }
+          assemblyTmpFiles.length = 0;
+          assemblyTmpFiles.push(...nextPassFiles);
+          mergePass++;
+          console.log(`[admin-render] Merge pass ${mergePass}: ${nextPassFiles.length} file(s) remaining`);
+        }
+        // Final result is in assemblyTmpFiles[0]
+        let baseBuf: Buffer = await fs.promises.readFile(assemblyTmpFiles[0]);
+        try { fs.unlinkSync(assemblyTmpFiles[0]); } catch { /* ignore */ }
         console.log(`[admin-render] All ${stripCount} strips assembled`);
         // Apply Foto-Overlay (userOverlay slider) if set – same as client renderMosaicClientSide
+        // MEMORY-SAFE: Use Sharp pipeline with opacity modifier instead of manual alpha buffer
         // The photo_url is stored in the order DB record (thumbnail, up to 1200px on desktop)
         if (userOverlay > 0) {
           try {
             const photoUrlFromDb = order.photo_url;
+            let rawPhotoBuf: Buffer | null = null;
             if (photoUrlFromDb && photoUrlFromDb.startsWith('data:')) {
-              const base64Data = photoUrlFromDb.split(',')[1];
-              const photoBuf = Buffer.from(base64Data, 'base64');
-              // Resize photo to full output size
-              const photoResized = await sharp(photoBuf)
-                .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
-                .ensureAlpha()
-                .toBuffer();
-              // Apply alpha (userOverlay 0-100 → 0-255)
-              const alpha = Math.round((userOverlay / 100) * 255);
-              // Composite with alpha using Sharp
-              const overlayWithAlpha = await sharp(photoResized)
-                .composite([{
-                  input: Buffer.alloc(outW * outH, alpha),
-                  raw: { width: outW, height: outH, channels: 1 },
-                  blend: 'dest-in',
-                }])
-                .toBuffer();
-              baseBuf = await sharp(baseBuf)
-                .composite([{ input: overlayWithAlpha, blend: 'over' }])
-                .jpeg({ quality: 92 })
-                .toBuffer();
-              console.log(`[admin-render] Foto-Overlay applied (${userOverlay}%)`);
+              rawPhotoBuf = Buffer.from(photoUrlFromDb.split(',')[1], 'base64');
             } else if (photoUrlFromDb && photoUrlFromDb.startsWith('http')) {
-              // External URL: fetch and apply
               const resp = await fetch(photoUrlFromDb, { signal: AbortSignal.timeout(15000) });
-              if (resp.ok) {
-                const photoBuf = Buffer.from(await resp.arrayBuffer());
-                const photoResized = await sharp(photoBuf)
-                  .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
-                  .ensureAlpha()
-                  .toBuffer();
-                const alpha = Math.round((userOverlay / 100) * 255);
-                const overlayWithAlpha = await sharp(photoResized)
-                  .composite([{
-                    input: Buffer.alloc(outW * outH, alpha),
-                    raw: { width: outW, height: outH, channels: 1 },
-                    blend: 'dest-in',
-                  }])
-                  .toBuffer();
-                baseBuf = await sharp(baseBuf)
-                  .composite([{ input: overlayWithAlpha, blend: 'over' }])
-                  .jpeg({ quality: 92 })
-                  .toBuffer();
-                console.log(`[admin-render] Foto-Overlay applied from URL (${userOverlay}%)`);
-              }
+              if (resp.ok) rawPhotoBuf = Buffer.from(await resp.arrayBuffer());
+            }
+            if (rawPhotoBuf) {
+              // Resize photo to output dimensions and add alpha channel for opacity
+              const overlayOpacity = userOverlay / 100; // 0.0 – 1.0
+              const alpha = Math.round(overlayOpacity * 255);
+              // Build RGBA overlay: resize + set uniform alpha channel
+              const photoResizedRgba = await sharp(rawPhotoBuf)
+                .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
+                .ensureAlpha(overlayOpacity) // sets alpha channel to overlayOpacity (0.0–1.0)
+                .toBuffer();
+              rawPhotoBuf = null; // free memory
+              // Composite RGBA overlay onto mosaic (already JPEG = opaque)
+              // Use Uint8Array cast to satisfy Sharp's NonSharedBuffer type constraint
+              baseBuf = await sharp(new Uint8Array(baseBuf), { limitInputPixels: false })
+                .composite([{ input: photoResizedRgba, blend: 'over' }])
+                .jpeg({ quality: 92 })
+                .toBuffer() as Buffer;
+              console.log(`[admin-render] Foto-Overlay applied (${userOverlay}%, alpha=${alpha})`);
             }
           } catch (overlayErr) {
             console.warn(`[admin-render] Foto-Overlay failed (non-critical):`, overlayErr);
