@@ -2659,7 +2659,12 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                   const avgB = stats.channels[2].mean;
                   const [avgL] = rgbToLabAdmin(avgR, avgG, avgB);
                   const rawLumScale = avgL > 1 ? tL / avgL : 1;
-                  const clampedLumScale = Math.max(0.05, Math.min(4.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));
+                  const isUserTile = tileId < 0;
+                  // User tiles were already selected to match target color – only gentle nudge needed.
+                  // DB tiles may need stronger correction to match the target luminance.
+                  const clampedLumScale = isUserTile
+                    ? Math.max(0.85, Math.min(1.15, rawLumScale))  // ±15% for user tiles (already color-matched)
+                    : Math.max(0.50, Math.min(2.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));  // ±50-100% for DB tiles
                   const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
                   // Step 2: Apply brightness + color correction via Sharp native ops
                   // modulate: adjusts brightness (L channel equivalent)
