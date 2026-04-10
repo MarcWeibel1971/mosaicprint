@@ -2666,17 +2666,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                     ? Math.max(0.85, Math.min(1.15, rawLumScale))  // ±15% for user tiles (already color-matched)
                     : Math.max(0.50, Math.min(2.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));  // ±50-100% for DB tiles
                   const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
-                  // Step 2: Apply brightness + color correction via Sharp native ops
-                  // modulate: adjusts brightness (L channel equivalent)
-                  // tint: multiplies each channel toward target color (approximates AB shift)
-                  // The tint strength is controlled by mixing target and neutral (128,128,128)
-                  const tintStrength = Math.min(0.35, AB_BLEND * 2.5); // 0..0.35
-                  const tintR = Math.round(128 + (tR - 128) * tintStrength);
-                  const tintG = Math.round(128 + (tG - 128) * tintStrength);
-                  const tintB = Math.round(128 + (tBv - 128) * tintStrength);
+                  // Step 2: Apply brightness correction via Sharp modulate (HSL brightness)
+                  // Note: tint() is NOT used – it desaturates tiles. Color shift is handled
+                  // exclusively via soft-light composite overlay below.
                   let pipeline = sharp(jpegBuf, { limitInputPixels: false })
-                    .modulate({ brightness: Math.max(0.1, Math.min(3.5, lumScale)) })
-                    .tint({ r: tintR, g: tintG, b: tintB });
+                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)) });
                   // Step 3: Soft-light overlay (face/edge boost) via composite
                   if (str > 0.01) {
                     const overlayBuf = await sharp({
