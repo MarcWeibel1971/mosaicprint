@@ -1342,6 +1342,84 @@ No explanation, only JSON.`;
   }
 });
 
+// ── Perplexity Keyword Research ───────────────────────────────────────────────
+// POST /api/perplexity-keywords
+// Body: { topic: string, context?: string, count?: number }
+// Returns: { ok: true, keywords: string[], reasoning: string }
+app.post('/api/perplexity-keywords', express.json(), async (req, res) => {
+  try {
+    const PPLX_KEY = process.env.PERPLEXITY_API_KEY;
+    if (!PPLX_KEY) return res.status(500).json({ ok: false, error: 'PERPLEXITY_API_KEY not configured' });
+
+    const { topic, context = '', count = 20 } = req.body ?? {};
+    if (!topic?.trim()) return res.status(400).json({ ok: false, error: 'topic required' });
+
+    const prompt = `You are an expert at finding the best stock photo search keywords for photo mosaic tile collections.
+
+Task: Generate exactly ${count} optimized English search keywords/phrases for importing stock photos that will be used as tiles in a photo mosaic.
+
+Topic/Theme: "${topic}"
+${context ? `Additional context: ${context}` : ''}
+
+Requirements:
+- Each keyword should return diverse, high-quality stock photos
+- Mix specific and general terms for variety
+- Include color descriptors, textures, moods, and compositions
+- Avoid copyrighted terms, brand names, or people's names
+- Prefer terms that work well on Pexels, Unsplash, and Pixabay
+- Keywords should cover different color tones (light, dark, medium) for good mosaic coverage
+- Include some abstract/texture keywords for background tiles
+- Keep each keyword/phrase concise (2-4 words max)
+
+Return ONLY a JSON object with this exact structure:
+{
+  "keywords": ["keyword1", "keyword2", ...],
+  "reasoning": "one sentence explaining the keyword strategy"
+}
+
+No explanation outside the JSON.`;
+
+    const pplxResp = await fetch('https://api.perplexity.ai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${PPLX_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'sonar',
+        input: prompt,
+        text: { format: { type: 'json_object' } },
+        temperature: 0.7,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!pplxResp.ok) {
+      const errText = await pplxResp.text();
+      throw new Error(`Perplexity API failed: ${pplxResp.status} – ${errText.substring(0, 200)}`);
+    }
+
+    const pplxData = await pplxResp.json() as any;
+    // Extract text from output array
+    const rawText = pplxData.output?.find((o: any) => o.type === 'message')?.content?.find((c: any) => c.type === 'output_text')?.text ?? '{}';
+    let parsed: any = {};
+    try { parsed = JSON.parse(rawText); } catch { parsed = {}; }
+
+    const keywords: string[] = Array.isArray(parsed.keywords) ? parsed.keywords.filter((k: any) => typeof k === 'string' && k.trim()) : [];
+    const reasoning: string = parsed.reasoning ?? '';
+
+    if (keywords.length === 0) {
+      throw new Error('Perplexity returned no keywords');
+    }
+
+    console.log(`[Perplexity] Keywords for "${topic}": ${keywords.slice(0, 5).join(', ')}... (${keywords.length} total)`);
+    return res.json({ ok: true, keywords, reasoning });
+  } catch (e: any) {
+    console.error('[Perplexity keywords] Error:', e);
+    return res.status(500).json({ ok: false, error: e.message ?? String(e) });
+  }
+});
+
 // ── Texture Atlas ──────────────────────────────────────────────────────────────
 // GET /api/tile-atlas?theme=&tileSize=64&maxTiles=3000
 // Returns a single sprite-sheet JPEG containing all tiles (or a subset).

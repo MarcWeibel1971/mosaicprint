@@ -753,6 +753,10 @@ export default function Admin() {
   const [customKeywordCount, setCustomKeywordCount] = useState(100)
   const [customKeywordLoading, setCustomKeywordLoading] = useState(false)
   const [customKeywordResult, setCustomKeywordResult] = useState<string>('')
+  const [perplexityTopic, setPerplexityTopic] = useState<string>('')
+  const [perplexityLoading, setPerplexityLoading] = useState(false)
+  const [perplexityReasoning, setPerplexityReasoning] = useState<string>('')
+  const [showPerplexityDialog, setShowPerplexityDialog] = useState(false)
   const [customKeywordPreview, setCustomKeywordPreview] = useState<Array<{query: string; count: number; status: string}>>([])
   // Gezielte Importe (Empfehlungen)
   const [recommendations, setRecommendations] = useState<ImportRecommendation[]>([])
@@ -1363,6 +1367,35 @@ export default function Admin() {
     }, 5000)
   }
 
+  const runPerplexityKeywords = async () => {
+    if (!perplexityTopic.trim() || perplexityLoading) return
+    setPerplexityLoading(true)
+    setPerplexityReasoning('')
+    try {
+      const resp = await fetch('/api/perplexity-keywords', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ topic: perplexityTopic.trim(), count: 20 }),
+      })
+      const data = await resp.json()
+      if (!data.ok) throw new Error(data.error ?? 'Perplexity Fehler')
+      const newKeywords: string[] = data.keywords ?? []
+      setPerplexityReasoning(data.reasoning ?? '')
+      // Append to existing keywords
+      setCustomKeywords(prev => {
+        const existing = prev.trim()
+        const toAdd = newKeywords.join(', ')
+        return existing ? `${existing}, ${toAdd}` : toAdd
+      })
+      setShowPerplexityDialog(false)
+      setPerplexityTopic('')
+    } catch (e: any) {
+      setPerplexityReasoning(`❌ Fehler: ${e.message ?? String(e)}`)
+    } finally {
+      setPerplexityLoading(false)
+    }
+  }
+
   const generateImportReportPdf = async (sess: any, keywords: string[], source: string, countPerKeyword: number) => {
     try {
       const { jsPDF } = await import('jspdf')
@@ -1924,7 +1957,48 @@ export default function Admin() {
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-semibold text-emerald-900">🔍 Eigene Keywords importieren</span>
                   <span className="text-xs text-emerald-600">Kommagetrennte Keywords – jedes Keyword wird separat importiert</span>
+                  <button
+                    onClick={() => setShowPerplexityDialog(v => !v)}
+                    className="ml-auto flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                    title="Perplexity AI generiert optimale Keywords für ein Thema"
+                  >
+                    🔮 Perplexity
+                  </button>
                 </div>
+
+                {/* Perplexity Dialog */}
+                {showPerplexityDialog && (
+                  <div className="mb-3 p-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+                    <p className="text-xs text-indigo-700 font-semibold mb-1">🔮 Perplexity Keyword-Recherche</p>
+                    <p className="text-xs text-indigo-500 mb-2">Beschreibe das Thema oder den Mosaic-Typ – Perplexity generiert 20 optimierte Suchbegriffe.</p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={perplexityTopic}
+                        onChange={e => setPerplexityTopic(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && runPerplexityKeywords()}
+                        placeholder="z.B. Portrait mit Hautton, Landschaft Schweiz, dunkle Texturen..."
+                        className="flex-1 text-sm border border-indigo-300 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        disabled={perplexityLoading}
+                        autoFocus
+                      />
+                      <button
+                        onClick={runPerplexityKeywords}
+                        disabled={perplexityLoading || !perplexityTopic.trim()}
+                        className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-semibold px-4 py-1.5 rounded-lg transition-colors"
+                      >
+                        {perplexityLoading ? <span className="animate-spin inline-block">&#9203;</span> : '🔍'}
+                        {perplexityLoading ? 'Suche...' : 'Keywords generieren'}
+                      </button>
+                    </div>
+                    {perplexityReasoning && (
+                      <p className={`mt-2 text-xs ${perplexityReasoning.startsWith('❌') ? 'text-red-600' : 'text-indigo-600'}`}>
+                        {perplexityReasoning}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <textarea
                   value={customKeywords}
                   onChange={e => setCustomKeywords(e.target.value)}
