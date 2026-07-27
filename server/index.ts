@@ -1781,6 +1781,8 @@ function applyLabColorTransfer(
   edgeMap: number[],
   faceMask: boolean[],
   colorEnhance: number,  // 0-100
+  histogramBlend?: number,  // 0-0.15 (wie Client savedSettings.histogramBlend)
+  contrastBoost?: number,   // z.B. 1.30 (wie Client savedSettings.contrastBoost)
 ): void {
   if (!targetColors?.length || colorEnhance <= 0) return;
 
@@ -1806,11 +1808,13 @@ function applyLabColorTransfer(
   };
 
   const colorEnhanceVal = colorEnhance / 100;
-  const AB_BLEND = 0.12 * colorEnhanceVal;
-  const L_BLEND = 0.40;
+  // histogramBlend-Slider (0-0.15) skaliert AB-/L_BLEND wie im Client (0.10 = volle Staerke)
+  const blendFactor = Math.min(1, (histogramBlend ?? 0) / 0.10);
+  const AB_BLEND = (0.12 + 0.20 * blendFactor) * colorEnhanceVal;
+  const L_BLEND = 0.40 + 0.40 * blendFactor;  // 0.40 Minimum, bis 0.80 bei vollem Blend (wie Client)
   const MAX_COLOR_SHIFT = 15;
   const MAX_BLUE_SHIFT = 5;
-  const cBoost = 1.30;
+  const cBoost = contrastBoost ?? 1.30;
   const satBoost = 0.90 + cBoost * 0.15;
   const REF_SAMPLES = 64;
 
@@ -1913,7 +1917,7 @@ function applyOverlay(
       const tb = targetColors[ci * 3 + 2];
       if (tr === undefined) continue; // no target data for this cell
       const edge = edgeMap[ci] ?? 0;
-      const faceBoost = faceMask[ci] ? 0.25 : 0;
+      const faceBoost = faceMask[ci] ? 0.04 : 0;  // wie Client (fb=0.04), 0.25 war zu aggressiv
       const strength = Math.min(0.85, baseOverlayVal + edge * edgeBoostVal + faceBoost) * strengthScale;
 
       const pyStart = lr * tilePx;
@@ -1945,7 +1949,8 @@ function applyOverlay(
 app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) => {
   const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
     overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask,
-    colorEnhance: clientColorEnhance = 0
+    colorEnhance: clientColorEnhance = 0,
+    histogramBlend: clientHistogramBlend, contrastBoost: clientContrastBoost
   } = req.body as {
     tileIds: number[];
     assignment: number[];
@@ -1961,6 +1966,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
     edgeMap?: number[];
     faceMask?: boolean[];
     colorEnhance?: number;
+    histogramBlend?: number;
+    contrastBoost?: number;
   };
 
   if (!tileIds?.length || !assignment?.length || !cols || !rows) {
@@ -2080,7 +2087,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
         // Apply LAB color transfer first (brightness + color shift per tile)
         if (clientColorEnhance > 0 && targetColors?.length) {
           applyLabColorTransfer(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
-            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance,
+            clientHistogramBlend, clientContrastBoost);
         }
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
           overlayMode as 'softlight' | 'alphablend',
@@ -2145,7 +2153,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
         // Apply LAB color transfer first (brightness + color shift per tile)
         if (clientColorEnhance > 0 && targetColors?.length) {
           applyLabColorTransfer(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
-            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance,
+            clientHistogramBlend, clientContrastBoost);
         }
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',

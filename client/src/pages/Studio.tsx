@@ -1026,6 +1026,9 @@ export default function Studio() {
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
           colorEnhance,
+          // Farbkorrektur-Parameter mitsenden, damit der Server-Render den Client exakt matcht
+          histogramBlend: algoSettings.histogramBlend ?? 0,
+          contrastBoost: algoSettings.contrastBoost ?? 1.30,
         }),
       });
       clearTimeout(timeoutId);
