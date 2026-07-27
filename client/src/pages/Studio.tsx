@@ -4890,11 +4890,16 @@ export default function Studio() {
     const targetZoomedPx = 150;
     const popScale = Math.max(3, targetZoomedPx / cssTileW);
 
-    // Hi-res canvas resolution: must be large enough to look sharp at ~150px CSS display
-    // Use 512px for all devices so the zoomed tile is crisp even on retina screens
-    // 15 tiles × 512×512×4 bytes = 15 MB → unbedenklich auch auf Mobile
-    // iPhone 3× DPR: 512px auf ~150px CSS = 3.4× → Retina-scharf
-    const canvasResPx = 512;
+    // Hi-res canvas resolution: must match device pixels for crisp 1:1 rendering.
+    // Compute final CSS display size early so we can size the canvas to match.
+    const finalSizePx = cssTileW * popScale;  // ~150px
+    const dpr = window.devicePixelRatio || 1;
+    // Canvas backing store = CSS display size × devicePixelRatio (exact device-pixel match).
+    // Floor at 512 for quality on 1× screens; cap at 1024 to limit mobile memory.
+    // e.g. iPhone 3× DPR: ceil(150 * 3) = 450 → clamped to 512
+    // e.g. iPad 2× large tile: ceil(200 * 2) = 400 → clamped to 512
+    // e.g. Desktop 2× DPR large tile: ceil(300 * 2) = 600 → 600
+    const canvasResPx = Math.min(1024, Math.max(512, Math.ceil(finalSizePx * dpr)));
 
     // Create snapshot fallback canvas
     const snapshot = snapshotRef.current;
@@ -5056,10 +5061,13 @@ export default function Studio() {
       // the canvas at 8px and then upscales it → blurry even with 512px internal resolution.
       // Solution: Set CSS size = final zoomed size (cssTileW * popScale ≈ 150px), center it
       // over the tile, and animate scale from 1/popScale → 1 instead of 1 → popScale.
-      const finalSizePx = cssTileW * popScale;
       const offsetLeft = left + cssTileW / 2 - finalSizePx / 2;
       const offsetTop = top + cssTileH / 2 - finalSizePx / 2;
-      tileCanvas.style.cssText = `position:absolute;left:${offsetLeft}px;top:${offsetTop}px;width:${finalSizePx}px;height:${finalSizePx}px;transform-origin:center center;will-change:transform;opacity:0;z-index:10;pointer-events:none;`;
+      // MOBILE FIX: Removed will-change:transform — on mobile Safari/Chrome it causes the
+      // compositor to create a layer texture at CSS pixel size (not device pixels), making
+      // the canvas look blurry even when the backing store has enough resolution.
+      // Added backface-visibility:hidden + image-rendering:auto for crisp compositing.
+      tileCanvas.style.cssText = `position:absolute;left:${offsetLeft}px;top:${offsetTop}px;width:${finalSizePx}px;height:${finalSizePx}px;transform-origin:center center;-webkit-backface-visibility:hidden;backface-visibility:hidden;image-rendering:auto;opacity:0;z-index:10;pointer-events:none;`;
       popContainer.appendChild(tileCanvas);
       tileEls.push(tileCanvas);
     }
@@ -5074,21 +5082,27 @@ export default function Studio() {
       // Canvas CSS size is already the final zoomed size (finalSizePx = cssTileW * popScale)
       // So we animate scale from 1/popScale (= tile size) to 1 (= zoomed size)
       // This ensures the browser rasterizes the canvas at full display size → sharp!
+      // MOBILE FIX: force3D:false prevents GSAP from using translate3d/scale3d which causes
+      // mobile browsers to rasterize the layer at a lower-quality texture resolution.
+      // Using filter:drop-shadow instead of boxShadow avoids expensive per-frame repaints
+      // that degrade rendering quality on mobile GPUs.
       tl.fromTo(tile, {
         opacity: 0, scale: 1 / popScale,
-        boxShadow: 'none',
+        filter: 'drop-shadow(0 0 0 rgba(0,0,0,0))',
       }, {
         opacity: 1, scale: 1,
-        boxShadow: '0 12px 40px rgba(0,0,0,0.7)',
+        filter: 'drop-shadow(0 12px 20px rgba(0,0,0,0.7))',
         duration: 3.0,
         ease: 'power2.out',
+        force3D: false,
       }, delay);
       // Hold visible (1s), then shrink back + fade (2s)
       tl.to(tile, {
         scale: 1 / popScale, opacity: 0,
-        boxShadow: 'none',
+        filter: 'drop-shadow(0 0 0 rgba(0,0,0,0))',
         duration: 2.0,
         ease: 'power2.inOut',
+        force3D: false,
       }, delay + 4.0);
     });
 
