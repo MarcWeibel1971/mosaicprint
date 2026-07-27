@@ -5404,8 +5404,57 @@ export default function Studio() {
       if (data.userPhoto) {
         skipAutoRenderRef.current = true;
         const uImg = new Image();
-        uImg.onload = () => setUserPhotoImg(uImg);
+        uImg.onload = () => {
+          setUserPhotoImg(uImg);
+          // Overlay-Rebuild analog zum Server-Pfad: die Slider (Foto-Overlay &
+          // Farbkorrektur) werden restauriert, brauchen aber die Overlay-Bilder,
+          // die sonst nur in renderMosaic gebaut werden (hier bewusst übersprungen).
+          // Build userOverlayUrl im Ziel-Aspect des Mosaik-Canvas
+          const canvas = canvasRef.current;
+          if (canvas && canvas.width > 0 && canvas.height > 0) {
+            const olCanvas = document.createElement('canvas');
+            olCanvas.width = canvas.width;
+            olCanvas.height = canvas.height;
+            olCanvas.getContext('2d')!.drawImage(uImg, 0, 0, canvas.width, canvas.height);
+            setUserOverlayUrl(olCanvas.toDataURL('image/jpeg', 0.92));
+          }
+          // Build colorEnhanceUrl aus den Ziel-Farben (cols x rows) des User-Fotos
+          if (data.mosaicParams) {
+            try {
+              const { cols, rows } = data.mosaicParams;
+              const offCanvas = document.createElement('canvas');
+              offCanvas.width = cols;
+              offCanvas.height = rows;
+              const offCtx = offCanvas.getContext('2d')!;
+              offCtx.drawImage(uImg, 0, 0, cols, rows);
+              const targetData = offCtx.getImageData(0, 0, cols, rows).data;
+              // Store targetColors for server-side overlay
+              const targetColorsFlat: number[] = new Array(cols * rows * 3);
+              for (let ci = 0; ci < cols * rows; ci++) {
+                const i = ci * 4;
+                targetColorsFlat[ci * 3] = targetData[i];
+                targetColorsFlat[ci * 3 + 1] = targetData[i + 1];
+                targetColorsFlat[ci * 3 + 2] = targetData[i + 2];
+              }
+              targetColorsRef.current = targetColorsFlat;
+              const ceCanvas = document.createElement('canvas');
+              ceCanvas.width = cols;
+              ceCanvas.height = rows;
+              const ceCtx = ceCanvas.getContext('2d')!;
+              ceCtx.putImageData(offCtx.getImageData(0, 0, cols, rows), 0, 0);
+              setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
+            } catch (e) {
+              console.warn('[Project Restore] Failed to rebuild color enhance overlay:', e);
+            }
+          }
+        };
         uImg.src = data.userPhoto;
+      }
+
+      // User-Tiles können im localStorage-Pfad nicht rekonstruiert werden
+      // (die Tile-Payloads werden nur an den Server gesendet, nicht lokal gespeichert)
+      if (data.tileSourceMode === 'own' || data.tileSourceMode === 'mix') {
+        console.warn('[Project Restore] tileSourceMode="' + data.tileSourceMode + '": User-Tiles sind im localStorage-Projekt nicht enthalten und können nicht rekonstruiert werden.');
       }
 
       setShowRestoreBanner(false);
