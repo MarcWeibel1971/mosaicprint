@@ -6094,11 +6094,16 @@ export default function Studio() {
       setDlProgress(50);
       // 3. Upload user tiles (negative IDs) to R2 so server can render them later
       // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
-      // MOBILE: Skip upload to prevent Memory-Crash – admin will re-render on desktop
+      // MOBILE: Bei vielen eigenen Tiles Upload überspringen, um Memory-Crash zu vermeiden –
+      // der Admin rendert dann serverseitig nach (siehe adminNotes unten).
+      // Wenige Tiles werden auf Mobile sequentiell hochgeladen (for..of mit await),
+      // damit zwischen den Canvas-Encodings Speicher freigegeben werden kann.
+      const MOBILE_MAX_UPLOAD_TILES = 8;
       const currentTileIds = tileIdsRef.current;
       const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
+      const skipUserTileUpload = isMobileDevice && uniqueNegativeIds.length > MOBILE_MAX_UPLOAD_TILES;
       const userTileUrls: Record<string, string> = {};
-      if (uniqueNegativeIds.length > 0) {
+      if (uniqueNegativeIds.length > 0 && !skipUserTileUpload) {
         setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
         setDlProgress(55);
         // For each unique negative tileId, get the corresponding user tile image
@@ -6118,7 +6123,7 @@ export default function Studio() {
           1
         );
         let uploadedCount = 0;
-        await Promise.all(uniqueNegativeIds.map(async (tileId) => {
+        const uploadOneTile = async (tileId: number) => {
           // Use modulo to handle expanded user tiles (e.g. tileId=-203 with 5 photos → idx=2)
           const rawIdx = Math.abs(tileId) - 1;
           const idx = rawIdx % numUserPhotos;
@@ -6156,14 +6161,32 @@ export default function Studio() {
           } catch (err) {
             console.warn(`[PrintOrder] User tile ${tileId} upload failed:`, err);
           }
-        }));
+        };
+        if (isMobileDevice) {
+          // Mobile: sequentiell hochladen (Memory-Crash-Schutz, GC zwischen den Encodings)
+          for (const tileId of uniqueNegativeIds) {
+            await uploadOneTile(tileId);
+          }
+        } else {
+          // Desktop: parallel hochladen (schneller)
+          await Promise.all(uniqueNegativeIds.map(uploadOneTile));
+        }
         console.log(`[PrintOrder] Uploaded ${uploadedCount}/${uniqueNegativeIds.length} user tiles to R2`);
         setDlProgress(75);
+      } else if (skipUserTileUpload) {
+        console.warn(`[PrintOrder] MOBILE: Upload von ${uniqueNegativeIds.length} User-Tiles übersprungen (Memory-Crash-Schutz) – Admin-Re-Render erforderlich`);
       }
 
       // 4. Create order in DB with full render params (admin renders server-side)
       const printMat = PRINT_MATERIALS[selectedPrintMaterial];
       const printPrice = getPrintPrice(cols, rows, selectedPrintMaterial);
+      // MOBILE-Bestellschutz: Flag für Admin-Badges. Wurde der User-Tile-Upload auf Mobile
+      // übersprungen, kann der Admin-Re-Render die eigenen Fotos nicht nachliefern –
+      // sie müssen vom Kunden nachgefordert werden.
+      const adminNotes = !isMobileDevice ? undefined
+        : (skipUserTileUpload && (tileSourceMode === 'own' || tileSourceMode === 'mix'))
+          ? '📱 MOBILE-BESTELLUNG – User-Tiles nicht hochgeladen, Admin-Re-Render erforderlich (⚠️ User-Tiles fehlen, Kunde muss nachliefern)'
+          : '📱 MOBILE-BESTELLUNG';
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -6176,6 +6199,7 @@ export default function Studio() {
           projectId: savedProjectIdRef.current ?? null,
           photoUrl,
           mosaicPreviewUrl,
+          adminNotes,
           renderParams: {
             cols, rows,
             tilePx: PRINT_TILE_PX,
@@ -6213,7 +6237,7 @@ export default function Studio() {
       setPrintolinoLoading(false);
       setDlLoading(false);
     }
-  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial]);
+  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial, tileSourceMode]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
