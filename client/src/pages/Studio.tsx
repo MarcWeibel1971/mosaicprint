@@ -4578,7 +4578,12 @@ export default function Studio() {
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
         // colorEnhance slider (0-100) scales the AB color transfer strength
         // 0% = no color shift at all, 100% = full correction
-        const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
+        // Preview: AB-Korrektur läuft ausschließlich über das DOM-Overlay (mix-blend-mode: color).
+        // Der Preview-Canvas backt die Farbkorrektur NICHT ein, sonst gäbe es eine doppelte
+        // Korrektur (Bake + Overlay). Bake nur in Hi-Res (triggerClientHiResRender) und
+        // Print/Download (renderMosaicClientSide). Der Preview-Canvas wird ausschließlich für
+        // Projekt-/Bestell-Thumbnails verwendet, nicht als Quelle für Exporte.
+        const colorEnhanceVal = 0;
         // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
         // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
