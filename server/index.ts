@@ -30,6 +30,7 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
+import Stripe from "stripe";
 import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
@@ -2435,6 +2436,31 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
   } catch (e) {
     console.error('[orders] Create failed:', e);
     res.status(500).json({ error: String(e) });
+  }
+});
+
+// GET /api/payment/verify/:sessionId – Stripe-Zahlungsstatus für den Client prüfen
+// (Client ruft dies nach dem Redirect von Stripe Checkout auf, siehe Studio.tsx payment=success)
+app.get('/api/payment/verify/:sessionId', async (req, res) => {
+  try {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey) {
+      // Degraded statt Crash, wenn Stripe nicht konfiguriert ist
+      return res.json({ ok: false, degraded: true, paid: false, status: 'stripe_not_configured' });
+    }
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+    res.json({
+      ok: true,
+      paid: session.payment_status === 'paid',
+      status: session.payment_status,
+      // formatIdx/materialIdx aus den Session-Metadaten zurückgeben (vom Client beim Checkout mitgegeben)
+      formatIdx: session.metadata?.formatIdx ? Number(session.metadata.formatIdx) : undefined,
+      materialIdx: session.metadata?.materialIdx ? Number(session.metadata.materialIdx) : undefined,
+    });
+  } catch (e) {
+    console.error('[payment/verify] Error:', e);
+    res.status(500).json({ ok: false, paid: false, status: 'error' });
   }
 });
 

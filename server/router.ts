@@ -2681,7 +2681,12 @@ export const appRouter = router({
 
   // Stripe checkout
   createCheckout: publicProcedure
-    .input(z.object({ formatLabel: z.string(), materialLabel: z.string(), priceChf: z.number(), cols: z.number(), rows: z.number(), tilePx: z.number(), overlayAlpha: z.number().optional() }))
+    .input(z.object({
+      formatLabel: z.string(), materialLabel: z.string(), priceChf: z.number(), cols: z.number(), rows: z.number(), tilePx: z.number(), overlayAlpha: z.number().optional(),
+      // Optional: Client-Redirect-URLs und Format-Indizes (für /api/payment/verify)
+      successUrl: z.string().url().optional(), cancelUrl: z.string().url().optional(),
+      formatIdx: z.number().optional(), materialIdx: z.number().optional(),
+    }))
     .mutation(async ({ input }) => {
       const stripeKey = process.env.STRIPE_SECRET_KEY;
       if (!stripeKey) return { url: null, error: "Stripe not configured" };
@@ -2690,9 +2695,9 @@ export const appRouter = router({
         payment_method_types: ["card"],
         line_items: [{ price_data: { currency: "chf", product_data: { name: `MosaicPrint – ${input.formatLabel} auf ${input.materialLabel}` }, unit_amount: Math.round(input.priceChf * 100) }, quantity: 1 }],
         mode: "payment",
-        success_url: `${process.env.BASE_URL ?? "http://localhost:3000"}/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.BASE_URL ?? "http://localhost:3000"}/studio`,
-        metadata: { formatLabel: input.formatLabel, materialLabel: input.materialLabel, cols: String(input.cols), rows: String(input.rows), tilePx: String(input.tilePx), overlayAlpha: String(input.overlayAlpha ?? 0.18) },
+        success_url: input.successUrl ?? `${process.env.BASE_URL ?? "http://localhost:3000"}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: input.cancelUrl ?? `${process.env.BASE_URL ?? "http://localhost:3000"}/studio`,
+        metadata: { formatLabel: input.formatLabel, materialLabel: input.materialLabel, cols: String(input.cols), rows: String(input.rows), tilePx: String(input.tilePx), overlayAlpha: String(input.overlayAlpha ?? 0.18), formatIdx: String(input.formatIdx ?? ""), materialIdx: String(input.materialIdx ?? "") },
       });
       await db.createMosaicOrder({ stripeSessionId: session.id, formatLabel: input.formatLabel, materialLabel: input.materialLabel, priceChf: input.priceChf });
       return { url: session.url };

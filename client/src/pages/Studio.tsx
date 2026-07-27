@@ -6251,6 +6251,14 @@ export default function Studio() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // Payload an das Server-Zod-Schema angeglichen (formatLabel/materialLabel/priceChf/cols/rows/tilePx)
+          formatLabel: PRINT_FORMATS[selectedFormat].label,
+          materialLabel: MATERIALS[selectedMaterial].label,
+          priceChf: totalPrice,
+          cols: mosaicParamsRef.current?.cols ?? 0,
+          rows: mosaicParamsRef.current?.rows ?? 0,
+          tilePx: DIGITAL_FORMATS[selectedDigitalFormat].tilePx,
+          // Indizes nur als Metadaten für /api/payment/verify (Format-Auswahl nach Redirect)
           formatIdx: selectedFormat,
           materialIdx: selectedMaterial,
           successUrl: `${window.location.origin}/studio?payment=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -6258,9 +6266,11 @@ export default function Studio() {
         }),
       });
       const data = await res.json();
-      if (data.url) {
-        window.location.href = data.url; // Redirect to Stripe Checkout
-      } else if (data.error) {
+      // tRPC-Response-Shape: { result: { data: ... } }
+      const checkout = data?.result?.data ?? data;
+      if (checkout?.url) {
+        window.location.href = checkout.url; // Redirect to Stripe Checkout
+      } else if (checkout?.error) {
         // Stripe not configured: allow direct download as fallback
         setPaymentError("Stripe nicht konfiguriert - direkt herunterladen.");
         handleDownload(true);
@@ -6273,7 +6283,7 @@ export default function Studio() {
       setPaymentLoading(false);
       setShowPayModal(false);
     }
-  }, [selectedFormat, selectedMaterial, handleDownload]);
+  }, [selectedFormat, selectedMaterial, selectedDigitalFormat, totalPrice, handleDownload]);
 
   // Check for payment success on mount (after Stripe redirect)
   useEffect(() => {
