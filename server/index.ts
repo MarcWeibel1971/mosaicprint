@@ -2492,12 +2492,15 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const faceMask: boolean[] = rp.faceMask ?? [];
         // Algorithm settings from client (for LAB color correction consistency)
         const algoSettings: Record<string, number | string | boolean> = rp.algoSettings ?? {};
-        // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
+        // Use up to 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
         // for tiles with external sources, giving sharp output at any print size.
         // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
-        // MEMORY STRATEGY: tilePx stays at 200 for full quality. The final assembly uses
-        // progressive strip-to-file writing (tmp files) instead of holding all strips in RAM.
-        const tilePx = 200;
+        // MEMORY/SAFETY: tilePx wird geclamped, damit die Gesamtdimension 24000px nicht
+        // überschreitet (sonst z.B. 150x150 Tiles = 30000px = 900MP, Label != Datei).
+        // rp.tilePx (vom Client, 400-DPI-Basis 157) wird als Untergrenze berücksichtigt.
+        // The final assembly uses progressive strip-to-file writing (tmp files)
+        // instead of holding all strips in RAM.
+        const tilePx = Math.max(32, Math.min(200, Math.floor(24000 / Math.max(cols, rows)), rp.tilePx ? Math.max(rp.tilePx, 157) : 200));
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
         // userTileUrls: mapping from negative tileId (as string) to R2 URL
@@ -2619,7 +2622,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const MAX_COLOR_SHIFT = 15;  // same as client
         const MAX_BLUE_SHIFT = 5;    // same as client – critical to prevent blue shift
         const cBoost = (algoSettings.contrastBoost as number) ?? 1.30;  // same as client default
-        const satBoost = 0.90 + cBoost * 0.10;
+        const satBoost = 0.90 + cBoost * 0.15;  // same as client (0.90 + cBoost*0.15)
         const BASE_OL = userOverlay > 0 ? userOverlay : ((algoSettings.baseOverlay as number) ?? 0.15);
         const EDGE_B = (algoSettings.edgeBoost as number) ?? 0.20;
          // Apply color correction whenever targetColors are available
@@ -2668,11 +2671,12 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                     ? Math.max(0.85, Math.min(1.15, rawLumScale))  // ±15% for user tiles (already color-matched)
                     : Math.max(0.50, Math.min(2.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));  // ±50-100% for DB tiles
                   const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
-                  // Step 2: Apply brightness correction via Sharp modulate (HSL brightness)
+                  // Step 2: Apply brightness + saturation correction via Sharp modulate
+                  // (satBoost wie im Client: 0.90 + cBoost*0.15, geclamped auf 0.5-2.0).
                   // Note: tint() is NOT used – it desaturates tiles. Color shift is handled
                   // exclusively via soft-light composite overlay below.
                   let pipeline = sharp(jpegBuf, { limitInputPixels: false })
-                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)) });
+                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)), saturation: Math.max(0.5, Math.min(2.0, satBoost)) });
                   // Step 3: Soft-light overlay (face/edge boost) via composite
                   if (str > 0.01) {
                     const overlayBuf = await sharp({
