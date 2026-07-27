@@ -1026,6 +1026,9 @@ export default function Studio() {
           edgeMap: edgeMapRef.current,
           faceMask: faceMaskRef.current,
           colorEnhance,
+          // Farbkorrektur-Parameter mitsenden, damit der Server-Render den Client exakt matcht
+          histogramBlend: algoSettings.histogramBlend ?? 0,
+          contrastBoost: algoSettings.contrastBoost ?? 1.30,
         }),
       });
       clearTimeout(timeoutId);
@@ -4578,7 +4581,12 @@ export default function Studio() {
         const blendFactor = Math.min(1.0, (savedSettings.histogramBlend ?? 0.0) / 0.10);
         // colorEnhance slider (0-100) scales the AB color transfer strength
         // 0% = no color shift at all, 100% = full correction
-        const colorEnhanceVal = colorEnhanceRef.current / 100; // 0.0 - 1.0
+        // Preview: AB-Korrektur läuft ausschließlich über das DOM-Overlay (mix-blend-mode: color).
+        // Der Preview-Canvas backt die Farbkorrektur NICHT ein, sonst gäbe es eine doppelte
+        // Korrektur (Bake + Overlay). Bake nur in Hi-Res (triggerClientHiResRender) und
+        // Print/Download (renderMosaicClientSide). Der Preview-Canvas wird ausschließlich für
+        // Projekt-/Bestell-Thumbnails verwendet, nicht als Quelle für Exporte.
+        const colorEnhanceVal = 0;
         // L_BLEND: minimum 0.40 always active (ensures strong brightness correction for face structure)
         // At histogramBlend=0.07 -> blendFactor=0.7 -> L_BLEND=0.40+0.40*0.7=0.68
         const L_BLEND  = 0.40 + 0.40 * blendFactor;  // 0.40 minimum, up to 0.80 at full blend
@@ -5399,8 +5407,57 @@ export default function Studio() {
       if (data.userPhoto) {
         skipAutoRenderRef.current = true;
         const uImg = new Image();
-        uImg.onload = () => setUserPhotoImg(uImg);
+        uImg.onload = () => {
+          setUserPhotoImg(uImg);
+          // Overlay-Rebuild analog zum Server-Pfad: die Slider (Foto-Overlay &
+          // Farbkorrektur) werden restauriert, brauchen aber die Overlay-Bilder,
+          // die sonst nur in renderMosaic gebaut werden (hier bewusst übersprungen).
+          // Build userOverlayUrl im Ziel-Aspect des Mosaik-Canvas
+          const canvas = canvasRef.current;
+          if (canvas && canvas.width > 0 && canvas.height > 0) {
+            const olCanvas = document.createElement('canvas');
+            olCanvas.width = canvas.width;
+            olCanvas.height = canvas.height;
+            olCanvas.getContext('2d')!.drawImage(uImg, 0, 0, canvas.width, canvas.height);
+            setUserOverlayUrl(olCanvas.toDataURL('image/jpeg', 0.92));
+          }
+          // Build colorEnhanceUrl aus den Ziel-Farben (cols x rows) des User-Fotos
+          if (data.mosaicParams) {
+            try {
+              const { cols, rows } = data.mosaicParams;
+              const offCanvas = document.createElement('canvas');
+              offCanvas.width = cols;
+              offCanvas.height = rows;
+              const offCtx = offCanvas.getContext('2d')!;
+              offCtx.drawImage(uImg, 0, 0, cols, rows);
+              const targetData = offCtx.getImageData(0, 0, cols, rows).data;
+              // Store targetColors for server-side overlay
+              const targetColorsFlat: number[] = new Array(cols * rows * 3);
+              for (let ci = 0; ci < cols * rows; ci++) {
+                const i = ci * 4;
+                targetColorsFlat[ci * 3] = targetData[i];
+                targetColorsFlat[ci * 3 + 1] = targetData[i + 1];
+                targetColorsFlat[ci * 3 + 2] = targetData[i + 2];
+              }
+              targetColorsRef.current = targetColorsFlat;
+              const ceCanvas = document.createElement('canvas');
+              ceCanvas.width = cols;
+              ceCanvas.height = rows;
+              const ceCtx = ceCanvas.getContext('2d')!;
+              ceCtx.putImageData(offCtx.getImageData(0, 0, cols, rows), 0, 0);
+              setColorEnhanceUrl(ceCanvas.toDataURL('image/png'));
+            } catch (e) {
+              console.warn('[Project Restore] Failed to rebuild color enhance overlay:', e);
+            }
+          }
+        };
         uImg.src = data.userPhoto;
+      }
+
+      // User-Tiles können im localStorage-Pfad nicht rekonstruiert werden
+      // (die Tile-Payloads werden nur an den Server gesendet, nicht lokal gespeichert)
+      if (data.tileSourceMode === 'own' || data.tileSourceMode === 'mix') {
+        console.warn('[Project Restore] tileSourceMode="' + data.tileSourceMode + '": User-Tiles sind im localStorage-Projekt nicht enthalten und können nicht rekonstruiert werden.');
       }
 
       setShowRestoreBanner(false);
@@ -6040,11 +6097,16 @@ export default function Studio() {
       setDlProgress(50);
       // 3. Upload user tiles (negative IDs) to R2 so server can render them later
       // tileIds with negative values (e.g. -1, -2) are user-uploaded photos stored only in browser
-      // MOBILE: Skip upload to prevent Memory-Crash – admin will re-render on desktop
+      // MOBILE: Bei vielen eigenen Tiles Upload überspringen, um Memory-Crash zu vermeiden –
+      // der Admin rendert dann serverseitig nach (siehe adminNotes unten).
+      // Wenige Tiles werden auf Mobile sequentiell hochgeladen (for..of mit await),
+      // damit zwischen den Canvas-Encodings Speicher freigegeben werden kann.
+      const MOBILE_MAX_UPLOAD_TILES = 8;
       const currentTileIds = tileIdsRef.current;
       const uniqueNegativeIds = [...new Set(currentTileIds.filter(id => id < 0))];
+      const skipUserTileUpload = isMobileDevice && uniqueNegativeIds.length > MOBILE_MAX_UPLOAD_TILES;
       const userTileUrls: Record<string, string> = {};
-      if (uniqueNegativeIds.length > 0) {
+      if (uniqueNegativeIds.length > 0 && !skipUserTileUpload) {
         setDlProgressMsg(`Eigene Fotos werden hochgeladen (${uniqueNegativeIds.length} Tiles)...`);
         setDlProgress(55);
         // For each unique negative tileId, get the corresponding user tile image
@@ -6064,7 +6126,7 @@ export default function Studio() {
           1
         );
         let uploadedCount = 0;
-        await Promise.all(uniqueNegativeIds.map(async (tileId) => {
+        const uploadOneTile = async (tileId: number) => {
           // Use modulo to handle expanded user tiles (e.g. tileId=-203 with 5 photos → idx=2)
           const rawIdx = Math.abs(tileId) - 1;
           const idx = rawIdx % numUserPhotos;
@@ -6102,14 +6164,32 @@ export default function Studio() {
           } catch (err) {
             console.warn(`[PrintOrder] User tile ${tileId} upload failed:`, err);
           }
-        }));
+        };
+        if (isMobileDevice) {
+          // Mobile: sequentiell hochladen (Memory-Crash-Schutz, GC zwischen den Encodings)
+          for (const tileId of uniqueNegativeIds) {
+            await uploadOneTile(tileId);
+          }
+        } else {
+          // Desktop: parallel hochladen (schneller)
+          await Promise.all(uniqueNegativeIds.map(uploadOneTile));
+        }
         console.log(`[PrintOrder] Uploaded ${uploadedCount}/${uniqueNegativeIds.length} user tiles to R2`);
         setDlProgress(75);
+      } else if (skipUserTileUpload) {
+        console.warn(`[PrintOrder] MOBILE: Upload von ${uniqueNegativeIds.length} User-Tiles übersprungen (Memory-Crash-Schutz) – Admin-Re-Render erforderlich`);
       }
 
       // 4. Create order in DB with full render params (admin renders server-side)
       const printMat = PRINT_MATERIALS[selectedPrintMaterial];
       const printPrice = getPrintPrice(cols, rows, selectedPrintMaterial);
+      // MOBILE-Bestellschutz: Flag für Admin-Badges. Wurde der User-Tile-Upload auf Mobile
+      // übersprungen, kann der Admin-Re-Render die eigenen Fotos nicht nachliefern –
+      // sie müssen vom Kunden nachgefordert werden.
+      const adminNotes = !isMobileDevice ? undefined
+        : (skipUserTileUpload && (tileSourceMode === 'own' || tileSourceMode === 'mix'))
+          ? '📱 MOBILE-BESTELLUNG – User-Tiles nicht hochgeladen, Admin-Re-Render erforderlich (⚠️ User-Tiles fehlen, Kunde muss nachliefern)'
+          : '📱 MOBILE-BESTELLUNG';
       const orderResp = await fetch('/api/orders/printolino', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -6122,6 +6202,7 @@ export default function Studio() {
           projectId: savedProjectIdRef.current ?? null,
           photoUrl,
           mosaicPreviewUrl,
+          adminNotes,
           renderParams: {
             cols, rows,
             tilePx: PRINT_TILE_PX,
@@ -6159,7 +6240,7 @@ export default function Studio() {
       setPrintolinoLoading(false);
       setDlLoading(false);
     }
-  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial]);
+  }, [user, authHeaders, userOverlay, colorEnhance, userPhotoImg, userPhoto, selectedPrintMaterial, tileSourceMode]);
 
   // Stripe Checkout: redirect to Stripe payment page
   const handleStripeCheckout = useCallback(async () => {
@@ -6170,6 +6251,14 @@ export default function Studio() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // Payload an das Server-Zod-Schema angeglichen (formatLabel/materialLabel/priceChf/cols/rows/tilePx)
+          formatLabel: PRINT_FORMATS[selectedFormat].label,
+          materialLabel: MATERIALS[selectedMaterial].label,
+          priceChf: totalPrice,
+          cols: mosaicParamsRef.current?.cols ?? 0,
+          rows: mosaicParamsRef.current?.rows ?? 0,
+          tilePx: DIGITAL_FORMATS[selectedDigitalFormat].tilePx,
+          // Indizes nur als Metadaten für /api/payment/verify (Format-Auswahl nach Redirect)
           formatIdx: selectedFormat,
           materialIdx: selectedMaterial,
           successUrl: `${window.location.origin}/studio?payment=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -6177,9 +6266,11 @@ export default function Studio() {
         }),
       });
       const data = await res.json();
-      if (data.url) {
-        window.location.href = data.url; // Redirect to Stripe Checkout
-      } else if (data.error) {
+      // tRPC-Response-Shape: { result: { data: ... } }
+      const checkout = data?.result?.data ?? data;
+      if (checkout?.url) {
+        window.location.href = checkout.url; // Redirect to Stripe Checkout
+      } else if (checkout?.error) {
         // Stripe not configured: allow direct download as fallback
         setPaymentError("Stripe nicht konfiguriert - direkt herunterladen.");
         handleDownload(true);
@@ -6192,7 +6283,7 @@ export default function Studio() {
       setPaymentLoading(false);
       setShowPayModal(false);
     }
-  }, [selectedFormat, selectedMaterial, handleDownload]);
+  }, [selectedFormat, selectedMaterial, selectedDigitalFormat, totalPrice, handleDownload]);
 
   // Check for payment success on mount (after Stripe redirect)
   useEffect(() => {

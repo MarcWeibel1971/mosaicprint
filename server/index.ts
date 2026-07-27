@@ -30,6 +30,7 @@ import { createContext } from "./context.js";
 import * as db from "./db.js";
 // Sharp for fast image processing (native libvips, 10-50x faster than Jimp)
 import sharp from "sharp";
+import Stripe from "stripe";
 import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
@@ -1781,6 +1782,8 @@ function applyLabColorTransfer(
   edgeMap: number[],
   faceMask: boolean[],
   colorEnhance: number,  // 0-100
+  histogramBlend?: number,  // 0-0.15 (wie Client savedSettings.histogramBlend)
+  contrastBoost?: number,   // z.B. 1.30 (wie Client savedSettings.contrastBoost)
 ): void {
   if (!targetColors?.length || colorEnhance <= 0) return;
 
@@ -1806,11 +1809,13 @@ function applyLabColorTransfer(
   };
 
   const colorEnhanceVal = colorEnhance / 100;
-  const AB_BLEND = 0.12 * colorEnhanceVal;
-  const L_BLEND = 0.40;
+  // histogramBlend-Slider (0-0.15) skaliert AB-/L_BLEND wie im Client (0.10 = volle Staerke)
+  const blendFactor = Math.min(1, (histogramBlend ?? 0) / 0.10);
+  const AB_BLEND = (0.12 + 0.20 * blendFactor) * colorEnhanceVal;
+  const L_BLEND = 0.40 + 0.40 * blendFactor;  // 0.40 Minimum, bis 0.80 bei vollem Blend (wie Client)
   const MAX_COLOR_SHIFT = 15;
   const MAX_BLUE_SHIFT = 5;
-  const cBoost = 1.30;
+  const cBoost = contrastBoost ?? 1.30;
   const satBoost = 0.90 + cBoost * 0.15;
   const REF_SAMPLES = 64;
 
@@ -1913,7 +1918,7 @@ function applyOverlay(
       const tb = targetColors[ci * 3 + 2];
       if (tr === undefined) continue; // no target data for this cell
       const edge = edgeMap[ci] ?? 0;
-      const faceBoost = faceMask[ci] ? 0.25 : 0;
+      const faceBoost = faceMask[ci] ? 0.04 : 0;  // wie Client (fb=0.04), 0.25 war zu aggressiv
       const strength = Math.min(0.85, baseOverlayVal + edge * edgeBoostVal + faceBoost) * strengthScale;
 
       const pyStart = lr * tilePx;
@@ -1945,7 +1950,8 @@ function applyOverlay(
 app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) => {
   const { tileIds, assignment, cols, rows, tilePx = 200, format = 'jpg', jobId,
     overlayMode, baseOverlay, edgeBoost, targetColors, edgeMap: clientEdgeMap, faceMask: clientFaceMask,
-    colorEnhance: clientColorEnhance = 0
+    colorEnhance: clientColorEnhance = 0,
+    histogramBlend: clientHistogramBlend, contrastBoost: clientContrastBoost
   } = req.body as {
     tileIds: number[];
     assignment: number[];
@@ -1961,6 +1967,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
     edgeMap?: number[];
     faceMask?: boolean[];
     colorEnhance?: number;
+    histogramBlend?: number;
+    contrastBoost?: number;
   };
 
   if (!tileIds?.length || !assignment?.length || !cols || !rows) {
@@ -2080,7 +2088,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
         // Apply LAB color transfer first (brightness + color shift per tile)
         if (clientColorEnhance > 0 && targetColors?.length) {
           applyLabColorTransfer(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
-            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance,
+            clientHistogramBlend, clientContrastBoost);
         }
         applyOverlay(rawBuf, outW, outH, TILE_PX, cols, rows, 0,
           overlayMode as 'softlight' | 'alphablend',
@@ -2145,7 +2154,8 @@ app.post('/api/print-render', express.json({ limit: '20mb' }), async (req, res) 
         // Apply LAB color transfer first (brightness + color shift per tile)
         if (clientColorEnhance > 0 && targetColors?.length) {
           applyLabColorTransfer(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
-            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance);
+            targetColors, clientEdgeMap ?? [], clientFaceMask ?? [], clientColorEnhance,
+            clientHistogramBlend, clientContrastBoost);
         }
         applyOverlay(rawStrip, outW, stripH, TILE_PX, cols, rows, stripStart,
           overlayMode as 'softlight' | 'alphablend',
@@ -2429,6 +2439,31 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
   }
 });
 
+// GET /api/payment/verify/:sessionId – Stripe-Zahlungsstatus für den Client prüfen
+// (Client ruft dies nach dem Redirect von Stripe Checkout auf, siehe Studio.tsx payment=success)
+app.get('/api/payment/verify/:sessionId', async (req, res) => {
+  try {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey) {
+      // Degraded statt Crash, wenn Stripe nicht konfiguriert ist
+      return res.json({ ok: false, degraded: true, paid: false, status: 'stripe_not_configured' });
+    }
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+    res.json({
+      ok: true,
+      paid: session.payment_status === 'paid',
+      status: session.payment_status,
+      // formatIdx/materialIdx aus den Session-Metadaten zurückgeben (vom Client beim Checkout mitgegeben)
+      formatIdx: session.metadata?.formatIdx ? Number(session.metadata.formatIdx) : undefined,
+      materialIdx: session.metadata?.materialIdx ? Number(session.metadata.materialIdx) : undefined,
+    });
+  } catch (e) {
+    console.error('[payment/verify] Error:', e);
+    res.status(500).json({ ok: false, paid: false, status: 'error' });
+  }
+});
+
 // POST /api/orders/upload-user-tile – upload a user tile (base64 JPEG) to R2 for server-side rendering
 // Called during order creation when tileIds contain negative IDs (user-uploaded photos)
 app.post('/api/orders/upload-user-tile', express.json({ limit: '8mb' }), async (req, res) => {
@@ -2443,9 +2478,11 @@ app.post('/api/orders/upload-user-tile', express.json({ limit: '8mb' }), async (
     const contentType = matches[1];
     const base64Data = matches[2];
     const imageBuffer = Buffer.from(base64Data, 'base64');
-    // Resize to 128px for tile storage
+    // Resize to 256px for tile storage
+    // (Client sendet bis 512px, Admin-Print-Render nutzt tilePx=200 –
+    // 128px erzwang ein 1.56x-Upscale im Print; 256px deckt tilePx=200 ab)
     const resizedBuffer = await sharp(imageBuffer)
-      .resize(128, 128, { fit: 'cover', position: 'centre' })
+      .resize(256, 256, { fit: 'cover', position: 'centre' })
       .jpeg({ quality: 90 })
       .toBuffer();
     // Upload to R2 under user-tiles/ prefix
@@ -2490,12 +2527,15 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const faceMask: boolean[] = rp.faceMask ?? [];
         // Algorithm settings from client (for LAB color correction consistency)
         const algoSettings: Record<string, number | string | boolean> = rp.algoSettings ?? {};
-        // Use 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
+        // Use up to 200px tiles for print quality: loadTileBuffer() will fetch source_url (Pexels/Unsplash ~940px)
         // for tiles with external sources, giving sharp output at any print size.
         // 200px tiles at 300 DPI = 1.69 cm/tile (good for 30x40cm prints and larger)
-        // MEMORY STRATEGY: tilePx stays at 200 for full quality. The final assembly uses
-        // progressive strip-to-file writing (tmp files) instead of holding all strips in RAM.
-        const tilePx = 200;
+        // MEMORY/SAFETY: tilePx wird geclamped, damit die Gesamtdimension 24000px nicht
+        // überschreitet (sonst z.B. 150x150 Tiles = 30000px = 900MP, Label != Datei).
+        // rp.tilePx (vom Client, 400-DPI-Basis 157) wird als Untergrenze berücksichtigt.
+        // The final assembly uses progressive strip-to-file writing (tmp files)
+        // instead of holding all strips in RAM.
+        const tilePx = Math.max(32, Math.min(200, Math.floor(24000 / Math.max(cols, rows)), rp.tilePx ? Math.max(rp.tilePx, 157) : 200));
         const assignment: number[] = rp.assignment;
         const tileIds: number[] = rp.tileIds;
         // userTileUrls: mapping from negative tileId (as string) to R2 URL
@@ -2617,7 +2657,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const MAX_COLOR_SHIFT = 15;  // same as client
         const MAX_BLUE_SHIFT = 5;    // same as client – critical to prevent blue shift
         const cBoost = (algoSettings.contrastBoost as number) ?? 1.30;  // same as client default
-        const satBoost = 0.90 + cBoost * 0.10;
+        const satBoost = 0.90 + cBoost * 0.15;  // same as client (0.90 + cBoost*0.15)
         const BASE_OL = userOverlay > 0 ? userOverlay : ((algoSettings.baseOverlay as number) ?? 0.15);
         const EDGE_B = (algoSettings.edgeBoost as number) ?? 0.20;
          // Apply color correction whenever targetColors are available
@@ -2666,11 +2706,12 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                     ? Math.max(0.85, Math.min(1.15, rawLumScale))  // ±15% for user tiles (already color-matched)
                     : Math.max(0.50, Math.min(2.0, isShadowZone ? Math.min(1.0, rawLumScale) : rawLumScale));  // ±50-100% for DB tiles
                   const lumScale = 1 + (clampedLumScale - 1) * effectiveL_BLEND;
-                  // Step 2: Apply brightness correction via Sharp modulate (HSL brightness)
+                  // Step 2: Apply brightness + saturation correction via Sharp modulate
+                  // (satBoost wie im Client: 0.90 + cBoost*0.15, geclamped auf 0.5-2.0).
                   // Note: tint() is NOT used – it desaturates tiles. Color shift is handled
                   // exclusively via soft-light composite overlay below.
                   let pipeline = sharp(jpegBuf, { limitInputPixels: false })
-                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)) });
+                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)), saturation: Math.max(0.5, Math.min(2.0, satBoost)) });
                   // Step 3: Soft-light overlay (face/edge boost) via composite
                   if (str > 0.01) {
                     const overlayBuf = await sharp({
