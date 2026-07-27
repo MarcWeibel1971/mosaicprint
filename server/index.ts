@@ -2443,9 +2443,11 @@ app.post('/api/orders/upload-user-tile', express.json({ limit: '8mb' }), async (
     const contentType = matches[1];
     const base64Data = matches[2];
     const imageBuffer = Buffer.from(base64Data, 'base64');
-    // Resize to 128px for tile storage
+    // Resize to 256px for tile storage
+    // (Client sendet bis 512px, Admin-Print-Render nutzt tilePx=200 –
+    // 128px erzwang ein 1.56x-Upscale im Print; 256px deckt tilePx=200 ab)
     const resizedBuffer = await sharp(imageBuffer)
-      .resize(128, 128, { fit: 'cover', position: 'centre' })
+      .resize(256, 256, { fit: 'cover', position: 'centre' })
       .jpeg({ quality: 90 })
       .toBuffer();
     // Upload to R2 under user-tiles/ prefix
