@@ -6252,7 +6252,10 @@ export default function Studio() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           // Payload an das Server-Zod-Schema angeglichen (formatLabel/materialLabel/priceChf/cols/rows/tilePx)
-          formatLabel: PRINT_FORMATS[selectedFormat].label,
+          // Der Stripe-Flow ist der DIGITALE Download: formatLabel kommt aus DIGITAL_FORMATS,
+          // damit Server-Preistabelle (server/pricing.ts) und Produktname matchen.
+          // (materialLabel bleibt aus Schema-Kompatibilitätsgründen, wird digital ignoriert.)
+          formatLabel: DIGITAL_FORMATS[selectedDigitalFormat].label,
           materialLabel: MATERIALS[selectedMaterial].label,
           priceChf: totalPrice,
           cols: mosaicParamsRef.current?.cols ?? 0,
