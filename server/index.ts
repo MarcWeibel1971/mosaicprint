@@ -32,6 +32,7 @@ import * as db from "./db.js";
 import sharp from "sharp";
 import Stripe from "stripe";
 import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
+import { getPrintolinoPrice } from "./pricing.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -173,19 +174,25 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
                    (tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch');
   const hasExternalSource = (tileUrls.sourceUrl || '') !== '' &&
     !((tileUrls.sourceUrl || '').includes('tiles.mosaicprint.ch'));
-  let url: string;
+  // Ordered fallback candidates: if the preferred URL fails (timeout, 429, 5xx,
+  // dead link), try the next one instead of giving up → prevents gray holes.
+  const candidates: string[] = [];
   if (size <= 128) {
-    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+    candidates.push(tileUrls.tile128Url, tileUrls.sourceUrl);
   } else if (hasExternalSource) {
-    // External source (Pexels/Unsplash): use full-res source for sharp print output
-    url = tileUrls.sourceUrl || tileUrls.tile128Url;
+    // External source (Pexels/Unsplash): prefer full-res source for sharp print
+    // output, but fall back to 256px/128px versions if the source fetch fails.
+    candidates.push(tileUrls.sourceUrl, tileUrls.tile256Url, tileUrls.tile128Url);
   } else if (tileUrls.tile256Url) {
     // R2-only tile with 256px version: use it for better quality
-    url = tileUrls.tile256Url;
+    candidates.push(tileUrls.tile256Url, tileUrls.tile128Url, tileUrls.sourceUrl);
   } else {
     // R2-only tile without 256px: use 128px and let Sharp upscale (1.2x is acceptable)
-    url = tileUrls.tile128Url || tileUrls.sourceUrl;
+    candidates.push(tileUrls.tile128Url, tileUrls.sourceUrl);
   }
+  const urlCandidates = [...new Set(candidates.filter(u => u && (u.startsWith('http://') || u.startsWith('https://'))))];
+  const dataUrl = candidates.find(u => u && u.startsWith('data:')) || '';
+  const url = urlCandidates[0] || dataUrl;
   if (!url) return null;
   // Always resize to requested size (Sharp handles upscaling gracefully)
   const effectiveSize = size;
@@ -205,28 +212,42 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
   }
 
   // 4. Fetch from upstream (R2 CDN, Unsplash, Pexels, etc.)
-  try {
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'MosaicPrint/1.0' },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!resp.ok) return null;
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const resized = await sharp(buf)
-      .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
-      .jpeg({ quality: 92 })
-      .toBuffer();
-    // Cache with effectiveSize key so future requests at the same size hit cache
-    const effectiveCacheKey = effectiveSize !== size ? `${id}-${effectiveSize}` : cacheKey;
-    tileCacheMap.set(effectiveCacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
-    if (effectiveSize !== size) tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
-    // Persist hi-res tiles to disk so they survive server restarts within the same session
-    writeDiskCache(id, effectiveSize, resized);
-    evictTileCache();
-    return resized;
-  } catch {
-    return null;
+  // Try each candidate URL with a retry before giving up – a single failed
+  // fetch previously produced a gray placeholder tile in the print output.
+  const fetchTargets = urlCandidates.length > 0 ? urlCandidates : (dataUrl ? [dataUrl] : []);
+  for (const targetUrl of fetchTargets) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await fetch(targetUrl, {
+          headers: { 'User-Agent': 'MosaicPrint/1.0' },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!resp.ok) {
+          // 429/5xx are transient under parallel load → short backoff, then retry/next URL
+          if (attempt === 0) await new Promise(r => setTimeout(r, 400));
+          continue;
+        }
+        const buf = Buffer.from(await resp.arrayBuffer());
+        const resized = await sharp(buf)
+          .resize(effectiveSize, effectiveSize, { fit: 'cover', position: 'centre' })
+          .jpeg({ quality: 92 })
+          .toBuffer();
+        // Cache with effectiveSize key so future requests at the same size hit cache
+        const effectiveCacheKey = effectiveSize !== size ? `${id}-${effectiveSize}` : cacheKey;
+        tileCacheMap.set(effectiveCacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+        if (effectiveSize !== size) tileCacheMap.set(cacheKey, { buf: resized, contentType: 'image/jpeg', ts: Date.now() });
+        // Persist hi-res tiles to disk so they survive server restarts within the same session
+        writeDiskCache(id, effectiveSize, resized);
+        evictTileCache();
+        return resized;
+      } catch {
+        if (attempt === 0) await new Promise(r => setTimeout(r, 400));
+      }
+    }
+    console.warn(`[tile] Tile ${id}: fetch failed for ${targetUrl.slice(0, 120)} – trying next fallback`);
   }
+  console.warn(`[tile] Tile ${id}: ALL ${fetchTargets.length} URL(s) failed – no image available`);
+  return null;
 }
 
 // 3. Tile URL cache: maps tile id → {tile128_url, source_url} to avoid DB per request
@@ -2416,12 +2437,23 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
     if (!formatLabel || !materialLabel) {
       return res.status(400).json({ error: 'Missing format or material' });
     }
+    // SICHERHEIT: Preis wird serverseitig aus renderParams (cols x rows) + Material
+    // über die kanonische Preisformel berechnet (server/pricing.ts).
+    // Der vom Client gesendete priceChf wird NICHT übernommen.
+    const serverPrice = getPrintolinoPrice(Number(renderParams?.cols), Number(renderParams?.rows), String(materialLabel));
+    if (serverPrice === null) {
+      console.warn(`[orders] Unbekanntes Material oder ungültige Dimensionen: materialLabel="${materialLabel}" cols=${renderParams?.cols} rows=${renderParams?.rows}`);
+      return res.status(400).json({ error: 'Unknown material or invalid dimensions' });
+    }
+    if (priceChf !== undefined && Math.abs(Number(priceChf) - serverPrice) > 0.01) {
+      console.warn(`[orders] Client-Preis CHF ${priceChf} weicht vom Server-Preis CHF ${serverPrice} ab – es gilt der Server-Preis.`);
+    }
     const orderId = await db.createPrintolinoOrder({
       userId: userId ?? null,
       projectId: projectId ?? null,
       formatLabel,
       materialLabel,
-      priceChf: priceChf ?? 0,
+      priceChf: serverPrice,
       customerEmail: customerEmail ?? null,
       renderParams: renderParams ?? {},
       photoUrl: photoUrl ?? null,
@@ -2580,6 +2612,10 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         }
         await setProgress(45, `${tileBuffers.size} Tiles geladen`);
         console.log(`[admin-render] Loaded ${tileBuffers.size}/${uniquePositiveIds.length} DB tiles`);
+        const missingDbTiles = uniquePositiveIds.filter((id: number) => !tileBuffers.has(id));
+        if (missingDbTiles.length > 0) {
+          console.warn(`[admin-render] WARNING: ${missingDbTiles.length}/${uniquePositiveIds.length} DB tiles could not be loaded (sample IDs: ${missingDbTiles.slice(0, 10).join(',')}) – these cells will be filled with their target color instead of gray`);
+        }
         // Load user tiles from R2 URLs
         if (uniqueNegativeIds.length > 0) {
           console.log(`[admin-render] Loading ${uniqueNegativeIds.length} user tiles from R2...`);
@@ -2751,6 +2787,23 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const tmpDir = os.tmpdir();
         const stripTmpFiles: string[] = [];
         const stripHeights: number[] = [];
+        // Fallback for tiles that could not be loaded at all: fill the cell with a
+        // flat tile in its target color instead of leaving the gray (128) strip
+        // background visible. Cache by quantized color to avoid repeated Sharp calls.
+        const fallbackTileCache = new Map<string, Buffer>();
+        const getFallbackTile = async (ci: number): Promise<Buffer | null> => {
+          if (targetColors.length < ci * 3 + 3) return null;
+          const tR = targetColors[ci * 3], tG = targetColors[ci * 3 + 1], tBv = targetColors[ci * 3 + 2];
+          const key = `${tR >> 3}-${tG >> 3}-${tBv >> 3}`;
+          let buf = fallbackTileCache.get(key);
+          if (!buf) {
+            buf = await sharp({
+              create: { width: tilePx, height: tilePx, channels: 3, background: { r: tR, g: tG, b: tBv } },
+            }).jpeg({ quality: 90 }).toBuffer();
+            fallbackTileCache.set(key, buf);
+          }
+          return buf;
+        };
         for (let s = 0; s < stripCount; s++) {
           const stripRowStart = s * STRIP_ROWS;
           const stripRowEnd = Math.min(stripRowStart + STRIP_ROWS, rows);
@@ -2762,9 +2815,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
               const ci = r2 * cols + c2;
               const tileId = usedTileIds[ci];
               const rawBuf = tileBuffers.get(tileId);
-              if (!rawBuf) continue;
-              // Use pre-corrected tile buffer if available, otherwise original
-              const tileBuf = tileCorrectedBuffers.get(`${ci}`) ?? rawBuf;
+              // Use pre-corrected tile buffer if available, otherwise original;
+              // if the tile could not be loaded at all, use target-color fill
+              // (never leave the gray strip background showing through).
+              const tileBuf = tileCorrectedBuffers.get(`${ci}`) ?? rawBuf ?? await getFallbackTile(ci);
+              if (!tileBuf) continue;
               stripOps.push({ input: tileBuf, left: c2 * tilePx, top: (r2 - stripRowStart) * tilePx });
             }
           }
