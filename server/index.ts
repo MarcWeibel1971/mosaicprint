@@ -2787,6 +2787,33 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         const tmpDir = os.tmpdir();
         const stripTmpFiles: string[] = [];
         const stripHeights: number[] = [];
+        // Foto-Overlay vorbereiten: Foto einmal auf Ausgabegroesse skalieren und als
+        // tmp-JPEG ablegen (streaming, kein Vollbild-Buffer). Das eigentliche Blenden
+        // passiert pro Strip (s. unten), damit der RGBA-Overlay nur strip-gross ist
+        // (~95 MB bei 18840px statt ~1 GB fuer das Vollbild -> OOM-Schutz).
+        let overlayPhotoTmpPath: string | null = null;
+        if (userOverlay > 0) {
+          try {
+            const photoUrlFromDb = order.photo_url;
+            let rawPhotoBuf: Buffer | null = null;
+            if (photoUrlFromDb && photoUrlFromDb.startsWith('data:')) {
+              rawPhotoBuf = Buffer.from(photoUrlFromDb.split(',')[1], 'base64');
+            } else if (photoUrlFromDb && photoUrlFromDb.startsWith('http')) {
+              const resp = await fetch(photoUrlFromDb, { signal: AbortSignal.timeout(15000) });
+              if (resp.ok) rawPhotoBuf = Buffer.from(await resp.arrayBuffer());
+            }
+            if (rawPhotoBuf) {
+              overlayPhotoTmpPath = path.join(tmpDir, `mosaic-overlay-photo-${orderId}.jpg`);
+              await sharp(rawPhotoBuf, { limitInputPixels: false })
+                .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
+                .jpeg({ quality: 95, chromaSubsampling: '4:4:4' })
+                .toFile(overlayPhotoTmpPath);
+            }
+          } catch (overlayPrepErr) {
+            console.warn('[admin-render] Foto-Overlay Vorbereitung fehlgeschlagen (wird uebersprungen):', overlayPrepErr);
+            overlayPhotoTmpPath = null;
+          }
+        }
         // Fallback for tiles that could not be loaded at all: fill the cell with a
         // flat tile in its target color instead of leaving the gray (128) strip
         // background visible. Cache by quantized color to avoid repeated Sharp calls.
@@ -2826,11 +2853,25 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
 
           // Composite strip directly to JPEG (no intermediate raw buffer needed)
           const stripTmpPath = path.join(tmpDir, `mosaic-strip-${orderId}-${s}.jpg`);
+          // Foto-Overlay pro Strip: nur der Strip-Ausschnitt des skalierten Fotos
+          // wird als RGBA-PNG eingeblendet. Zwei WICHTIGE Sharp-Fallen:
+          // 1. .png() ist Pflicht – JPEG kann kein Alpha, Sharp rechnet den Kanal
+          //    sonst gegen Schwarz ein (Overlay wurde zum opaken Dunkel-Foto).
+          // 2. Verkettete .composite()-Aufrufe ERSETZEN die Op-Liste statt sie
+          //    zu erweitern – daher Overlay als letzten Op in EINEM Aufruf.
+          if (overlayPhotoTmpPath) {
+            const photoStripRgba = await sharp(overlayPhotoTmpPath, { limitInputPixels: false })
+              .extract({ left: 0, top: stripRowStart * tilePx, width: outW, height: stripH })
+              .ensureAlpha(userOverlay / 100)
+              .png()
+              .toBuffer();
+            stripOps.push({ input: photoStripRgba, blend: 'over' });
+          }
+          // 4:4:4-Chroma: kein Chroma-Subsampling in Zwischendateien (verhindert
+          // Farb-Verwaschen ueber die mehrstufigen Merge-Passes)
           await sharp({
             create: { width: outW, height: stripH, channels: 3, background: { r: 128, g: 128, b: 128 } },
             limitInputPixels: false,
-          // 4:4:4-Chroma: kein Chroma-Subsampling in Zwischendateien (verhindert
-          // Farb-Verwaschen ueber die mehrstufigen Merge-Passes)
           }).composite(stripOps).jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toFile(stripTmpPath);
           stripTmpFiles.push(stripTmpPath);
           stripHeights.push(stripH);
@@ -2885,40 +2926,11 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
         let baseBuf: Buffer = await fs.promises.readFile(assemblyTmpFiles[0]);
         try { fs.unlinkSync(assemblyTmpFiles[0]); } catch { /* ignore */ }
         console.log(`[admin-render] All ${stripCount} strips assembled`);
-        // Apply Foto-Overlay (userOverlay slider) if set – same as client renderMosaicClientSide
-        // MEMORY-SAFE: Use Sharp pipeline with opacity modifier instead of manual alpha buffer
-        // The photo_url is stored in the order DB record (thumbnail, up to 1200px on desktop)
-        if (userOverlay > 0) {
-          try {
-            const photoUrlFromDb = order.photo_url;
-            let rawPhotoBuf: Buffer | null = null;
-            if (photoUrlFromDb && photoUrlFromDb.startsWith('data:')) {
-              rawPhotoBuf = Buffer.from(photoUrlFromDb.split(',')[1], 'base64');
-            } else if (photoUrlFromDb && photoUrlFromDb.startsWith('http')) {
-              const resp = await fetch(photoUrlFromDb, { signal: AbortSignal.timeout(15000) });
-              if (resp.ok) rawPhotoBuf = Buffer.from(await resp.arrayBuffer());
-            }
-            if (rawPhotoBuf) {
-              // Resize photo to output dimensions and add alpha channel for opacity
-              const overlayOpacity = userOverlay / 100; // 0.0 – 1.0
-              const alpha = Math.round(overlayOpacity * 255);
-              // Build RGBA overlay: resize + set uniform alpha channel
-              const photoResizedRgba = await sharp(rawPhotoBuf, { limitInputPixels: false })
-                .resize(outW, outH, { fit: 'fill', kernel: 'lanczos3' })
-                .ensureAlpha(overlayOpacity) // sets alpha channel to overlayOpacity (0.0–1.0)
-                .toBuffer();
-              rawPhotoBuf = null; // free memory
-              // Composite RGBA overlay onto mosaic (already JPEG = opaque)
-              // Use Uint8Array cast to satisfy Sharp's NonSharedBuffer type constraint
-              baseBuf = await sharp(new Uint8Array(baseBuf), { limitInputPixels: false })
-                .composite([{ input: photoResizedRgba, blend: 'over' }])
-                .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
-                .toBuffer() as Buffer;
-              console.log(`[admin-render] Foto-Overlay applied (${userOverlay}%, alpha=${alpha})`);
-            }
-          } catch (overlayErr) {
-            console.warn(`[admin-render] Foto-Overlay failed (non-critical):`, overlayErr);
-          }
+        // Foto-Overlay wurde bereits pro Strip eingeblendet (s. Strip-Loop oben) –
+        // speicherschonend statt Vollbild-RGBA. Hier nur noch tmp-Overlay aufraeumen.
+        if (overlayPhotoTmpPath) {
+          if (userOverlay > 0) console.log(`[admin-render] Foto-Overlay applied per-strip (${userOverlay}%)`);
+          try { fs.unlinkSync(overlayPhotoTmpPath); } catch { /* ignore */ }
         }
         await setProgress(92, 'Bild wird auf R2 hochgeladen...');
         // Upload to R2
