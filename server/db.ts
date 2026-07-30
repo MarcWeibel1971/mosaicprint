@@ -410,7 +410,14 @@ export async function ensureSchema(): Promise<void> {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_event_participants_event_id ON event_participants (event_id)`);
 
-  console.log("[DB] Schema ensured (v12 with event participants)");
+  // ── Versionierte Migrationen (neue Schema-Änderungen laufen über server/migrations.ts) ──
+  const { runMigrations } = await import("./migrations.js");
+  const appliedMigrations = await runMigrations((sql, params) => pool.query(sql, params as unknown[] | undefined));
+  if (appliedMigrations.length > 0) {
+    console.log(`[DB] Migrations applied: ${appliedMigrations.join(', ')}`);
+  }
+
+  console.log("[DB] Schema ensured (v13 with schema_migrations)");
 }
 
 // ── Tile queries ──────────────────────────────────────────────────────────────
