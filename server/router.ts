@@ -7,6 +7,7 @@ import Stripe from "stripe";
 import { cronState } from "./cron-state.js";
 import { downloadAndUploadToR2, isR2Configured } from "./r2.js";
 import { rgbToLab as _rgbToLab } from "./colorUtils.js";
+import { resolveCheckoutPrice } from "./pricing.js";
 
 // ---- Constants ----
 const TILE_TARGET = 100_000;
@@ -2690,16 +2691,26 @@ export const appRouter = router({
     .mutation(async ({ input }) => {
       const stripeKey = process.env.STRIPE_SECRET_KEY;
       if (!stripeKey) return { url: null, error: "Stripe not configured" };
+      // SICHERHEIT: Preis wird serverseitig aus der kanonischen Preistabelle aufgelöst
+      // (server/pricing.ts). Der vom Client gesendete priceChf wird NICHT verwendet.
+      const resolved = resolveCheckoutPrice(input.formatLabel, input.materialLabel);
+      if (!resolved) {
+        console.warn(`[createCheckout] Unbekannte Preiskombination: formatLabel="${input.formatLabel}" materialLabel="${input.materialLabel}"`);
+        return { url: null, error: "Unknown format/material combination" };
+      }
+      if (Math.abs((input.priceChf ?? 0) - resolved.priceChf) > 0.01) {
+        console.warn(`[createCheckout] Client-Preis CHF ${input.priceChf} weicht vom Server-Preis CHF ${resolved.priceChf} ab – es gilt der Server-Preis.`);
+      }
       const stripe = new Stripe(stripeKey);
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
-        line_items: [{ price_data: { currency: "chf", product_data: { name: `MosaicPrint – ${input.formatLabel} auf ${input.materialLabel}` }, unit_amount: Math.round(input.priceChf * 100) }, quantity: 1 }],
+        line_items: [{ price_data: { currency: "chf", product_data: { name: resolved.productName }, unit_amount: Math.round(resolved.priceChf * 100) }, quantity: 1 }],
         mode: "payment",
         success_url: input.successUrl ?? `${process.env.BASE_URL ?? "http://localhost:3000"}/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: input.cancelUrl ?? `${process.env.BASE_URL ?? "http://localhost:3000"}/studio`,
         metadata: { formatLabel: input.formatLabel, materialLabel: input.materialLabel, cols: String(input.cols), rows: String(input.rows), tilePx: String(input.tilePx), overlayAlpha: String(input.overlayAlpha ?? 0.18), formatIdx: String(input.formatIdx ?? ""), materialIdx: String(input.materialIdx ?? "") },
       });
-      await db.createMosaicOrder({ stripeSessionId: session.id, formatLabel: input.formatLabel, materialLabel: input.materialLabel, priceChf: input.priceChf });
+      await db.createMosaicOrder({ stripeSessionId: session.id, formatLabel: input.formatLabel, materialLabel: input.materialLabel, priceChf: resolved.priceChf });
       return { url: session.url };
     }),
 

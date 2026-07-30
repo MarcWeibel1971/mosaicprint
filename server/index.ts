@@ -32,6 +32,7 @@ import * as db from "./db.js";
 import sharp from "sharp";
 import Stripe from "stripe";
 import { downloadAndUploadToR2, isR2Configured, uploadToR2 } from "./r2.js";
+import { getPrintolinoPrice } from "./pricing.js";
 
 // ── Performance: Server-side in-memory caches ─────────────────────────────────
 // 1. Tile-Lab-Index cache: avoids DB query on every request (26k rows)
@@ -2416,12 +2417,23 @@ app.post('/api/orders/printolino', express.json({ limit: '10mb' }), async (req, 
     if (!formatLabel || !materialLabel) {
       return res.status(400).json({ error: 'Missing format or material' });
     }
+    // SICHERHEIT: Preis wird serverseitig aus renderParams (cols x rows) + Material
+    // über die kanonische Preisformel berechnet (server/pricing.ts).
+    // Der vom Client gesendete priceChf wird NICHT übernommen.
+    const serverPrice = getPrintolinoPrice(Number(renderParams?.cols), Number(renderParams?.rows), String(materialLabel));
+    if (serverPrice === null) {
+      console.warn(`[orders] Unbekanntes Material oder ungültige Dimensionen: materialLabel="${materialLabel}" cols=${renderParams?.cols} rows=${renderParams?.rows}`);
+      return res.status(400).json({ error: 'Unknown material or invalid dimensions' });
+    }
+    if (priceChf !== undefined && Math.abs(Number(priceChf) - serverPrice) > 0.01) {
+      console.warn(`[orders] Client-Preis CHF ${priceChf} weicht vom Server-Preis CHF ${serverPrice} ab – es gilt der Server-Preis.`);
+    }
     const orderId = await db.createPrintolinoOrder({
       userId: userId ?? null,
       projectId: projectId ?? null,
       formatLabel,
       materialLabel,
-      priceChf: priceChf ?? 0,
+      priceChf: serverPrice,
       customerEmail: customerEmail ?? null,
       renderParams: renderParams ?? {},
       photoUrl: photoUrl ?? null,
