@@ -2684,7 +2684,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                 const tR = targetColors[tci] ?? 128;
                 const tG = targetColors[tci+1] ?? 128;
                 const tBv = targetColors[tci+2] ?? 128;
-                const [tL] = rgbToLabAdmin(tR, tG, tBv);
+                const [tL, tA, tBch] = rgbToLabAdmin(tR, tG, tBv);
                 const isShadowZone = tL < 40;
                 const shadowBoost = isShadowZone ? Math.max(0, (40-tL)/40) : 0;
                 const effectiveL_BLEND = Math.min(0.98, L_BLEND + shadowBoost * 0.50);
@@ -2697,7 +2697,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                   const avgR = stats.channels[0].mean;
                   const avgG = stats.channels[1].mean;
                   const avgB = stats.channels[2].mean;
-                  const [avgL] = rgbToLabAdmin(avgR, avgG, avgB);
+                  const [avgL, avgA, avgBch] = rgbToLabAdmin(avgR, avgG, avgB);
                   const rawLumScale = avgL > 1 ? tL / avgL : 1;
                   const isUserTile = tileId < 0;
                   // User tiles were already selected to match target color – only gentle nudge needed.
@@ -2710,8 +2710,23 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                   // (satBoost wie im Client: 0.90 + cBoost*0.15, geclamped auf 0.5-2.0).
                   // Note: tint() is NOT used – it desaturates tiles. Color shift is handled
                   // exclusively via soft-light composite overlay below.
+                  //
+                  // GRAUE-KACHELN-FIX: Zusaetzlich Sättigung Richtung Ziel-Chroma angleichen.
+                  // Graue Pool-Kacheln in farbigen Zonen (Haut, Haare) bekamen bisher nur
+                  // Luminanz-Korrektur -> blieben grau im Print, waehrend die Preview sie
+                  // per colorEnhance-Overlay (mix-blend: color) faerbt. tint() kommt nicht
+                  // in Frage (zerstoert Kachel-Textur, s. Commit-Historie), daher: per-Tile
+                  // satScale = Ziel-Chroma / Kachel-Chroma, sanft skaliert mit colorEnhanceVal
+                  // (0 bei Slider=0 -> Verhalten unveraendert).
+                  const tileChroma = Math.hypot(avgA, avgBch);
+                  const targetChroma = Math.hypot(tA, tBch);
+                  const rawSatScale = tileChroma > 2
+                    ? targetChroma / tileChroma
+                    : (targetChroma > 8 ? 1.5 : 1);  // graue Kachel in farbiger Zone: moderater Boost
+                  const satMatch = 1 + (Math.max(0.6, Math.min(1.8, rawSatScale)) - 1) * colorEnhanceVal;
+                  const finalSat = Math.max(0.5, Math.min(2.0, satBoost * satMatch));
                   let pipeline = sharp(jpegBuf, { limitInputPixels: false })
-                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)), saturation: Math.max(0.5, Math.min(2.0, satBoost)) });
+                    .modulate({ brightness: Math.max(0.5, Math.min(2.0, lumScale)), saturation: finalSat });
                   // Step 3: Soft-light overlay (face/edge boost) via composite
                   if (str > 0.01) {
                     const overlayBuf = await sharp({
@@ -2720,7 +2735,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
                     }).png().toBuffer();
                     pipeline = pipeline.composite([{ input: overlayBuf, blend: 'soft-light' }]) as typeof pipeline;
                   }
-                  const correctedBuf = await pipeline.jpeg({ quality: 92 }).toBuffer();
+                  const correctedBuf = await pipeline.jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toBuffer();
                   tileCorrectedBuffers.set(`${ci}`, correctedBuf);
                 } catch { /* skip – use original tile */ }
               })
@@ -2759,7 +2774,9 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
           await sharp({
             create: { width: outW, height: stripH, channels: 3, background: { r: 128, g: 128, b: 128 } },
             limitInputPixels: false,
-          }).composite(stripOps).jpeg({ quality: 92 }).toFile(stripTmpPath);
+          // 4:4:4-Chroma: kein Chroma-Subsampling in Zwischendateien (verhindert
+          // Farb-Verwaschen ueber die mehrstufigen Merge-Passes)
+          }).composite(stripOps).jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toFile(stripTmpPath);
           stripTmpFiles.push(stripTmpPath);
           stripHeights.push(stripH);
 
@@ -2798,7 +2815,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
             }).composite([
               { input: fileA, top: 0, left: 0, limitInputPixels: false },
               { input: fileB, top: heightA, left: 0, limitInputPixels: false },
-            ]).jpeg({ quality: 92, limitInputPixels: false } as any).toFile(mergedPath);
+            ]).jpeg({ quality: 92, chromaSubsampling: '4:4:4', limitInputPixels: false } as any).toFile(mergedPath);
             // Remove source files (free disk space)
             try { fs.unlinkSync(fileA); } catch { /* ignore */ }
             try { fs.unlinkSync(fileB); } catch { /* ignore */ }
@@ -2840,7 +2857,7 @@ app.post('/api/admin/orders/:id/render', express.json({ limit: '5mb' }), async (
               // Use Uint8Array cast to satisfy Sharp's NonSharedBuffer type constraint
               baseBuf = await sharp(new Uint8Array(baseBuf), { limitInputPixels: false })
                 .composite([{ input: photoResizedRgba, blend: 'over' }])
-                .jpeg({ quality: 92 })
+                .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
                 .toBuffer() as Buffer;
               console.log(`[admin-render] Foto-Overlay applied (${userOverlay}%, alpha=${alpha})`);
             }
