@@ -1562,9 +1562,19 @@ export default function Studio() {
           const h = mainCanvas.height;
           const mainCtx = mainCanvas.getContext('2d');
           if (mainCtx) {
-            const probe = mainCtx.getImageData(0, 0, 1, 1).data;
-            if (probe[3] === 0 && snap.data[3] !== 0) {
-              console.warn('[ClientHiRes] Main canvas was evicted, restoring from snapshot');
+            // Multi-point probe (port from PR #107): sample 5 points across the
+            // canvas — a single corner pixel can be legitimately transparent.
+            const probePoints = [
+              [0, 0], [Math.floor(w / 2), Math.floor(h / 2)], [w - 1, h - 1],
+              [Math.floor(w / 4), Math.floor(h / 4)], [Math.floor(3 * w / 4), Math.floor(3 * h / 4)],
+            ];
+            let allZero = true;
+            for (const [px, py] of probePoints) {
+              const p = mainCtx.getImageData(px, py, 1, 1).data;
+              if (p[0] !== 0 || p[1] !== 0 || p[2] !== 0 || p[3] !== 0) { allZero = false; break; }
+            }
+            if (allZero && snap.data[3] !== 0) {
+              console.warn('[ClientHiRes] Main canvas was evicted (all probe pixels zero), restoring from snapshot');
               // Reset canvas dimensions to force buffer re-allocation
               mainCanvas.width = w;
               mainCanvas.height = h;
@@ -5137,6 +5147,37 @@ export default function Studio() {
     }, 1500);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  // MOBILE: Periodic canvas health check — restore from snapshot if browser evicted pixels.
+  // Mobile browsers aggressively reclaim canvas memory under pressure (zoom, hi-res, pop-out).
+  // Runs every 2s while the mosaic is visible and restores if all sampled pixels are zero.
+  // (Ported from PR #107 — the one piece of that stale branch still missing on master.)
+  useEffect(() => {
+    if (!ready) return;
+    const isMob = window.innerWidth < 768 || /Mobi|Android/i.test(navigator.userAgent);
+    if (!isMob) return;
+    const interval = setInterval(() => {
+      const mainCanvas = canvasRef.current;
+      const snap = snapshotRef.current;
+      if (!mainCanvas || !snap || mainCanvas.width === 0) return;
+      const ctx = mainCanvas.getContext('2d');
+      if (!ctx) return;
+      try {
+        const w = mainCanvas.width, h = mainCanvas.height;
+        const probes = [[0, 0], [Math.floor(w / 2), Math.floor(h / 2)], [w - 1, h - 1]];
+        let allZero = true;
+        for (const [px, py] of probes) {
+          const p = ctx.getImageData(px, py, 1, 1).data;
+          if (p[0] !== 0 || p[1] !== 0 || p[2] !== 0 || p[3] !== 0) { allZero = false; break; }
+        }
+        if (allZero) {
+          console.warn('[CanvasHealth] Main canvas evicted, restoring from snapshot');
+          ctx.putImageData(snap, 0, 0);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
   }, [ready]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
