@@ -182,7 +182,7 @@ async function loadTileBuffer(id: number, size: number): Promise<Buffer | null> 
   } else if (hasExternalSource) {
     // External source (Pexels/Unsplash): prefer full-res source for sharp print
     // output, but fall back to 256px/128px versions if the source fetch fails.
-    candidates.push(tileUrls.sourceUrl, tileUrls.tile256Url, tileUrls.tile128Url);
+    candidates.push(tileUrls.sourceUrl, tileUrls.tile256Url ?? '', tileUrls.tile128Url);
   } else if (tileUrls.tile256Url) {
     // R2-only tile with 256px version: use it for better quality
     candidates.push(tileUrls.tile256Url, tileUrls.tile128Url, tileUrls.sourceUrl);

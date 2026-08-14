@@ -47,3 +47,9 @@ Für MosaicPrint werden ausschließlich die für das Kachel-Matching nötigen Zo
 
 [1]: https://ai.google.dev/gemini-api/docs/image-understanding "Google Gemini API – Image understanding, Objekt- und Segmenterkennung"
 [2]: https://ai.google.dev/gemini-api/terms "Google Gemini API – Additional Terms of Service"
+
+## Deployment-Validierung
+
+Der Commit `e65ee50` wurde in den Branch `master` übertragen. Unmittelbar während des Railway-Autodeploys lieferten zwei Aufrufe noch die vorherige Antwortform; ein weiterer Aufruf war transient mit HTTP 500 fehlgeschlagen. Nach Abschluss des Deployments lieferte die produktive API mit dem öffentlichen Referenzbild erfolgreich HTTP 200 und eine validierte `main_subject`-Zone mit normalisierten Koordinaten und einer Gewichtung zurück.
+
+Die Anwendung der Zone im Studio wurde zusätzlich durch TypeScript-Prüfung und Produktions-Build validiert. Die Zone beeinflusst ausschließlich die Kachel-Kandidatenreihenfolge an vorhandenen, detailreichen Konturen. Sie verändert weder Quellpixel, Farben, Transparenz noch den Print-Overlay-Pfad.
