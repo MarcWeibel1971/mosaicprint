@@ -1187,6 +1187,9 @@ app.post('/api/analyze-image-fal', express.json({ limit: '20mb' }), async (req, 
     "background": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.15, "preferCalm": true, "notes": "" },
     "other": { "pct": 0, "dominantColor": "hex", "tileComplexityMax": 0.30, "preferCalm": false, "notes": "" }
   },
+  "motifZones": [
+    { "label": "face|person|main_subject|important_object", "box": [0, 0, 1000, 1000], "importance": 0.0 }
+  ],
   "algoRecommendations": {
     "neighborPenalty": 400,
     "neighborRadius": 6,
@@ -1232,6 +1235,7 @@ CRITICAL – dynamicSettings must be tailored to THIS specific image. Guidelines
 Adjust values within ranges based on the specific image content – do NOT use generic defaults.
 For portraits: set face.pct to actual face area percentage, face.tileComplexityMax=0.18 (very smooth tiles for skin), hair.tileComplexityMax=0.55 (texture ok), background.tileComplexityMax=0.12 (very calm).
 For landscapes: face.pct=0, background.pct=60-80, set algoRecommendations.preferCalmGlobally=false.
+For motifZones: return at most 5 zones for visually dominant subjects only. box is [x1,y1,x2,y2] in image coordinates normalized to 0-1000. Use face for faces, person for a full human figure, main_subject for the primary motif and important_object only when it is crucial for recognition. Never return an invalid, empty, tiny, or full-image box. importance is 0.35-1.0 and represents how strongly recognizability depends on preserving detail in that zone.
 All region pct values must sum to 100. dominantColor must be a hex color like #f5c5a3.
 No explanation, only JSON.`;
 
@@ -1308,6 +1312,24 @@ No explanation, only JSON.`;
       other: { pct: 0, dominantColor: '#aaaaaa', tileComplexityMax: 0.30, preferCalm: false, notes: '' },
     };
 
+    // Gemini bounding boxes use a 0–1000 coordinate space. Validate aggressively
+    // because this data later influences only client-side candidate weighting.
+    const motifZones = (Array.isArray(parsed.motifZones) ? parsed.motifZones : [])
+      .slice(0, 5)
+      .map((zone: any) => {
+        const sourceBox = Array.isArray(zone?.box) ? zone.box : [];
+        if (sourceBox.length !== 4) return null;
+        const [x1, y1, x2, y2] = sourceBox.map((value: unknown) => Math.max(0, Math.min(1000, Math.round(Number(value)))));
+        const width = x2 - x1;
+        const height = y2 - y1;
+        const area = width * height;
+        if (!Number.isFinite(area) || width < 20 || height < 20 || area > 850_000) return null;
+        const label = String(zone?.label ?? 'main_subject').replace(/[^a-z_ -]/gi, '').slice(0, 80) || 'main_subject';
+        const importance = Math.max(0.35, Math.min(1, Number(zone?.importance) || 0.6));
+        return { label, box: [x1, y1, x2, y2], importance };
+      })
+      .filter(Boolean);
+
     // Extract algo recommendations (new)
     const algoRecommendations = parsed.algoRecommendations ?? {
       neighborPenalty: hasFace ? 420 : 280,
@@ -1342,6 +1364,7 @@ No explanation, only JSON.`;
     console.log(`[Gemini] Description: ${description}`);
     console.log(`[Gemini] Keywords: ${importKeywords.join(', ')}`);
     console.log(`[Gemini] Regions: face=${regions.face?.pct}% bg=${regions.background?.pct}% profile=${algoRecommendations.recommendedProfile}`);
+    console.log(`[Gemini] Motif zones: ${motifZones.length}`);
     console.log(`[Gemini] DynamicSettings: baseTiles=${dynamicSettings.baseTiles} tilePx=${dynamicSettings.tilePx} brightnessW=${dynamicSettings.brightnessWeight} labW=${dynamicSettings.labWeight} portrait=${dynamicSettings.portraitMode} reasoning=${dynamicSettings.reasoning}`);
 
     return res.json({
@@ -1352,6 +1375,7 @@ No explanation, only JSON.`;
       faceCount,
       attributes,
       regions,
+      motifZones,
       algoRecommendations,
       dynamicSettings,
       keywordSuggestions,

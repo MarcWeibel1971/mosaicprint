@@ -9,3 +9,6 @@
 - [x] Bug: Pop-Out-Kacheln unscharf — 512px immer laden (kein false-skip), Logging hinzugefügt
 - [x] Bug: 113'105 Bilder haben Status "pending" — quality_status wird jetzt im AI-Job gesetzt + fix-quality-status Endpunkt
 - [x] Bug: LHQ-Kacheln unscharf — loadTileBuffer fällt jetzt auf tile128_url zurück wenn kein besseres Bild verfügbar
+- [ ] LocateAnything über den vorhandenen Hugging-Face-Zugang prüfen und für eine sinnvolle Studio-Funktion integrieren.
+- [x] Einen strikt internen LocateAnything-Prototypen für visuelle Motivzonen im MosaicPrint-Studio erstellen (lokale Parser- und Maskenlogik; externe Modell-Demo derzeit blockiert).
+- [ ] Eine kommerziell zulässige Alternative für die produktive Motivzonen-Erkennung auswählen und integrieren.

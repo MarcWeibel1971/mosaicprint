@@ -2034,6 +2034,7 @@ export default function Studio() {
                 };
                 // Extract Gemini region analysis and algo recommendations
                 const geminiRegions = falResult.regions ?? null;
+                const geminiMotifZones = Array.isArray(falResult.motifZones) ? falResult.motifZones : [];
                 const geminiAlgo = falResult.algoRecommendations ?? null;
                 const geminiDynamic = falResult.dynamicSettings ?? null;
 
@@ -2041,6 +2042,13 @@ export default function Studio() {
                 if (geminiRegions) {
                   localStorage.setItem('mosaicprint_gemini_regions', JSON.stringify(geminiRegions));
                   console.log('[Studio] Gemini regions: face=' + (geminiRegions.face?.pct ?? 0) + '% bg=' + (geminiRegions.background?.pct ?? 0) + '%');
+                }
+                if (geminiMotifZones.length > 0) {
+                  localStorage.setItem('mosaicprint_gemini_motif_zones', JSON.stringify(geminiMotifZones));
+                  console.log('[Studio] Gemini motif zones: ' + geminiMotifZones.length);
+                } else {
+                  // Prevent zones from a previously uploaded image affecting the new mosaic.
+                  localStorage.removeItem('mosaicprint_gemini_motif_zones');
                 }
 
                 // ── Dynamic Settings: Gemini returns image-specific algo parameters ──
@@ -2128,6 +2136,7 @@ export default function Studio() {
                     description: falResult.description ?? '',
                     attributes: falResult.attributes ?? {},
                     regions: geminiRegions,
+                    motifZones: geminiMotifZones,
                     algoRecommendations: geminiAlgo,
                     dynamicSettings: geminiDynamic,
                     appliedSettings: JSON.parse(localStorage.getItem('mosaicprint_algo_settings') || '{}'),
@@ -2432,6 +2441,19 @@ export default function Studio() {
     // Load Gemini region analysis (set async after image upload)
     const geminiRegions: Record<string, { pct: number; dominantColor: string; tileComplexityMax: number; preferCalm: boolean; notes: string }> | null =
       (() => { try { return JSON.parse(localStorage.getItem('mosaicprint_gemini_regions') || 'null'); } catch { return null; } })();
+    const geminiMotifZones: Array<{ label: string; box: [number, number, number, number]; importance: number }> = (() => {
+      try {
+        const raw = JSON.parse(localStorage.getItem('mosaicprint_gemini_motif_zones') || '[]');
+        if (!Array.isArray(raw)) return [];
+        return raw.slice(0, 5).flatMap((zone: any) => {
+          if (!Array.isArray(zone?.box) || zone.box.length !== 4) return [];
+          const box = zone.box.map((value: unknown) => Math.max(0, Math.min(1000, Number(value)))) as [number, number, number, number];
+          const [x1, y1, x2, y2] = box;
+          if (!box.every(Number.isFinite) || x2 <= x1 || y2 <= y1) return [];
+          return [{ label: String(zone?.label ?? 'main_subject'), box, importance: Math.max(0.35, Math.min(1, Number(zone?.importance) || 0.6)) }];
+        });
+      } catch { return []; }
+    })();
     // Global tileComplexity threshold from Gemini (overrides hardcoded values if available)
     const geminiComplexityThreshold: number | null = savedSettings.tileComplexityThreshold ?? null;
     const BASE_TILES = savedSettings.baseTiles ?? 60;  // Mosaicer-style: fewer, larger tiles
@@ -2462,6 +2484,25 @@ export default function Studio() {
 
     const SSD_SIZE = 8; // Each tile & target region scaled to 8x8 for matching
     const TOTAL_TILES = COLS * ROWS;
+    // Motif zones refine candidate ranking only. They never alter pixels, colours,
+    // the selected theme, or the final print overlay.
+    const motifCellImportance = new Float32Array(TOTAL_TILES);
+    if (geminiMotifZones.length > 0) {
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const centerX = ((col + 0.5) / COLS) * 1000;
+          const centerY = ((row + 0.5) / ROWS) * 1000;
+          const ci = row * COLS + col;
+          for (const zone of geminiMotifZones) {
+            const [x1, y1, x2, y2] = zone.box;
+            if (centerX >= x1 && centerX <= x2 && centerY >= y1 && centerY <= y2) {
+              motifCellImportance[ci] = Math.max(motifCellImportance[ci], zone.importance);
+            }
+          }
+        }
+      }
+      console.log('[Studio] Motif-protection cells:', motifCellImportance.reduce((sum, value) => sum + (value > 0 ? 1 : 0), 0), 'of', TOTAL_TILES);
+    }
 
     // Step 1: Create full-resolution target at SSD_SIZE per cell
     // Target image scaled to (COLS * SSD_SIZE) x (ROWS * SSD_SIZE)
@@ -2699,7 +2740,8 @@ export default function Studio() {
       targetEdge = 0, targetBrightness = targetL / 100, targetSat = 0,
       targetQuadA: [number,number,number,number] = [targetA,targetA,targetA,targetA],
       targetQuadB: [number,number,number,number] = [targetB,targetB,targetB,targetB],
-      edgeQuadBoost = 1.0 // multiplier for W_QUAD on edge cells (>1 = prefer gradient tiles)
+      edgeQuadBoost = 1.0, // multiplier for W_QUAD on edge cells (>1 = prefer gradient tiles)
+      motifImportance = 0 // 0–1: preserve detail only inside an AI-recognised subject zone
     ): Array<{tileId: number; labDist: number}> => {
       if (!labIndex) return [];
       // Weighted distance in feature space
@@ -2832,6 +2874,11 @@ export default function Studio() {
              } else if (cellEdge > 0.70 && tileComplexity < 0.2) {
                // Very detailed target + calm tile = mild penalty (calm tiles lack detail for edges)
                dist += (0.2 - tileComplexity) * 80; // up to +16
+             }
+             // Inside an important motif, retain a minimum amount of texture on
+             // visible contours. Smooth skin and flat areas remain untouched.
+             if (motifImportance >= 0.35 && cellEdge >= 0.18 && tileComplexity < 0.22) {
+               dist += (0.22 - tileComplexity) * (120 + motifImportance * 240);
              }
            }
         } else if (IS_7D) {
@@ -2982,9 +3029,9 @@ export default function Studio() {
         // Scaled by edge strength: stronger edges get more boost
         const edgeStrength = targetEdge;
         const eqBoost = (IS_14D && targetEdge > EDGE_QUAD_THRESHOLD)
-          ? 4.0 + edgeStrength * 16.0  // 4-20× boost, proportional to edge strength
+          ? (4.0 + edgeStrength * 16.0) * (1 + motifCellImportance[ci] * 0.5)  // subject edges get at most 50% additional quadrant weight
           : 1.0;
-        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB, eqBoost);
+        const candidates = knnLAB(tL, tA, tB, targetEdge, targetBright, targetSat, tQuadA, tQuadB, eqBoost, motifCellImportance[ci]);
         cellCandidates.push(candidates);
         candidates.forEach(c => neededTileIds.add(c.tileId));
         if (ci % 500 === 0) {

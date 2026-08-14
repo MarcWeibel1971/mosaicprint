@@ -1,0 +1,21 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/bee.jpg"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Locate the bee. Return only its bounding box in the form <box>x1,y1,x2,y2</box>."
+        }
+      ]
+    }
+  ],
+  "max_tokens": 128,
+  "temperature": 0
+}
